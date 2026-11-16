@@ -138,8 +138,6 @@ function isDateAndHourBlockedByContract(
   for (const c of contracts) {
     if (!c || c.status === "cancelled" || c.status === "expired") continue;
 
-    // Contrato principal de Coanfitrião (allow_sublease = true) não bloqueia a sala,
-    // pois ele libera os horários na vitrine através do room.availability.
     if (c.contract_type === "monthly_exclusive" && c.allow_sublease === true) {
       continue;
     }
@@ -150,7 +148,6 @@ function isDateAndHourBlockedByContract(
     if (startIso && dateStr < startIso) continue;
     if (endIso && dateStr > endIso) continue;
 
-    // Sala 100% exclusiva sem sublocação bloqueia todos os horários
     if (c.contract_type === "monthly_exclusive" && !c.allow_sublease) {
       return true;
     }
@@ -165,7 +162,6 @@ function isDateAndHourBlockedByContract(
     }
     if (!sched || typeof sched !== "object") continue;
 
-    // 1. Verifica scheduleRules (múltiplos turnos independentes por dia da semana)
     if (Array.isArray(sched.scheduleRules) && sched.scheduleRules.length > 0) {
       const matchedRule = sched.scheduleRules.some((rule: any) => {
         if (Number(rule.dayOfWeek) !== dayOfWeek) return false;
@@ -177,7 +173,6 @@ function isDateAndHourBlockedByContract(
       continue;
     }
 
-    // 2. Verifica mapa day_hours
     if (sched.day_hours && typeof sched.day_hours === "object") {
       const dayArr = sched.day_hours[String(dayOfWeek)];
       if (Array.isArray(dayArr) && dayArr.length > 0) {
@@ -186,7 +181,6 @@ function isDateAndHourBlockedByContract(
       }
     }
 
-    // 3. Fallback legado: daysOfWeek + startHour / endHour
     const legacyDays = Array.isArray(sched.daysOfWeek)
       ? sched.daysOfWeek.map(Number)
       : [];
@@ -296,7 +290,6 @@ export function RoomDetail(props: RoomDetailProps) {
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
 
-  // Busca reservas + contratos ativos da sala (via API Admin + fallback direto)
   const fetchRoomBookings = useCallback(async () => {
     if (!roomData?.id) return;
     try {
@@ -572,9 +565,6 @@ export function RoomDetail(props: RoomDetailProps) {
     [roomCampaigns],
   );
 
-  // ====================================================================
-  // VERIFICA SE O HORÁRIO ESTÁ OCUPADO (RESERVA AVULSA OU CONTRATO FIXO)
-  // ====================================================================
   const isSlotBooked = useCallback(
     (slotKey: string) => {
       try {
@@ -592,7 +582,6 @@ export function RoomDetail(props: RoomDetailProps) {
         const slotHour = slotStartObj.getHours();
         const slotDow = slotStartObj.getDay();
 
-        // 1. Verifica bloqueio direto por Contrato Fixo na tabela room_contracts
         if (
           isDateAndHourBlockedByContract(
             dateStr,
@@ -604,7 +593,6 @@ export function RoomDetail(props: RoomDetailProps) {
           return true;
         }
 
-        // 2. Verifica reservas na tabela bookings
         return roomBookings.some((b: any) => {
           if (b.status === "cancelled" || b.status === "rejected") return false;
 
@@ -614,7 +602,6 @@ export function RoomDetail(props: RoomDetailProps) {
               String(b.booking_origin).startsWith("contract")),
           );
 
-          // Reservas de contratos NUNCA expiram pela regra de 6 minutos do checkout avulso
           if (
             !isFromContract &&
             (b.status === "pending_payment" || b.status === "pending") &&
@@ -761,7 +748,6 @@ export function RoomDetail(props: RoomDetailProps) {
       );
     }
 
-    // Garante que qualquer hora bloqueada por um Contrato Fixo nesta data também apareça na grade (marcada como "Ocupado")
     const slotSet = new Set<string>(baseSlots);
     for (let h = 8; h <= 21; h++) {
       if (
@@ -870,7 +856,6 @@ export function RoomDetail(props: RoomDetailProps) {
     };
   }, [targetRoomId, preselectedSlotStr, initialModality, supabase]);
 
-  // Escuta alterações em tempo real tanto em `bookings` quanto em `room_contracts`
   useEffect(() => {
     if (!roomData?.id) return;
 
@@ -2079,7 +2064,7 @@ export function RoomDetail(props: RoomDetailProps) {
                           isSelected
                             ? "bg-[#BF4B24] text-white border-[#BF4B24]"
                             : pricing.campaign
-                              ? "bg-emerald-50 text-emerald-900 border-emerald-300"
+                              ? "bg-slate-900 text-white border-slate-900 shadow-sm"
                               : "bg-white text-slate-700 border-stone-200 hover:border-stone-300"
                         }`}
                       >
@@ -2089,7 +2074,7 @@ export function RoomDetail(props: RoomDetailProps) {
                             className={`text-[9px] font-black px-1 rounded ${
                               isSelected
                                 ? "bg-black/20 text-white"
-                                : "bg-emerald-600 text-white"
+                                : "bg-white text-slate-900"
                             }`}
                           >
                             {pricing.campaign.badgeText}
@@ -2522,14 +2507,14 @@ export function RoomDetail(props: RoomDetailProps) {
                   </div>
 
                   {selectedDayCampaign ? (
-                    <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2">
+                    <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 flex items-center justify-between gap-2 shadow-md">
                       <div className="flex items-center gap-2">
-                        <Flame className="w-4 h-4 text-emerald-600 fill-emerald-600 shrink-0" />
+                        <Flame className="w-4 h-4 text-amber-400 fill-amber-400 shrink-0" />
                         <div>
-                          <span className="text-[11px] font-black text-emerald-950 block">
+                          <span className="text-[11px] font-black text-white block uppercase tracking-wide">
                             {selectedDayCampaign.campaignName}
                           </span>
-                          <span className="text-[10px] font-medium text-emerald-800 block">
+                          <span className="text-[10px] font-medium text-slate-300 block">
                             {selectedDayCampaign.eligibleHoursForDay.length > 0
                               ? `Horários em oferta hoje: ${selectedDayCampaign.eligibleHoursForDay
                                   .map((h) => `${String(h).padStart(2, "0")}h`)
@@ -2538,26 +2523,29 @@ export function RoomDetail(props: RoomDetailProps) {
                           </span>
                         </div>
                       </div>
-                      <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white text-[10px] font-black shrink-0">
+                      <span className="px-2 py-0.5 rounded-md bg-white text-slate-900 text-[10px] font-black shrink-0">
                         {selectedDayCampaign.badgeText} OFF
                       </span>
                     </div>
                   ) : (
                     roomCampaigns.length > 0 && (
-                      <div className="mb-3 px-3.5 py-2 rounded-xl bg-stone-100 border border-stone-200 text-[11px] font-medium text-stone-700 flex items-center gap-2">
-                        <Flame className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <div className="mb-3 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-950 text-[11px] font-medium text-white flex items-center gap-2 shadow-sm">
+                        <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                         <span>
-                          Toque nos <strong>dias em verde</strong> no calendário
-                          para ver horários com desconto!
+                          Toque nos{" "}
+                          <strong className="text-amber-400">
+                            dias em preto
+                          </strong>{" "}
+                          no calendário para ver horários com desconto!
                         </span>
                       </div>
                     )
                   )}
 
                   {preselectedSlotStr && selectedSlots.length > 0 && (
-                    <div className="mb-3 px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200/80 flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold text-emerald-800 flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <div className="mb-3 px-3 py-2 rounded-xl bg-orange-50 border border-orange-200/80 flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-bold text-[#BF4B24] flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-[#BF4B24] shrink-0" />
                         Horário das {normalizeSlotLabel(preselectedSlotStr)} já
                         selecionado para você
                       </span>
@@ -2659,9 +2647,9 @@ export function RoomDetail(props: RoomDetailProps) {
                               isPast ? "text-slate-300 cursor-not-allowed" : ""
                             } ${
                               isSelected
-                                ? "bg-slate-900 text-white font-bold"
+                                ? "bg-[#BF4B24] text-white font-bold shadow-md"
                                 : dayCampaign
-                                  ? "bg-emerald-50/90 text-emerald-950 border border-emerald-200 hover:bg-emerald-100/80"
+                                  ? "bg-slate-900 text-white border border-slate-950 hover:bg-slate-800 shadow-sm"
                                   : ""
                             } ${
                               !isSelected &&
@@ -2680,8 +2668,8 @@ export function RoomDetail(props: RoomDetailProps) {
                               <span
                                 className={`text-[8px] font-black leading-none mt-0.5 ${
                                   isSelected
-                                    ? "text-emerald-400"
-                                    : "text-emerald-700"
+                                    ? "text-white/90"
+                                    : "text-amber-400"
                                 }`}
                               >
                                 {dayCampaign.badgeText}
@@ -2689,7 +2677,7 @@ export function RoomDetail(props: RoomDetailProps) {
                             )}
 
                             {hasSelection && (
-                              <span className="absolute bottom-1 w-1.5 h-1.5 rounded-full bg-[#BF4B24]" />
+                              <span className="absolute bottom-1 w-1.5 h-1.5 rounded-full bg-white" />
                             )}
                           </button>
                         );
@@ -2697,9 +2685,10 @@ export function RoomDetail(props: RoomDetailProps) {
                     </div>
 
                     {roomCampaigns.length > 0 && (
-                      <div className="mt-2.5 pt-2 border-t border-stone-200/70 flex items-center justify-center gap-2 text-[10px] font-bold text-emerald-800">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                        Dias em verde possuem horários com desconto exclusivo
+                      <div className="mt-2.5 pt-2 border-t border-stone-200/70 flex items-center justify-center gap-2 text-[10px] font-bold text-slate-800">
+                        <span className="w-2 h-2 rounded-full bg-slate-900" />
+                        Dias em preto possuem horários com desconto (Black
+                        Friday)
                       </div>
                     )}
                   </div>
@@ -2754,12 +2743,12 @@ export function RoomDetail(props: RoomDetailProps) {
                                 : isSelected
                                   ? "border-[#BF4B24] bg-[#BF4B24]/10 ring-1 ring-[#BF4B24]"
                                   : hasPromo
-                                    ? "border-emerald-300 bg-emerald-50/60 hover:bg-emerald-50"
+                                    ? "border-slate-900 bg-slate-50 hover:bg-slate-100 shadow-sm"
                                     : "border-slate-200 bg-white hover:border-slate-300"
                             }`}
                           >
                             {hasPromo && (
-                              <span className="absolute -top-2 right-2 px-1.5 py-0.2 rounded-full bg-emerald-600 text-white text-[9px] font-black shadow-2xs">
+                              <span className="absolute -top-2 right-2 px-1.5 py-0.2 rounded-full bg-slate-900 text-white text-[9px] font-black shadow-2xs border border-slate-700">
                                 {pricing.campaign?.badgeText} OFF
                               </span>
                             )}
@@ -2788,7 +2777,7 @@ export function RoomDetail(props: RoomDetailProps) {
                                     .toFixed(2)
                                     .replace(".", ",")}
                                 </span>
-                                <span className="text-[10px] font-black text-emerald-700">
+                                <span className="text-[10px] font-black text-slate-900">
                                   R${" "}
                                   {pricing.finalPrice
                                     .toFixed(2)
@@ -2819,12 +2808,15 @@ export function RoomDetail(props: RoomDetailProps) {
                     {selectedSlots.length > 0 && (
                       <div className="space-y-1.5 mb-3">
                         {totalCampaignDiscountBRL > 0 && (
-                          <div className="flex items-center justify-between text-xs bg-emerald-50 text-emerald-800 px-3 py-1.5 rounded-lg border border-emerald-200/80 font-bold">
-                            <span>
-                              Tarifa promocional aplicada (
-                              {matchedAutoCampaign?.campaignName || "Campanha"})
+                          <div className="flex items-center justify-between text-xs bg-slate-900 text-white px-3 py-1.5 rounded-lg border border-slate-950 font-bold shadow-sm">
+                            <span className="flex items-center gap-1.5">
+                              <Flame className="w-3.5 h-3.5 text-amber-400" />
+                              Desconto aplicado (
+                              {matchedAutoCampaign?.campaignName ||
+                                "Black Friday"}
+                              )
                             </span>
-                            <span>
+                            <span className="text-amber-400">
                               - R${" "}
                               {totalCampaignDiscountBRL
                                 .toFixed(2)
@@ -3200,7 +3192,8 @@ export function RoomDetail(props: RoomDetailProps) {
             )}
           </div>
           {activeTab === "hora" && totalCampaignDiscountBRL > 0 ? (
-            <span className="text-[11px] font-bold text-emerald-700 block">
+            <span className="text-[11px] font-bold text-slate-900 block flex items-center gap-1 mt-0.5">
+              <Flame className="w-3 h-3 text-[#BF4B24]" />
               Economia de R${" "}
               {totalCampaignDiscountBRL.toFixed(2).replace(".", ",")} aplicada
             </span>
