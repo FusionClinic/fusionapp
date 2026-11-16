@@ -148,11 +148,54 @@ export default function AdminDashboardPage() {
     setIsMobileMenuOpen(false);
   };
 
-  const handleNotificationNavigateTab = (tabName: string) => {
+  const handleNotificationNavigateTab = (
+    tabName: string,
+    metadata?: Record<string, any>,
+  ) => {
+    if (
+      tabName === "especialistas" &&
+      metadata?.user_id &&
+      metadata?.user_name
+    ) {
+      try {
+        sessionStorage.setItem(
+          "fusion_admin_selected_specialist_id",
+          metadata.user_id,
+        );
+        sessionStorage.setItem(
+          "fusion_admin_selected_specialist_name",
+          metadata.user_name,
+        );
+      } catch {}
+    }
     if (menuItems.some((m) => m.id === tabName)) {
       setActiveTab(tabName);
     }
   };
+
+  // Oculta automaticamente o botão antigo de "Notificações" que ficava solto dentro do Centro de Comando
+  useEffect(() => {
+    if (activeTab !== "dashboard") return;
+    const hideDuplicateOverviewNotifBtn = () => {
+      const container = document.getElementById("admin-main-scroll-area");
+      if (!container) return;
+      const buttons = container.querySelectorAll("button");
+      buttons.forEach((btn) => {
+        const txt = (btn.textContent || "").trim();
+        if (txt.startsWith("Notificações")) {
+          (btn as HTMLElement).style.display = "none";
+        }
+      });
+    };
+
+    hideDuplicateOverviewNotifBtn();
+    const observer = new MutationObserver(hideDuplicateOverviewNotifBtn);
+    const container = document.getElementById("admin-main-scroll-area");
+    if (container) {
+      observer.observe(container, { childList: true, subtree: true });
+    }
+    return () => observer.disconnect();
+  }, [activeTab]);
 
   // ==========================================
   // MOTOR DE LOGOUT BLINDADO
@@ -342,8 +385,8 @@ export default function AdminDashboardPage() {
             </h2>
           </div>
 
-          {/* SINO DE NOTIFICAÇÕES FIXO AO LADO DO EMAIL DO ADMIN */}
-          <div className="flex items-center gap-3 shrink-0">
+          {/* CENTRAL DE NOTIFICAÇÕES FIXA AO LADO DO E-MAIL DO ADMIN */}
+          <div className="flex items-center gap-3.5 shrink-0">
             <AdminNotificationsBell
               onNavigateTab={handleNotificationNavigateTab}
             />
@@ -360,7 +403,10 @@ export default function AdminDashboardPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto relative bg-slate-50 pb-20 lg:pb-0">
+        <div
+          id="admin-main-scroll-area"
+          className="flex-1 overflow-y-auto relative bg-slate-50 pb-20 lg:pb-0"
+        >
           {activeTab === "dashboard" && <AdminOverviewTab />}
           {activeTab === "ia-agent" && <AdminAiAgentTab />}
           {activeTab === "especialistas" && <AdminSpecialistsTab />}

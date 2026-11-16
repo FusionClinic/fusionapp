@@ -15,6 +15,13 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Bell,
   CalendarCheck,
   CalendarX,
@@ -30,6 +37,12 @@ import {
   CheckCircle2,
   Loader2,
   ChevronRight,
+  User,
+  Mail,
+  Phone,
+  FileText,
+  Clock,
+  ExternalLink,
 } from "lucide-react";
 import { formatDistanceToNow, parseISO, format } from "date-fns";
 import { ptBR } from "date-fns/locale";
@@ -53,11 +66,17 @@ export interface AdminNotificationItem {
     user_id?: string;
     room_id?: string;
     user_name?: string;
+    user_email?: string;
+    user_phone?: string;
+    user_cpf?: string;
+    user_specialty?: string;
     room_name?: string;
     host_name?: string;
     date?: string;
     first_hour?: string;
     slots_count?: number;
+    amount_brl?: number;
+    status?: string;
     target_tab?: string;
     [key: string]: any;
   };
@@ -69,12 +88,30 @@ export interface AdminNotificationItem {
 type FilterCategory =
   "all" | "unread" | "bookings" | "cancellations" | "users" | "rooms";
 
+const LOCAL_READ_KEY = "fusion_admin_notif_read_ids_v1";
+const LOCAL_CLEARED_KEY = "fusion_admin_notif_cleared_ids_v1";
+
+function getLocalIdSet(key: string): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function addLocalIds(key: string, ids: string[]) {
+  if (typeof window === "undefined" || ids.length === 0) return;
+  try {
+    const current = getLocalIdSet(key);
+    ids.forEach((id) => current.add(String(id)));
+    localStorage.setItem(key, JSON.stringify(Array.from(current).slice(-600)));
+  } catch {}
+}
+
 interface AdminNotificationsBellProps {
-  /**
-   * Callback opcional para navegar automaticamente para a aba do painel admin
-   * quando o administrador clicar em uma notificação.
-   * Ex: (tab, metadata) => setActiveTab(tab)
-   */
   onNavigateTab?: (tabName: string, metadata?: Record<string, any>) => void;
 }
 
@@ -92,13 +129,14 @@ export function AdminNotificationsBell({
   const [activeFilter, setActiveFilter] = useState<FilterCategory>("all");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [hasNewPulse, setHasNewPulse] = useState(false);
+  const [selectedDetailItem, setSelectedDetailItem] =
+    useState<AdminNotificationItem | null>(null);
 
   const soundEnabledRef = useRef(soundEnabled);
   useEffect(() => {
     soundEnabledRef.current = soundEnabled;
   }, [soundEnabled]);
 
-  // Sintetizador Web Audio API (gera um alerta sonoro suave e executivo sem depender de arquivos .mp3)
   const playNotificationChime = useCallback(() => {
     if (!soundEnabledRef.current || typeof window === "undefined") return;
     try {
@@ -116,7 +154,6 @@ export function AdminNotificationsBell({
       osc1.type = "sine";
       osc2.type = "triangle";
 
-      // Acorde curto ascendente (Lá5 -> Mi6)
       osc1.frequency.setValueAtTime(880, now);
       osc1.frequency.exponentialRampToValueAtTime(1318.5, now + 0.14);
 
@@ -135,91 +172,76 @@ export function AdminNotificationsBell({
       osc2.start(now);
       osc1.stop(now + 0.4);
       osc2.stop(now + 0.4);
-    } catch {
-      // Ignora bloqueio de autoplay do navegador caso ainda não haja interação
-    }
+    } catch {}
   }, []);
 
-  const fetchNotifications = useCallback(async () => {
-    setLoading(true);
+  const fetchNotifications = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("admin_notifications")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(80);
+      const res = await fetch(`/api/admin/notifications?_t=${Date.now()}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("Falha ao buscar notificações");
+      const json = await res.json();
+      const rawList: AdminNotificationItem[] = Array.isArray(json.notifications)
+        ? json.notifications
+        : [];
 
-      if (!error && data) {
-        setNotifications(data as AdminNotificationItem[]);
-      }
+      const localRead = getLocalIdSet(LOCAL_READ_KEY);
+      const localCleared = getLocalIdSet(LOCAL_CLEARED_KEY);
+
+      const processed = rawList
+        .filter((item) => !localCleared.has(String(item.id)))
+        .map((item) => ({
+          ...item,
+          is_read: Boolean(item.is_read) || localRead.has(String(item.id)),
+        }));
+
+      setNotifications(processed);
     } catch (err) {
-      console.error("Erro ao buscar notificações do admin:", err);
+      console.error("Erro ao carregar notificações do admin:", err);
     } finally {
       setLoading(false);
     }
-  }, [supabase]);
+  }, []);
 
   useEffect(() => {
-    fetchNotifications();
+    fetchNotifications(true);
 
-    // Assinatura em Tempo Real (WebSocket Supabase Realtime)
     const channel = supabase
-      .channel("admin-realtime-notifications-center")
+      .channel("admin-unified-radar-realtime")
       .on(
         "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "admin_notifications",
-        },
-        (payload) => {
-          const newNotif = payload.new as AdminNotificationItem;
-          setNotifications((prev) => {
-            if (prev.some((n) => n.id === newNotif.id)) return prev;
-            return [newNotif, ...prev].slice(0, 100);
-          });
-
+        { event: "INSERT", schema: "public", table: "admin_notifications" },
+        () => {
+          fetchNotifications(false);
           setHasNewPulse(true);
           setTimeout(() => setHasNewPulse(false), 4000);
-
           playNotificationChime();
-
-          toast({
-            title: newNotif.title,
-            description: newNotif.message,
-          });
         },
       )
       .on(
         "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "admin_notifications",
-        },
-        (payload) => {
-          const updatedNotif = payload.new as AdminNotificationItem;
-          setNotifications((prev) =>
-            prev.map((item) =>
-              item.id === updatedNotif.id ? updatedNotif : item,
-            ),
-          );
+        { event: "INSERT", schema: "public", table: "bookings" },
+        () => {
+          fetchNotifications(false);
+          setHasNewPulse(true);
+          setTimeout(() => setHasNewPulse(false), 4000);
+          playNotificationChime();
         },
       )
       .on(
         "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "admin_notifications",
+        { event: "INSERT", schema: "public", table: "profiles" },
+        () => {
+          fetchNotifications(false);
         },
-        (payload) => {
-          const deletedId = (payload.old as any)?.id;
-          if (deletedId) {
-            setNotifications((prev) =>
-              prev.filter((item) => item.id !== deletedId),
-            );
-          }
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "rooms" },
+        () => {
+          fetchNotifications(false);
         },
       )
       .subscribe();
@@ -227,7 +249,14 @@ export function AdminNotificationsBell({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase, fetchNotifications, playNotificationChime, toast]);
+  }, [supabase, fetchNotifications, playNotificationChime]);
+
+  // Recarrega sempre que o admin abrir a gaveta do sino
+  useEffect(() => {
+    if (isOpen) {
+      fetchNotifications(false);
+    }
+  }, [isOpen, fetchNotifications]);
 
   const unreadCount = useMemo(
     () => notifications.filter((n) => !n.is_read).length,
@@ -276,6 +305,7 @@ export function AdminNotificationsBell({
 
   const handleMarkAsRead = async (id: string) => {
     const nowIso = new Date().toISOString();
+    addLocalIds(LOCAL_READ_KEY, [id]);
     setNotifications((prev) =>
       prev.map((n) =>
         n.id === id ? { ...n, is_read: true, read_at: nowIso } : n,
@@ -295,6 +325,7 @@ export function AdminNotificationsBell({
     if (unreadIds.length === 0) return;
 
     const nowIso = new Date().toISOString();
+    addLocalIds(LOCAL_READ_KEY, unreadIds);
     setNotifications((prev) =>
       prev.map((n) => ({ ...n, is_read: true, read_at: nowIso })),
     );
@@ -307,49 +338,69 @@ export function AdminNotificationsBell({
       });
       toast({
         title: "Tudo em dia!",
-        description: "Todas as notificações foram marcadas como lidas.",
+        description: `${unreadIds.length} notificações foram marcadas como lidas.`,
       });
     } catch {
       toast({
         variant: "destructive",
-        title: "Erro ao atualizar",
+        title: "Erro ao sincronizar no servidor",
       });
     }
   };
 
-  const handleClearRead = async () => {
-    const readCount = notifications.filter((n) => n.is_read).length;
-    if (readCount === 0) return;
-
-    setNotifications((prev) => prev.filter((n) => !n.is_read));
+  const handleDeleteOne = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    addLocalIds(LOCAL_CLEARED_KEY, [id]);
+    setNotifications((prev) => prev.filter((n) => n.id !== id));
     try {
       await fetch("/api/admin/notifications", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "clear_read" }),
+        body: JSON.stringify({ action: "delete_one", ids: [id] }),
+      });
+    } catch {}
+  };
+
+  const handleClearRead = async () => {
+    const readIds = notifications.filter((n) => n.is_read).map((n) => n.id);
+    const targetIds =
+      readIds.length > 0 ? readIds : notifications.map((n) => n.id);
+
+    if (targetIds.length === 0) return;
+
+    addLocalIds(LOCAL_CLEARED_KEY, targetIds);
+    if (readIds.length > 0) {
+      setNotifications((prev) => prev.filter((n) => !n.is_read));
+    } else {
+      setNotifications([]);
+    }
+
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: readIds.length > 0 ? "clear_read" : "clear_all",
+          ids: targetIds,
+        }),
       });
       toast({
-        title: "Histórico limpo",
-        description: "As notificações já lidas foram removidas.",
+        title: "Notificações removidas",
+        description: `${targetIds.length} registro(s) limpo(s) do painel.`,
       });
     } catch {
       toast({
         variant: "destructive",
-        title: "Erro ao limpar",
+        title: "Erro ao limpar histórico",
       });
     }
   };
 
   const handleNotificationClick = async (item: AdminNotificationItem) => {
     if (!item.is_read) {
-      await handleMarkAsRead(item.id);
+      handleMarkAsRead(item.id);
     }
-
-    const targetTab = item.metadata?.target_tab;
-    if (targetTab && onNavigateTab) {
-      onNavigateTab(targetTab, item.metadata);
-      setIsOpen(false);
-    }
+    setSelectedDetailItem(item);
   };
 
   const getEventVisuals = (eventType: string) => {
@@ -414,262 +465,424 @@ export function AdminNotificationsBell({
   };
 
   return (
-    <Sheet open={isOpen} onOpenChange={setIsOpen}>
-      <SheetTrigger asChild>
-        <button
-          type="button"
-          title="Central de Notificações em Tempo Real"
-          className={`relative inline-flex items-center justify-center w-10 h-10 rounded-xl border transition-all cursor-pointer ${
-            unreadCount > 0
-              ? "bg-orange-50/80 border-orange-200 text-[#BF4B24] hover:bg-orange-100/70"
-              : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900"
-          } ${hasNewPulse ? "ring-4 ring-[#BF4B24]/25 scale-105" : ""}`}
-        >
-          <Bell
-            className={`w-5 h-5 transition-transform ${
-              hasNewPulse ? "animate-bounce" : ""
-            }`}
-          />
-
-          {unreadCount > 0 && (
-            <span className="absolute -top-1.5 -right-1.5 flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-[#BF4B24] text-white text-[10px] font-black shadow-sm tabular-nums">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-[#BF4B24] opacity-60 animate-ping" />
-              <span className="relative">
+    <>
+      <Sheet open={isOpen} onOpenChange={setIsOpen}>
+        <SheetTrigger asChild>
+          <button
+            type="button"
+            title="Radar da Plataforma — Notificações"
+            className={`relative inline-flex items-center gap-2 h-10 px-3 rounded-xl border transition-all cursor-pointer ${
+              unreadCount > 0
+                ? "bg-orange-50/90 border-orange-200 text-[#BF4B24] hover:bg-orange-100/80"
+                : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+            } ${hasNewPulse ? "ring-4 ring-[#BF4B24]/25 scale-105" : ""}`}
+          >
+            <Bell
+              className={`w-4 h-4 transition-transform ${
+                hasNewPulse ? "animate-bounce" : ""
+              }`}
+            />
+            <span className="hidden sm:inline text-xs font-bold">
+              Notificações
+            </span>
+            {unreadCount > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 rounded-full bg-[#BF4B24] text-white text-[10px] font-black tabular-nums">
                 {unreadCount > 99 ? "99+" : unreadCount}
               </span>
-            </span>
-          )}
-        </button>
-      </SheetTrigger>
+            )}
+          </button>
+        </SheetTrigger>
 
-      <SheetContent className="w-full sm:max-w-md md:max-w-lg p-0 flex flex-col bg-[#FAF7F4] border-l border-slate-200">
-        {/* CABEÇALHO DA CENTRAL DE NOTIFICAÇÕES */}
-        <div className="bg-white px-6 pt-6 pb-4 border-b border-slate-200/90">
-          <SheetHeader className="space-y-1 text-left">
-            <div className="flex items-center justify-between gap-2 pr-6">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-[#BF4B24]/10 text-[#BF4B24] flex items-center justify-center">
-                  <Bell className="w-4 h-4" />
-                </div>
-                <div>
-                  <SheetTitle className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
-                    Radar da Plataforma
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                      Ao Vivo
-                    </span>
-                  </SheetTitle>
-                  <SheetDescription className="text-xs text-slate-500">
-                    Reservas, cancelamentos, cadastros e salas em tempo real.
-                  </SheetDescription>
+        <SheetContent className="w-full sm:max-w-md md:max-w-lg p-0 flex flex-col bg-[#FAF7F4] border-l border-slate-200 z-[9999]">
+          <div className="bg-white px-6 pt-6 pb-4 border-b border-slate-200/90">
+            <SheetHeader className="space-y-1 text-left">
+              <div className="flex items-center justify-between gap-2 pr-6">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-[#BF4B24]/10 text-[#BF4B24] flex items-center justify-center">
+                    <Bell className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <SheetTitle className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+                      Radar da Plataforma
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                        Ao Vivo
+                      </span>
+                    </SheetTitle>
+                    <SheetDescription className="text-xs text-slate-500">
+                      Clique em qualquer notificação para abrir o Raio-X
+                      completo.
+                    </SheetDescription>
+                  </div>
                 </div>
               </div>
-            </div>
-          </SheetHeader>
+            </SheetHeader>
 
-          {/* BARRA DE AÇÕES RÁPIDAS */}
-          <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-slate-100">
-            <div className="flex items-center gap-1.5">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleMarkAllAsRead}
-                disabled={unreadCount === 0}
-                className="h-8 text-[11px] font-bold border-slate-200 text-slate-700 rounded-lg"
-              >
-                <CheckCheck className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
-                Ler todas ({unreadCount})
-              </Button>
+            <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-slate-100">
+              <div className="flex items-center gap-1.5">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleMarkAllAsRead}
+                  disabled={unreadCount === 0}
+                  className="h-8 text-[11px] font-bold border-slate-200 text-slate-700 rounded-lg cursor-pointer"
+                >
+                  <CheckCheck className="w-3.5 h-3.5 mr-1.5 text-emerald-600" />
+                  Ler todas ({unreadCount})
+                </Button>
 
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={handleClearRead}
-                disabled={notifications.length - unreadCount === 0}
-                className="h-8 text-[11px] font-semibold text-slate-500 hover:text-red-600 rounded-lg"
-              >
-                <Trash2 className="w-3.5 h-3.5 mr-1" />
-                Limpar lidas
-              </Button>
-            </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearRead}
+                  disabled={notifications.length === 0}
+                  className="h-8 text-[11px] font-semibold text-slate-500 hover:text-red-600 rounded-lg cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 mr-1" />
+                  {notifications.length - unreadCount > 0
+                    ? `Limpar lidas (${notifications.length - unreadCount})`
+                    : "Limpar tudo"}
+                </Button>
+              </div>
 
-            <button
-              type="button"
-              onClick={() => setSoundEnabled((prev) => !prev)}
-              title={
-                soundEnabled
-                  ? "Som de alerta ativado (clique para silenciar)"
-                  : "Som silenciado (clique para ativar)"
-              }
-              className={`h-8 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                soundEnabled
-                  ? "bg-slate-900 text-white border-slate-900"
-                  : "bg-slate-100 text-slate-500 border-slate-200"
-              }`}
-            >
-              {soundEnabled ? (
-                <>
-                  <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-                  Som On
-                </>
-              ) : (
-                <>
-                  <VolumeX className="w-3.5 h-3.5" />
-                  Mudo
-                </>
-              )}
-            </button>
-          </div>
-
-          {/* ABAS DE FILTRO POR EVENTO */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar mt-3 pt-1">
-            {[
-              { id: "all", label: `Todas (${countsByCategory.all})` },
-              {
-                id: "unread",
-                label: `Não lidas (${countsByCategory.unread})`,
-              },
-              {
-                id: "bookings",
-                label: `Reservas (${countsByCategory.bookings})`,
-              },
-              {
-                id: "cancellations",
-                label: `Cancelamentos (${countsByCategory.cancellations})`,
-              },
-              {
-                id: "users",
-                label: `Cadastros (${countsByCategory.users})`,
-              },
-              {
-                id: "rooms",
-                label: `Salas (${countsByCategory.rooms})`,
-              },
-            ].map((tab) => (
               <button
-                key={tab.id}
                 type="button"
-                onClick={() => setActiveFilter(tab.id as FilterCategory)}
-                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all cursor-pointer ${
-                  activeFilter === tab.id
-                    ? "bg-[#BF4B24] text-white shadow-2xs"
-                    : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
+                onClick={() => setSoundEnabled((prev) => !prev)}
+                className={`h-8 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  soundEnabled
+                    ? "bg-slate-900 text-white border-slate-900"
+                    : "bg-slate-100 text-slate-500 border-slate-200"
                 }`}
               >
-                {tab.label}
+                {soundEnabled ? (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+                    Som On
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5" />
+                    Mudo
+                  </>
+                )}
               </button>
-            ))}
-          </div>
-        </div>
-
-        {/* LISTA DE NOTIFICAÇÕES */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-          {loading ? (
-            <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
-              <Loader2 className="w-7 h-7 animate-spin text-[#BF4B24]" />
-              <p className="text-xs font-medium">
-                Carregando histórico de eventos...
-              </p>
             </div>
-          ) : filteredNotifications.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-64 text-center px-6">
-              <div className="w-12 h-12 rounded-2xl bg-slate-200/70 text-slate-400 flex items-center justify-center mb-3">
-                <Bell className="w-6 h-6" />
-              </div>
-              <p className="text-sm font-bold text-slate-700">
-                Nenhuma notificação neste filtro
-              </p>
-              <p className="text-xs text-slate-500 mt-1">
-                Assim que um profissional agendar, cancelar ou se cadastrar, ou
-                um anfitrião publicar uma sala, você verá aqui em tempo real.
-              </p>
-            </div>
-          ) : (
-            filteredNotifications.map((item) => {
-              const visual = getEventVisuals(item.event_type);
-              const IconComponent = visual.icon;
 
-              let relativeTime = "";
-              let exactTime = "";
-              try {
-                const parsed = parseISO(item.created_at);
-                relativeTime = formatDistanceToNow(parsed, {
-                  addSuffix: true,
-                  locale: ptBR,
-                });
-                exactTime = format(parsed, "dd/MM/yyyy 'às' HH:mm", {
-                  locale: ptBR,
-                });
-              } catch {
-                relativeTime = "recentemente";
-              }
-
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => handleNotificationClick(item)}
-                  className={`group relative rounded-2xl border p-4 transition-all cursor-pointer ${
-                    !item.is_read
-                      ? "bg-white border-orange-200/90 shadow-xs hover:border-[#BF4B24]"
-                      : "bg-white/70 border-slate-200/70 opacity-80 hover:opacity-100 hover:bg-white"
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar mt-3 pt-1">
+              {[
+                { id: "all", label: `Todas (${countsByCategory.all})` },
+                {
+                  id: "unread",
+                  label: `Não lidas (${countsByCategory.unread})`,
+                },
+                {
+                  id: "bookings",
+                  label: `Reservas (${countsByCategory.bookings})`,
+                },
+                {
+                  id: "cancellations",
+                  label: `Cancelamentos (${countsByCategory.cancellations})`,
+                },
+                {
+                  id: "users",
+                  label: `Cadastros (${countsByCategory.users})`,
+                },
+                {
+                  id: "rooms",
+                  label: `Salas (${countsByCategory.rooms})`,
+                },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveFilter(tab.id as FilterCategory)}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold whitespace-nowrap transition-all cursor-pointer ${
+                    activeFilter === tab.id
+                      ? "bg-[#BF4B24] text-white shadow-2xs"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
                   }`}
                 >
-                  {/* Indicador de Não Lida */}
-                  {!item.is_read && (
-                    <span
-                      title="Não lida"
-                      className="absolute top-4 right-4 w-2.5 h-2.5 rounded-full bg-[#BF4B24] ring-4 ring-orange-100"
-                    />
-                  )}
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
-                  <div className="flex items-start gap-3.5">
-                    <div
-                      className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${visual.bgIcon}`}
-                    >
-                      <IconComponent className="w-5 h-5" />
+          <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
+            {loading ? (
+              <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
+                <Loader2 className="w-7 h-7 animate-spin text-[#BF4B24]" />
+                <p className="text-xs font-medium">
+                  Carregando histórico de eventos...
+                </p>
+              </div>
+            ) : filteredNotifications.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-64 text-center px-6">
+                <div className="w-12 h-12 rounded-2xl bg-slate-200/70 text-slate-400 flex items-center justify-center mb-3">
+                  <Bell className="w-6 h-6" />
+                </div>
+                <p className="text-sm font-bold text-slate-700">
+                  Nenhuma notificação neste filtro
+                </p>
+                <p className="text-xs text-slate-500 mt-1">
+                  Assim que um profissional agendar, cancelar ou se cadastrar,
+                  ou um anfitrião publicar uma sala, você verá aqui em tempo
+                  real.
+                </p>
+              </div>
+            ) : (
+              filteredNotifications.map((item) => {
+                const visual = getEventVisuals(item.event_type);
+                const IconComponent = visual.icon;
+
+                let relativeTime = "";
+                let exactTime = "";
+                try {
+                  const parsed = parseISO(item.created_at);
+                  relativeTime = formatDistanceToNow(parsed, {
+                    addSuffix: true,
+                    locale: ptBR,
+                  });
+                  exactTime = format(parsed, "dd/MM/yyyy 'às' HH:mm", {
+                    locale: ptBR,
+                  });
+                } catch {
+                  relativeTime = "recentemente";
+                }
+
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => handleNotificationClick(item)}
+                    className={`group relative rounded-2xl border p-4 transition-all cursor-pointer ${
+                      !item.is_read
+                        ? "bg-white border-orange-200/90 shadow-xs hover:border-[#BF4B24]"
+                        : "bg-white/75 border-slate-200/70 opacity-80 hover:opacity-100 hover:bg-white"
+                    }`}
+                  >
+                    <div className="absolute top-3.5 right-3.5 flex items-center gap-1.5">
+                      {!item.is_read && (
+                        <button
+                          type="button"
+                          title="Marcar como lida"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleMarkAsRead(item.id);
+                          }}
+                          className="w-6 h-6 rounded-full flex items-center justify-center hover:bg-orange-50"
+                        >
+                          <span className="w-2.5 h-2.5 rounded-full bg-[#BF4B24] ring-4 ring-orange-100" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        title="Remover notificação"
+                        onClick={(e) => handleDeleteOne(e, item.id)}
+                        className="opacity-0 group-hover:opacity-100 p-1 rounded-md text-slate-400 hover:text-red-600 hover:bg-red-50 transition-all"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
 
-                    <div className="flex-1 min-w-0 pr-4">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Badge
-                          className={`${visual.badgeClass} border-0 text-[10px] font-bold px-2 py-0`}
-                        >
-                          {visual.badgeText}
-                        </Badge>
-                        <span
-                          title={exactTime}
-                          className="text-[11px] font-medium text-slate-400"
-                        >
-                          {relativeTime}
-                        </span>
+                    <div className="flex items-start gap-3.5">
+                      <div
+                        className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${visual.bgIcon}`}
+                      >
+                        <IconComponent className="w-5 h-5" />
                       </div>
 
-                      <h4 className="text-xs font-extrabold text-slate-900 leading-snug">
-                        {item.title}
-                      </h4>
-
-                      <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                        {item.message}
-                      </p>
-
-                      <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
-                        <span>{exactTime}</span>
-                        {onNavigateTab && item.metadata?.target_tab && (
-                          <span className="inline-flex items-center gap-0.5 font-bold text-[#BF4B24] group-hover:translate-x-0.5 transition-transform">
-                            Abrir aba <ChevronRight className="w-3 h-3" />
+                      <div className="flex-1 min-w-0 pr-6">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Badge
+                            className={`${visual.badgeClass} border-0 text-[10px] font-bold px-2 py-0`}
+                          >
+                            {visual.badgeText}
+                          </Badge>
+                          <span
+                            title={exactTime}
+                            className="text-[11px] font-medium text-slate-400"
+                          >
+                            {relativeTime}
                           </span>
-                        )}
+                        </div>
+
+                        <h4 className="text-xs font-extrabold text-slate-900 leading-snug">
+                          {item.title}
+                        </h4>
+
+                        <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                          {item.message}
+                        </p>
+
+                        <div className="mt-2.5 flex items-center justify-between text-[11px] text-slate-400">
+                          <span>{exactTime}</span>
+                          <span className="inline-flex items-center gap-0.5 font-bold text-[#BF4B24] group-hover:translate-x-0.5 transition-transform">
+                            Ver detalhes completos{" "}
+                            <ChevronRight className="w-3 h-3" />
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
+                );
+              })
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* MODAL DE RAIO-X COMPLETO DA NOTIFICAÇÃO */}
+      <Dialog
+        open={Boolean(selectedDetailItem)}
+        onOpenChange={(o) => !o && setSelectedDetailItem(null)}
+      >
+        <DialogContent className="sm:max-w-md bg-white rounded-2xl border border-slate-200 z-[10000]">
+          {selectedDetailItem && (
+            <>
+              <DialogHeader>
+                <div className="flex items-center gap-2 mb-1">
+                  <Badge className="bg-orange-50 text-[#BF4B24] border-0 text-[10px] font-bold">
+                    Raio-X do Evento
+                  </Badge>
+                  <span className="text-xs text-slate-400">
+                    {selectedDetailItem.created_at
+                      ? format(
+                          parseISO(selectedDetailItem.created_at),
+                          "dd/MM/yyyy 'às' HH:mm",
+                          { locale: ptBR },
+                        )
+                      : ""}
+                  </span>
                 </div>
-              );
-            })
+                <DialogTitle className="text-base font-black text-slate-900">
+                  {selectedDetailItem.title}
+                </DialogTitle>
+                <DialogDescription className="text-xs text-slate-600 pt-1">
+                  {selectedDetailItem.message}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 space-y-2.5 text-xs">
+                {selectedDetailItem.metadata?.user_name && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <User className="w-3.5 h-3.5 text-slate-400" />
+                      Profissional / Usuário:
+                    </span>
+                    <strong className="text-slate-900 text-right">
+                      {selectedDetailItem.metadata.user_name}
+                    </strong>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.user_specialty && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500">Especialidade:</span>
+                    <strong className="text-slate-800">
+                      {selectedDetailItem.metadata.user_specialty}
+                    </strong>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.user_email && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <Mail className="w-3.5 h-3.5 text-slate-400" />
+                      E-mail:
+                    </span>
+                    <span className="font-semibold text-slate-800 truncate max-w-[210px]">
+                      {selectedDetailItem.metadata.user_email}
+                    </span>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.user_phone && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <Phone className="w-3.5 h-3.5 text-slate-400" />
+                      WhatsApp / Telefone:
+                    </span>
+                    <span className="font-semibold text-slate-800">
+                      {selectedDetailItem.metadata.user_phone}
+                    </span>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.user_cpf && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-slate-400" />
+                      CPF:
+                    </span>
+                    <span className="font-semibold text-slate-800">
+                      {selectedDetailItem.metadata.user_cpf}
+                    </span>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.room_name && (
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-200/70">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <DoorOpen className="w-3.5 h-3.5 text-[#BF4B24]" />
+                      Sala / Consultório:
+                    </span>
+                    <strong className="text-slate-900">
+                      {selectedDetailItem.metadata.room_name}
+                    </strong>
+                  </div>
+                )}
+
+                {selectedDetailItem.metadata?.date && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-slate-400" />
+                      Data e Horário:
+                    </span>
+                    <strong className="text-[#BF4B24]">
+                      {selectedDetailItem.metadata.date}
+                      {selectedDetailItem.metadata.first_hour
+                        ? ` às ${selectedDetailItem.metadata.first_hour}`
+                        : ""}
+                    </strong>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedDetailItem(null)}
+                  className="text-xs font-semibold"
+                >
+                  Fechar
+                </Button>
+
+                {onNavigateTab && selectedDetailItem.metadata?.target_tab && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      const targetTab = selectedDetailItem.metadata.target_tab!;
+                      const meta = selectedDetailItem.metadata;
+                      setSelectedDetailItem(null);
+                      setIsOpen(false);
+                      onNavigateTab(targetTab, meta);
+                    }}
+                    className="bg-[#BF4B24] hover:bg-[#9A3C1D] text-white text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    <span>Abrir módulo correspondente</span>
+                    <ExternalLink className="w-3.5 h-3.5 ml-1.5" />
+                  </Button>
+                )}
+              </div>
+            </>
           )}
-        </div>
-      </SheetContent>
-    </Sheet>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
