@@ -21,12 +21,15 @@ import {
   Loader2,
   Users,
   FileText,
-  Unlock,
-  Lock,
+  Flame,
+  Snowflake,
+  Sun,
+  Tag,
 } from "lucide-react";
 import {
   format,
   subDays,
+  addDays,
   startOfMonth,
   endOfMonth,
   subMonths,
@@ -97,6 +100,17 @@ const ALL_HOURS_LIST = [
 ];
 
 type ContractFilterMode = "all" | "cohost_only" | "contracts_only";
+type QuickRangePreset =
+  | "next_7d"
+  | "next_15d"
+  | "next_30d"
+  | "this_month"
+  | "past_7d"
+  | "past_30d"
+  | "last_month"
+  | "custom";
+
+type ThermalTemperature = "hot" | "warm" | "cold";
 
 interface CellRoomBreakdown {
   roomId: string;
@@ -104,6 +118,8 @@ interface CellRoomBreakdown {
   clinicName: string;
   tierLabel: string;
   hourlyRate: number;
+  windowDurationHours: number; // 1h no modo Hora a Hora, 3h/4h no modo Turnos
+  daysInPeriod: number;
   availableHours: number;
   occupiedHours: number;
   contractHours: number;
@@ -111,6 +127,11 @@ interface CellRoomBreakdown {
   avulsoHours: number;
   freeHours: number;
   occupancyPct: number;
+  // Dados comparativos dos últimos 30 dias para esta sala e horário
+  hist30dAvailableHours: number;
+  hist30dOccupiedHours: number;
+  hist30dOccupancyPct: number;
+  hist30dTemperature: ThermalTemperature;
   hasFixedContract: boolean;
   isCohostRoom: boolean;
   cohostName: string | null;
@@ -123,6 +144,7 @@ interface ThermalCellStats {
   dayFull: string;
   colId: string;
   colLabel: string;
+  windowDurationHours: number;
   occurrencesInPeriod: number;
   availableHours: number;
   occupiedHours: number;
@@ -132,6 +154,13 @@ interface ThermalCellStats {
   freeHours: number;
   occupancyPct: number;
   contractSharePct: number;
+  // Comparativo dos últimos 30 dias (Termômetro Quente vs Frio)
+  hist30dAvailableHours: number;
+  hist30dOccupiedHours: number;
+  hist30dContractHours: number;
+  hist30dRentedHours: number;
+  hist30dOccupancyPct: number;
+  hist30dTemperature: ThermalTemperature;
   estimatedRevenueBrl: number;
   idleOpportunityBrl: number;
   status: "closed" | "contract_locked" | "hot" | "warm" | "cold";
@@ -187,12 +216,22 @@ function resolveRoomHourlyRate(room: any): number {
   return 33.38;
 }
 
+/**
+ * Calcula exatamente quantas janelas de 1 hora uma reserva ocupa.
+ * Uma sessão de 50min (08:00 às 08:50) ou 60min (08:00 às 09:00) equivale a exatamente 1 hora.
+ */
 function calculateSlotUnits(startIso: string, endIso: string): number {
   const diffMinutes =
     (new Date(endIso).getTime() - new Date(startIso).getTime()) / (1000 * 60);
   if (diffMinutes <= 0) return 1;
-  if (diffMinutes >= 45 && diffMinutes <= 65) return 1;
-  return Math.max(1, Math.round(diffMinutes / 55));
+  if (diffMinutes <= 65) return 1;
+  return Math.max(1, Math.round(diffMinutes / 60));
+}
+
+function classifyTemperature(occPct: number): ThermalTemperature {
+  if (occPct >= 65) return "hot";
+  if (occPct >= 35) return "warm";
+  return "cold";
 }
 
 function getRoomOpenHoursOnDate(room: any, dateObj: Date): Set<number> {
@@ -285,10 +324,6 @@ function getRoomOpenHoursOnDate(room: any, dateObj: Date): Set<number> {
   return openHours;
 }
 
-/**
- * Resume quais dias e quantas horas por semana a sala deixa aberta na vitrine
- * (muito útil para salas com Coanfitrião).
- */
 function summarizeRoomWeeklySubleaseSchedule(room: any): {
   weeklyOpenHours: number;
   daysSummary: string;
@@ -317,9 +352,14 @@ function summarizeRoomWeeklySubleaseSchedule(room: any): {
       (w: any) => Number(w.day) === wd.dow,
     );
     if (dayCfg && dayCfg.enabled) {
-      const count = Array.isArray(dayCfg.availableHours)
-        ? dayCfg.availableHours.length
-        : 9;
+      const uniqueHours = new Set<number>();
+      if (Array.isArray(dayCfg.availableHours)) {
+        dayCfg.availableHours.forEach((s: string) => {
+          const h = parseInt(String(s).split(/[:h-]/)[0], 10);
+          if (!isNaN(h)) uniqueHours.add(h);
+        });
+      }
+      const count = uniqueHours.size > 0 ? uniqueHours.size : 9;
       if (count > 0) {
         totalWeekly += count;
         parts.push(`${wd.short} (${count}h)`);
@@ -334,12 +374,6 @@ function summarizeRoomWeeklySubleaseSchedule(room: any): {
   };
 }
 
-/**
- * Calcula quais horas abertas da sala naquela data estão bloqueadas por Contratos Fixos.
- * IMPORTANTE: Se o contrato for de Coanfitrião (`monthly_exclusive` + `allow_sublease = true`),
- * os horários que estão abertos em `openHours` (vitrine da sala) NÃO são marcados como bloqueados,
- * pois são exatamente os horários que o Coanfitrião liberou para sublocação!
- */
 function getContractCoveredHoursOnDate(
   roomContracts: any[],
   dateObj: Date,
@@ -355,7 +389,7 @@ function getContractCoveredHoursOnDate(
   const dow = getDay(dateObj);
 
   roomContracts.forEach((c: any) => {
-    if (c.status !== "active") return;
+    if (c.status !== "active" && c.status !== "pending_signature") return;
     if (c.start_date && dateIso < String(c.start_date).slice(0, 10)) return;
     if (c.end_date && dateIso > String(c.end_date).slice(0, 10)) return;
 
@@ -364,11 +398,9 @@ function getContractCoveredHoursOnDate(
 
     if (cType.includes("monthly_exclusive")) {
       if (c.allow_sublease) {
-        // Coanfitrião: As horas abertas em `openHours` estão disponíveis para sublocar!
         notes.push(`Coanfitrião (${specName})`);
         return;
       } else {
-        // Sala 100% exclusiva sem sublocação: bloqueia todas as horas
         openHours.forEach((h) => covered.add(h));
         notes.push(`Sala Exclusiva (${specName})`);
         return;
@@ -387,7 +419,6 @@ function getContractCoveredHoursOnDate(
     if (sched && typeof sched === "object") {
       let matchedAnyHour = false;
 
-      // 1. Novo formato multi-turnos por dia (`scheduleRules`)
       if (
         Array.isArray(sched.scheduleRules) &&
         sched.scheduleRules.length > 0
@@ -409,7 +440,6 @@ function getContractCoveredHoursOnDate(
         return;
       }
 
-      // 2. Formato mapa `day_hours`
       if (sched.day_hours && typeof sched.day_hours === "object") {
         const dayArr = sched.day_hours[String(dow)];
         if (Array.isArray(dayArr) && dayArr.length > 0) {
@@ -426,7 +456,6 @@ function getContractCoveredHoursOnDate(
         }
       }
 
-      // 3. Formato legado: `daysOfWeek` / `days` + `startHour` / `endHour` ou `shifts`
       const daysArray = Array.isArray(sched.daysOfWeek)
         ? sched.daysOfWeek.map(Number)
         : Array.isArray(sched.days)
@@ -515,24 +544,26 @@ const formatBRL = (val: number) =>
 
 export function AdminThermalStrategyPanel() {
   const [supabase] = useState(() => createClient());
-  const todayIso = useMemo(() => format(new Date(), "yyyy-MM-dd"), []);
 
   const [loading, setLoading] = useState(true);
 
-  const [QuickRange, setQuickRange] = useState<
-    "7d" | "15d" | "30d" | "this_month" | "last_month" | "custom"
-  >("30d");
+  // Por padrão inicia nos Próximos 7 Dias (de Hoje até +6d = exatamente 1 dia de cada dia da semana)
+  // comparando automaticamente com o termômetro dos Últimos 30 Dias!
+  const [quickRange, setQuickRange] = useState<QuickRangePreset>("next_7d");
   const [startDate, setStartDate] = useState(() =>
-    format(subDays(new Date(), 29), "yyyy-MM-dd"),
+    format(new Date(), "yyyy-MM-dd"),
   );
   const [endDate, setEndDate] = useState(() =>
-    format(new Date(), "yyyy-MM-dd"),
+    format(addDays(new Date(), 6), "yyyy-MM-dd"),
+  );
+
+  // Permite alternar se a cor de fundo do bloco reflete o Termômetro dos Últimos 30d (Quente/Frio) ou o Período Selecionado
+  const [colorBasis, setColorBasis] = useState<"hist30d" | "selected">(
+    "hist30d",
   );
 
   const [selectedClinicId, setSelectedClinicId] = useState<string>("all");
   const [selectedRoomId, setSelectedRoomId] = useState<string>("all");
-
-  // Novo filtro dedicado: Todas | Salas c/ Coanfitrião | Salas c/ Contrato Fixo
   const [contractFilterMode, setContractFilterMode] =
     useState<ContractFilterMode>("all");
 
@@ -549,22 +580,26 @@ export function AdminThermalStrategyPanel() {
     null,
   );
 
-  const handleApplyQuickRange = (
-    preset: "7d" | "15d" | "30d" | "this_month" | "last_month",
-  ) => {
+  const handleApplyQuickRange = (preset: QuickRangePreset) => {
     const now = new Date();
     setQuickRange(preset);
-    if (preset === "7d") {
-      setStartDate(format(subDays(now, 6), "yyyy-MM-dd"));
-      setEndDate(format(now, "yyyy-MM-dd"));
-    } else if (preset === "15d") {
-      setStartDate(format(subDays(now, 14), "yyyy-MM-dd"));
-      setEndDate(format(now, "yyyy-MM-dd"));
-    } else if (preset === "30d") {
-      setStartDate(format(subDays(now, 29), "yyyy-MM-dd"));
-      setEndDate(format(now, "yyyy-MM-dd"));
+    if (preset === "next_7d") {
+      setStartDate(format(now, "yyyy-MM-dd"));
+      setEndDate(format(addDays(now, 6), "yyyy-MM-dd"));
+    } else if (preset === "next_15d") {
+      setStartDate(format(now, "yyyy-MM-dd"));
+      setEndDate(format(addDays(now, 14), "yyyy-MM-dd"));
+    } else if (preset === "next_30d") {
+      setStartDate(format(now, "yyyy-MM-dd"));
+      setEndDate(format(addDays(now, 29), "yyyy-MM-dd"));
     } else if (preset === "this_month") {
       setStartDate(format(startOfMonth(now), "yyyy-MM-dd"));
+      setEndDate(format(endOfMonth(now), "yyyy-MM-dd"));
+    } else if (preset === "past_7d") {
+      setStartDate(format(subDays(now, 6), "yyyy-MM-dd"));
+      setEndDate(format(now, "yyyy-MM-dd"));
+    } else if (preset === "past_30d") {
+      setStartDate(format(subDays(now, 29), "yyyy-MM-dd"));
       setEndDate(format(now, "yyyy-MM-dd"));
     } else if (preset === "last_month") {
       const lastM = subMonths(now, 1);
@@ -576,16 +611,23 @@ export function AdminThermalStrategyPanel() {
   const fetchThermalData = useCallback(async () => {
     setLoading(true);
     try {
-      const parsedStart = startDate
-        ? parseISO(startDate)
-        : subDays(new Date(), 29);
-      const parsedEnd = endDate ? parseISO(endDate) : new Date();
+      const now = new Date();
+      const hist30Start = startOfDay(subDays(now, 29));
+      const hist30End = endOfDay(now);
+
+      const parsedStart = startDate ? parseISO(startDate) : now;
+      const parsedEnd = endDate ? parseISO(endDate) : addDays(now, 6);
+
       const safeStart = startOfDay(
-        isNaN(parsedStart.getTime()) ? subDays(new Date(), 29) : parsedStart,
+        isNaN(parsedStart.getTime()) ? now : parsedStart,
       );
       const safeEnd = endOfDay(
-        isNaN(parsedEnd.getTime()) ? new Date() : parsedEnd,
+        isNaN(parsedEnd.getTime()) ? addDays(now, 6) : parsedEnd,
       );
+
+      // Busca reservas cobrindo TANTO os últimos 30 dias QUANTO o período futuro/selecionado
+      const queryMinStart = safeStart < hist30Start ? safeStart : hist30Start;
+      const queryMaxEnd = safeEnd > hist30End ? safeEnd : hist30End;
 
       const [roomsRes, bookingsRes, contractsRes] = await Promise.all([
         supabase
@@ -599,8 +641,8 @@ export function AdminThermalStrategyPanel() {
           .select(
             "id, start_time, end_time, status, room_id, user_id, contract_id, booking_origin, total_cost, agreed_value_brl",
           )
-          .gte("start_time", safeStart.toISOString())
-          .lte("start_time", safeEnd.toISOString())
+          .gte("start_time", queryMinStart.toISOString())
+          .lte("start_time", queryMaxEnd.toISOString())
           .in("status", ["confirmed", "completed", "in_progress"]),
         supabase.from("room_contracts").select("*"),
       ]);
@@ -647,7 +689,6 @@ export function AdminThermalStrategyPanel() {
     fetchThermalData();
   }, [fetchThermalData]);
 
-  // Mapeia quais salas possuem Coanfitrião ou Contratos Fixos vigentes no período
   const roomContractMetaMap = useMemo(() => {
     const map = new Map<
       string,
@@ -663,7 +704,7 @@ export function AdminThermalStrategyPanel() {
       const activeForRoom = contracts.filter(
         (c: any) =>
           c.room_id === r.id &&
-          c.status === "active" &&
+          (c.status === "active" || c.status === "pending_signature") &&
           (!c.start_date || String(c.start_date).slice(0, 10) <= endDate) &&
           (!c.end_date || String(c.end_date).slice(0, 10) >= startDate),
       );
@@ -759,12 +800,12 @@ export function AdminThermalStrategyPanel() {
   }, [rooms, selectedClinicId, roomContractMetaMap]);
 
   const thermalAnalysis = useMemo(() => {
-    const parsedStart = startDate
-      ? parseISO(startDate)
-      : subDays(new Date(), 29);
-    const parsedEnd = endDate ? parseISO(endDate) : new Date();
+    const now = new Date();
+    // Intervalo 1: Período Selecionado (pode ser futuro, ex: Hoje até dia X)
+    const parsedStart = startDate ? parseISO(startDate) : now;
+    const parsedEnd = endDate ? parseISO(endDate) : addDays(now, 6);
     const safeStart = startOfDay(
-      isNaN(parsedStart.getTime()) ? subDays(new Date(), 29) : parsedStart,
+      isNaN(parsedStart.getTime()) ? now : parsedStart,
     );
     const safeEnd = endOfDay(
       isNaN(parsedEnd.getTime()) || parsedEnd < safeStart
@@ -772,7 +813,18 @@ export function AdminThermalStrategyPanel() {
         : parsedEnd,
     );
 
-    const daysInterval = eachDayOfInterval({ start: safeStart, end: safeEnd });
+    const selectedDaysInterval = eachDayOfInterval({
+      start: safeStart,
+      end: safeEnd,
+    });
+
+    // Intervalo 2: Últimos 30 Dias (Termômetro Histórico para saber se o horário é Quente ou Frio)
+    const hist30Start = startOfDay(subDays(now, 29));
+    const hist30End = endOfDay(now);
+    const hist30DaysInterval = eachDayOfInterval({
+      start: hist30Start,
+      end: hist30End,
+    });
 
     const contractsByRoom = new Map<string, any[]>();
     contracts.forEach((c: any) => {
@@ -792,6 +844,7 @@ export function AdminThermalStrategyPanel() {
       bookingsByRoomAndDate.set(key, list);
     });
 
+    // No modo "Hora a Hora", cada coluna possui estritamente 1 hora (col.hours = [h], duration = 1h)
     const columns =
       matrixGranularity === "shifts"
         ? SHIFTS_CONFIG.map((sh) => ({
@@ -802,20 +855,90 @@ export function AdminThermalStrategyPanel() {
           }))
         : ALL_HOURS_LIST.map((h) => ({
             id: `h_${h}`,
-            label: `${String(h).padStart(2, "0")}h–${String(h + 1).padStart(2, "0")}h`,
-            shortLabel: `${String(h).padStart(2, "0")}h`,
+            label: `${String(h).padStart(2, "0")}h às ${String(h + 1).padStart(2, "0")}h (1h)`,
+            shortLabel: `${String(h).padStart(2, "0")}h–${String(h + 1).padStart(2, "0")}h`,
             hours: [h],
           }));
 
     const dowOccurrences = new Map<number, number>();
     WEEKDAYS_ORDER.forEach((w) => dowOccurrences.set(w.dow, 0));
-    daysInterval.forEach((d) => {
+    selectedDaysInterval.forEach((d) => {
       const dow = getDay(d);
       dowOccurrences.set(dow, (dowOccurrences.get(dow) || 0) + 1);
     });
 
+    // Helper que resolve o estado de cada hora [8..22] de uma sala em uma data específica
+    const evaluateRoomDayHours = (r: any, d: Date) => {
+      const dateIso = format(d, "yyyy-MM-dd");
+      const meta = roomContractMetaMap.get(r.id);
+      const cohostContractId = meta?.cohostContract?.id || null;
+
+      const openHoursSet = getRoomOpenHoursOnDate(r, d);
+      const rContracts = contractsByRoom.get(r.id) || [];
+      const { hours: contractCoveredSet, contractNotes } =
+        getContractCoveredHoursOnDate(rContracts, d, openHoursSet);
+
+      const dayBookings = bookingsByRoomAndDate.get(`${r.id}_${dateIso}`) || [];
+
+      const hourState = new Map<number, "contract" | "package" | "avulso">();
+      const hourSpecNames = new Map<number, string>();
+
+      contractCoveredSet.forEach((h) => {
+        hourState.set(h, "contract");
+      });
+
+      dayBookings.forEach((b: any) => {
+        if (cohostContractId && b.contract_id === cohostContractId) {
+          return;
+        }
+
+        const startD = parseISO(b.start_time);
+        const startH = getHours(startD);
+        // Usa estritamente startH + slots para que 08:00–09:00 ou 08:00–08:50 marque APENAS 1 hora (h = 8)
+        const slots = calculateSlotUnits(
+          b.start_time,
+          b.end_time || b.start_time,
+        );
+        const endH = startH + slots;
+
+        const isContractB = Boolean(
+          b.contract_id ||
+          (b.booking_origin && String(b.booking_origin).startsWith("contract")),
+        );
+        const isPkgB = Boolean(
+          !isContractB &&
+          ((b.booking_origin &&
+            String(b.booking_origin).startsWith("wallet_")) ||
+            (!b.booking_origin &&
+              Number(b.agreed_value_brl || 0) === 0 &&
+              Number(b.total_cost || 0) <= slots * 2)),
+        );
+
+        const bType: "contract" | "package" | "avulso" = isContractB
+          ? "contract"
+          : isPkgB
+            ? "package"
+            : "avulso";
+
+        const specName =
+          profilesMap.get(b.user_id)?.full_name || "Profissional";
+
+        for (let h = startH; h < endH; h++) {
+          hourSpecNames.set(h, specName);
+          if (!hourState.has(h) || bType !== "contract") {
+            hourState.set(h, bType);
+          }
+        }
+      });
+
+      return { openHoursSet, hourState, hourSpecNames, contractNotes };
+    };
+
     const matrixRows = WEEKDAYS_ORDER.map((w) => {
+      const occurrencesForThisDow = dowOccurrences.get(w.dow) || 0;
+
       const cells: ThermalCellStats[] = columns.map((col) => {
+        const windowDuration = col.hours.length; // 1h no modo Hora a Hora, 3h ou 4h no modo Turnos
         const roomBreakdownsMap = new Map<string, CellRoomBreakdown>();
 
         activeScopedRooms.forEach((r: any) => {
@@ -830,6 +953,8 @@ export function AdminThermalStrategyPanel() {
             clinicName,
             tierLabel: formatTierLabel(normalizeTier(r.tier)),
             hourlyRate: resolveRoomHourlyRate(r),
+            windowDurationHours: windowDuration,
+            daysInPeriod: occurrencesForThisDow,
             availableHours: 0,
             occupiedHours: 0,
             contractHours: 0,
@@ -837,6 +962,10 @@ export function AdminThermalStrategyPanel() {
             avulsoHours: 0,
             freeHours: 0,
             occupancyPct: 0,
+            hist30dAvailableHours: 0,
+            hist30dOccupiedHours: 0,
+            hist30dOccupancyPct: 0,
+            hist30dTemperature: "cold",
             hasFixedContract: Boolean(meta?.hasAnyActiveContract),
             isCohostRoom: Boolean(meta?.isCohostRoom),
             cohostName: meta?.cohostContract?.specialist_name || null,
@@ -852,86 +981,18 @@ export function AdminThermalStrategyPanel() {
         let cellEstRev = 0;
         let cellIdleRev = 0;
 
-        daysInterval.forEach((d) => {
+        // 1. Computa o Período Selecionado (ex: Hoje até data futura)
+        selectedDaysInterval.forEach((d) => {
           if (getDay(d) !== w.dow) return;
-          const dateIso = format(d, "yyyy-MM-dd");
 
           activeScopedRooms.forEach((r: any) => {
             const rb = roomBreakdownsMap.get(r.id)!;
-            const meta = roomContractMetaMap.get(r.id);
-            const cohostContractId = meta?.cohostContract?.id || null;
-
-            const openHoursSet = getRoomOpenHoursOnDate(r, d);
-            const rContracts = contractsByRoom.get(r.id) || [];
-            const { hours: contractCoveredSet, contractNotes } =
-              getContractCoveredHoursOnDate(rContracts, d, openHoursSet);
+            const { openHoursSet, hourState, hourSpecNames, contractNotes } =
+              evaluateRoomDayHours(r, d);
 
             if (contractNotes.length > 0 && !rb.contractNote) {
               rb.contractNote = contractNotes.join(" • ");
             }
-
-            const dayBookings =
-              bookingsByRoomAndDate.get(`${r.id}_${dateIso}`) || [];
-
-            const hourState = new Map<
-              number,
-              "contract" | "package" | "avulso"
-            >();
-
-            contractCoveredSet.forEach((h) => {
-              hourState.set(h, "contract");
-            });
-
-            dayBookings.forEach((b: any) => {
-              // Ignora eventual bloqueio antigo do próprio contrato principal do Coanfitrião
-              if (cohostContractId && b.contract_id === cohostContractId) {
-                return;
-              }
-
-              const startD = parseISO(b.start_time);
-              const endD = b.end_time ? parseISO(b.end_time) : null;
-              const startH = getHours(startD);
-              const slots = calculateSlotUnits(
-                b.start_time,
-                b.end_time || b.start_time,
-              );
-              const endH =
-                endD && getHours(endD) > startH
-                  ? getHours(endD)
-                  : startH + slots;
-
-              const isContractB = Boolean(
-                b.contract_id ||
-                (b.booking_origin &&
-                  String(b.booking_origin).startsWith("contract")),
-              );
-              const isPkgB = Boolean(
-                !isContractB &&
-                ((b.booking_origin &&
-                  String(b.booking_origin).startsWith("wallet_")) ||
-                  (!b.booking_origin &&
-                    Number(b.agreed_value_brl || 0) === 0 &&
-                    Number(b.total_cost || 0) <= slots * 2)),
-              );
-
-              const bType: "contract" | "package" | "avulso" = isContractB
-                ? "contract"
-                : isPkgB
-                  ? "package"
-                  : "avulso";
-
-              const specName =
-                profilesMap.get(b.user_id)?.full_name || "Profissional";
-
-              for (let h = startH; h < endH; h++) {
-                if (col.hours.includes(h)) {
-                  specialistsSet.add(specName);
-                }
-                if (!hourState.has(h) || bType !== "contract") {
-                  hourState.set(h, bType);
-                }
-              }
-            });
 
             col.hours.forEach((h) => {
               const isOpen = openHoursSet.has(h) || hourState.has(h);
@@ -939,6 +1000,9 @@ export function AdminThermalStrategyPanel() {
 
               rb.availableHours += 1;
               cellAvail += 1;
+
+              const spec = hourSpecNames.get(h);
+              if (spec) specialistsSet.add(spec);
 
               const occType = hourState.get(h);
               if (occType === "contract") {
@@ -964,17 +1028,64 @@ export function AdminThermalStrategyPanel() {
           });
         });
 
+        // 2. Computa o Histórico dos Últimos 30 Dias para a mesma janela (Termômetro Quente vs Frio)
+        let hist30Avail = 0;
+        let hist30Contract = 0;
+        let hist30Rented = 0;
+
+        hist30DaysInterval.forEach((d) => {
+          if (getDay(d) !== w.dow) return;
+
+          activeScopedRooms.forEach((r: any) => {
+            const rb = roomBreakdownsMap.get(r.id)!;
+            const { openHoursSet, hourState } = evaluateRoomDayHours(r, d);
+
+            col.hours.forEach((h) => {
+              const isOpen = openHoursSet.has(h) || hourState.has(h);
+              if (!isOpen) return;
+
+              rb.hist30dAvailableHours += 1;
+              hist30Avail += 1;
+
+              const occType = hourState.get(h);
+              if (occType === "contract") {
+                rb.hist30dOccupiedHours += 1;
+                hist30Contract += 1;
+              } else if (occType === "package" || occType === "avulso") {
+                rb.hist30dOccupiedHours += 1;
+                hist30Rented += 1;
+              }
+            });
+          });
+        });
+
         const roomBreakdowns = Array.from(roomBreakdownsMap.values()).map(
-          (rb) => ({
-            ...rb,
-            occupancyPct:
+          (rb) => {
+            const rOccPct =
               rb.availableHours > 0
                 ? Math.min(
                     100,
                     Math.round((rb.occupiedHours / rb.availableHours) * 100),
                   )
-                : 0,
-          }),
+                : 0;
+            const rHistPct =
+              rb.hist30dAvailableHours > 0
+                ? Math.min(
+                    100,
+                    Math.round(
+                      (rb.hist30dOccupiedHours / rb.hist30dAvailableHours) *
+                        100,
+                    ),
+                  )
+                : 0;
+
+            return {
+              ...rb,
+              occupancyPct: rOccPct,
+              hist30dOccupancyPct: rHistPct,
+              hist30dTemperature: classifyTemperature(rHistPct),
+            };
+          },
         );
 
         const cellOccupied = cellContractH + cellPackageH + cellAvulsoH;
@@ -988,14 +1099,24 @@ export function AdminThermalStrategyPanel() {
             ? Math.min(100, Math.round((cellContractH / cellAvail) * 100))
             : 0;
 
+        const hist30Occupied = hist30Contract + hist30Rented;
+        const hist30Pct =
+          hist30Avail > 0
+            ? Math.min(100, Math.round((hist30Occupied / hist30Avail) * 100))
+            : 0;
+        const hist30Temp = classifyTemperature(hist30Pct);
+
+        // Define o status visual conforme o modo escolhido (Termômetro 30d ou Período Selecionado)
+        const referencePct = colorBasis === "hist30d" ? hist30Pct : occPct;
+
         let status: ThermalCellStats["status"] = "cold";
-        if (cellAvail === 0) {
+        if (cellAvail === 0 && hist30Avail === 0) {
           status = "closed";
         } else if (contractSharePct >= 70) {
           status = "contract_locked";
-        } else if (occPct >= 70) {
+        } else if (referencePct >= 65) {
           status = "hot";
-        } else if (occPct >= 35) {
+        } else if (referencePct >= 35) {
           status = "warm";
         } else {
           status = "cold";
@@ -1007,7 +1128,8 @@ export function AdminThermalStrategyPanel() {
           dayFull: w.full,
           colId: col.id,
           colLabel: col.label,
-          occurrencesInPeriod: dowOccurrences.get(w.dow) || 0,
+          windowDurationHours: windowDuration,
+          occurrencesInPeriod: occurrencesForThisDow,
           availableHours: cellAvail,
           occupiedHours: cellOccupied,
           contractHours: cellContractH,
@@ -1016,6 +1138,12 @@ export function AdminThermalStrategyPanel() {
           freeHours: cellFree,
           occupancyPct: occPct,
           contractSharePct,
+          hist30dAvailableHours: hist30Avail,
+          hist30dOccupiedHours: hist30Occupied,
+          hist30dContractHours: hist30Contract,
+          hist30dRentedHours: hist30Rented,
+          hist30dOccupancyPct: hist30Pct,
+          hist30dTemperature: hist30Temp,
           estimatedRevenueBrl: cellEstRev,
           idleOpportunityBrl: cellIdleRev,
           status,
@@ -1028,7 +1156,7 @@ export function AdminThermalStrategyPanel() {
         dow: w.dow,
         dayShort: w.short,
         dayFull: w.full,
-        occurrences: dowOccurrences.get(w.dow) || 0,
+        occurrences: occurrencesForThisDow,
         cells,
       };
     });
@@ -1039,6 +1167,8 @@ export function AdminThermalStrategyPanel() {
       let pkgH = 0;
       let avulsoH = 0;
       let freeH = 0;
+      let hist30Avail = 0;
+      let hist30Occ = 0;
       const hourlyRate = resolveRoomHourlyRate(r);
       const meta = roomContractMetaMap.get(r.id);
       const weeklyScheduleInfo = summarizeRoomWeeklySubleaseSchedule(r);
@@ -1052,6 +1182,8 @@ export function AdminThermalStrategyPanel() {
             pkgH += rb.packageHours;
             avulsoH += rb.avulsoHours;
             freeH += rb.freeHours;
+            hist30Avail += rb.hist30dAvailableHours;
+            hist30Occ += rb.hist30dOccupiedHours;
           }
         });
       });
@@ -1059,6 +1191,10 @@ export function AdminThermalStrategyPanel() {
       const occ = contractH + pkgH + avulsoH;
       const occPct =
         avail > 0 ? Math.min(100, Math.round((occ / avail) * 100)) : 0;
+      const hist30Pct =
+        hist30Avail > 0
+          ? Math.min(100, Math.round((hist30Occ / hist30Avail) * 100))
+          : 0;
 
       return {
         id: r.id,
@@ -1075,6 +1211,7 @@ export function AdminThermalStrategyPanel() {
         avulsoHours: avulsoH,
         freeHours: freeH,
         occupancyPct: occPct,
+        hist30dOccupancyPct: hist30Pct,
         idleOpportunityBrl: freeH * hourlyRate,
         hasAnyActiveContract: Boolean(meta?.hasAnyActiveContract),
         isCohostRoom: Boolean(meta?.isCohostRoom),
@@ -1096,6 +1233,10 @@ export function AdminThermalStrategyPanel() {
     let totalAvulso = 0;
     let totalFree = 0;
     let totalIdleOpportunityBrl = 0;
+    let totalHist30Avail = 0;
+    let totalHist30Occupied = 0;
+
+    const allOpenCells: ThermalCellStats[] = [];
 
     matrixRows.forEach((r) => {
       r.cells.forEach((c) => {
@@ -1106,6 +1247,12 @@ export function AdminThermalStrategyPanel() {
         totalAvulso += c.avulsoHours;
         totalFree += c.freeHours;
         totalIdleOpportunityBrl += c.idleOpportunityBrl;
+        totalHist30Avail += c.hist30dAvailableHours;
+        totalHist30Occupied += c.hist30dOccupiedHours;
+
+        if (c.status !== "closed") {
+          allOpenCells.push(c);
+        }
       });
     });
 
@@ -1117,11 +1264,36 @@ export function AdminThermalStrategyPanel() {
       totalAvail > 0
         ? Math.min(100, Math.round((totalContract / totalAvail) * 100))
         : 0;
+    const overallHist30Pct =
+      totalHist30Avail > 0
+        ? Math.min(
+            100,
+            Math.round((totalHist30Occupied / totalHist30Avail) * 100),
+          )
+        : 0;
+
+    // Top janelas frias (baixa ocupação nos últimos 30d e com horários livres no período escolhido -> Onde colocar promoção)
+    const promoCandidateCells = [...allOpenCells]
+      .filter((c) => c.freeHours > 0 && c.hist30dTemperature === "cold")
+      .sort(
+        (a, b) =>
+          a.hist30dOccupancyPct - b.hist30dOccupancyPct ||
+          b.freeHours - a.freeHours,
+      )
+      .slice(0, 4);
+
+    // Top janelas quentes (alta procura nos últimos 30d)
+    const hottestCells = [...allOpenCells]
+      .filter((c) => c.hist30dOccupancyPct > 0)
+      .sort((a, b) => b.hist30dOccupancyPct - a.hist30dOccupancyPct)
+      .slice(0, 4);
 
     return {
       columns,
       matrixRows,
       roomSummaries,
+      promoCandidateCells,
+      hottestCells,
       totals: {
         totalAvail,
         totalOccupied,
@@ -1131,6 +1303,7 @@ export function AdminThermalStrategyPanel() {
         totalFree,
         overallOccupancyPct,
         overallContractPct,
+        overallHist30Pct,
         totalIdleOpportunityBrl,
       },
     };
@@ -1144,6 +1317,7 @@ export function AdminThermalStrategyPanel() {
     profilesMap,
     matrixGranularity,
     roomContractMetaMap,
+    colorBasis,
   ]);
 
   const getCellVisualStyle = (cell: ThermalCellStats) => {
@@ -1159,10 +1333,54 @@ export function AdminThermalStrategyPanel() {
     if (cell.status === "warm") {
       return "bg-orange-100/90 border-orange-300 text-[#9A3C1D] hover:bg-orange-200/70";
     }
-    return "bg-sky-50/80 border-sky-200/90 text-sky-950 hover:bg-sky-100/70";
+    return "bg-sky-50/85 border-sky-200/90 text-sky-950 hover:bg-sky-100/80";
   };
 
-  // Filtra apenas os cards de salas que têm Coanfitrião ou Contrato Fixo para o painel de Demanda
+  const renderTemperatureBadge = (
+    temp: ThermalTemperature,
+    pct30d: number,
+    isDarkBg: boolean,
+  ) => {
+    if (temp === "hot") {
+      return (
+        <span
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+            isDarkBg
+              ? "bg-black/25 text-amber-300"
+              : "bg-orange-200/80 text-[#9A3C1D]"
+          }`}
+        >
+          <Flame className="w-2.5 h-2.5 shrink-0" />
+          30d: {pct30d}% (Quente)
+        </span>
+      );
+    }
+    if (temp === "warm") {
+      return (
+        <span
+          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+            isDarkBg
+              ? "bg-white/15 text-orange-200"
+              : "bg-amber-100 text-amber-900"
+          }`}
+        >
+          <Sun className="w-2.5 h-2.5 shrink-0" />
+          30d: {pct30d}% (Morno)
+        </span>
+      );
+    }
+    return (
+      <span
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold ${
+          isDarkBg ? "bg-sky-400/20 text-sky-200" : "bg-sky-200/75 text-sky-900"
+        }`}
+      >
+        <Snowflake className="w-2.5 h-2.5 shrink-0" />
+        30d: {pct30d}% (Frio • Promo)
+      </span>
+    );
+  };
+
   const contractAndCohostRooms = useMemo(() => {
     return thermalAnalysis.roomSummaries.filter((rm) =>
       contractFilterMode === "cohost_only"
@@ -1177,30 +1395,35 @@ export function AdminThermalStrategyPanel() {
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div>
             <h2 className="text-base font-bold text-slate-900 tracking-tight">
-              Ocupação por Turno, Clínica, Coanfitriões e Salas
+              Mapa de Horários Quentes e Frios (Ocupação + Comparativo 30 Dias)
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 max-w-3xl">
-              Visualize a ocupação geral ou filtre as salas com Coanfitrião e
-              Contratos Fixos para acompanhar quantas horas livres ainda restam
-              para alugar em cada sala.
+              Selecione qualquer período (inclusive datas futuras) para ver{" "}
+              <strong>quantos horários já foram alugados</strong> e compare com
+              o <strong>Termômetro dos Últimos 30 Dias</strong> para identificar
+              os horários frios ideais para promoção.
             </p>
           </div>
 
+          {/* SELETOR DE DATAS PASSADAS E FUTURAS (SEM BLOQUEIO DE DATA FUTURA) */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex flex-wrap items-center bg-white p-1 rounded-xl border border-stone-200/90">
               {[
-                { id: "7d", label: "7d" },
-                { id: "15d", label: "15d" },
-                { id: "30d", label: "30d" },
+                { id: "next_7d", label: "Hoje + 7d" },
+                { id: "next_15d", label: "Hoje + 15d" },
+                { id: "next_30d", label: "Hoje + 30d" },
                 { id: "this_month", label: "Este Mês" },
-                { id: "last_month", label: "Mês Passado" },
+                { id: "past_7d", label: "Últ. 7d" },
+                { id: "past_30d", label: "Últ. 30d" },
               ].map((p) => (
                 <button
                   key={p.id}
                   type="button"
-                  onClick={() => handleApplyQuickRange(p.id as any)}
+                  onClick={() =>
+                    handleApplyQuickRange(p.id as QuickRangePreset)
+                  }
                   className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
-                    QuickRange === p.id
+                    quickRange === p.id
                       ? "bg-slate-900 text-white"
                       : "text-slate-600 hover:text-slate-900"
                   }`}
@@ -1215,7 +1438,6 @@ export function AdminThermalStrategyPanel() {
               <input
                 type="date"
                 value={startDate}
-                max={todayIso}
                 onChange={(e) => {
                   setQuickRange("custom");
                   setStartDate(e.target.value);
@@ -1226,7 +1448,6 @@ export function AdminThermalStrategyPanel() {
               <input
                 type="date"
                 value={endDate}
-                max={todayIso}
                 onChange={(e) => {
                   setQuickRange("custom");
                   setEndDate(e.target.value);
@@ -1237,10 +1458,9 @@ export function AdminThermalStrategyPanel() {
           </div>
         </div>
 
-        {/* BARRA DE FILTROS + BOTÕES DE SALAS COM COANFITRIÃO / CONTRATO FIXO */}
+        {/* BARRA DE FILTROS + SELETOR DE VISÃO */}
         <div className="mt-5 pt-4 border-t border-stone-200/80 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Botões de Modo de Visão: Todas | Coanfitrião | Contratos Fixos */}
             <div className="flex flex-wrap items-center bg-white p-1 rounded-xl border border-stone-200">
               <button
                 type="button"
@@ -1344,27 +1564,38 @@ export function AdminThermalStrategyPanel() {
                 ))}
               </select>
             </div>
-
-            {(selectedClinicId !== "all" ||
-              selectedRoomId !== "all" ||
-              contractFilterMode !== "all") && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setSelectedClinicId("all");
-                  setSelectedRoomId("all");
-                  setContractFilterMode("all");
-                }}
-                className="h-9 text-xs font-semibold text-[#BF4B24] hover:bg-orange-50 rounded-xl cursor-pointer"
-              >
-                Limpar filtros
-              </Button>
-            )}
           </div>
 
-          <div className="flex items-center gap-2 self-start xl:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start xl:self-auto">
+            {/* Alternador de Cor: Termômetro 30d vs Período Selecionado */}
+            <div className="flex bg-white p-1 rounded-xl border border-stone-200">
+              <button
+                type="button"
+                onClick={() => setColorBasis("hist30d")}
+                title="Colore os blocos com base nos últimos 30 dias para destacar horários quentes e frios"
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all flex items-center gap-1 cursor-pointer ${
+                  colorBasis === "hist30d"
+                    ? "bg-[#BF4B24] text-white"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                <Flame className="w-3.5 h-3.5" />
+                Termômetro 30d (Quente/Frio)
+              </button>
+              <button
+                type="button"
+                onClick={() => setColorBasis("selected")}
+                title="Colore os blocos apenas pela ocupação já reservada nas datas selecionadas"
+                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${
+                  colorBasis === "selected"
+                    ? "bg-slate-900 text-white"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                Cor do Período
+              </button>
+            </div>
+
             <div className="flex bg-white p-1 rounded-xl border border-stone-200">
               <button
                 type="button"
@@ -1388,7 +1619,7 @@ export function AdminThermalStrategyPanel() {
                 }`}
               >
                 <Clock className="w-3.5 h-3.5" />
-                Hora a Hora (08h–22h)
+                Hora a Hora (1h por janela)
               </button>
             </div>
           </div>
@@ -1396,9 +1627,48 @@ export function AdminThermalStrategyPanel() {
       </div>
 
       {/* ================================================================== */}
-      {/* PAINEL DETALHADO DE DEMANDA POR SALA (COANFITRIÕES & CONTRATOS)    */}
-      {/* Aparece quando o botão Coanfitrião ou Contrato Fixo está ativo     */}
+      {/* RADAR DE PROMOÇÕES: SUGESTÃO AUTOMÁTICA DE HORÁRIOS FRIOS vs QUENTES */}
       {/* ================================================================== */}
+      {thermalAnalysis.promoCandidateCells.length > 0 && (
+        <div className="px-6 py-3.5 bg-sky-50/70 border-b border-sky-200/80 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-sky-600 text-white flex items-center justify-center shrink-0">
+              <Tag className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-sky-900 block">
+                Sugestão de Promoção (Horários Frios nos Últimos 30 Dias + Vagos
+                no Período)
+              </span>
+              <p className="text-xs text-sky-800">
+                Estes horários tiveram baixa procura nos últimos 30 dias e estão
+                com vagas abertas no período selecionado:
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {thermalAnalysis.promoCandidateCells.map((c) => (
+              <button
+                key={`${c.dow}_${c.colId}`}
+                type="button"
+                onClick={() => setSelectedCell(c)}
+                className="px-3 py-1.5 rounded-xl bg-white hover:bg-sky-100 border border-sky-200 text-xs font-bold text-sky-950 flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+              >
+                <Snowflake className="w-3.5 h-3.5 text-sky-600" />
+                <span>
+                  {c.dayShort} • {c.colLabel.replace(" (1h)", "")}
+                </span>
+                <span className="text-[10px] font-semibold text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded">
+                  30d: {c.hist30dOccupancyPct}% • {c.freeHours} livre(s)
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* PAINEL DETALHADO DE DEMANDA POR SALA (COANFITRIÕES & CONTRATOS) */}
       {contractFilterMode !== "all" && (
         <div className="p-6 bg-stone-50/90 border-b border-slate-200 space-y-4 animate-in fade-in duration-200">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1483,7 +1753,6 @@ export function AdminThermalStrategyPanel() {
                         )}
                       </div>
 
-                      {/* Identificação do Coanfitrião ou Locatários de Turno Fixo */}
                       <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 text-[11px] space-y-1">
                         {rm.isCohostRoom && (
                           <div className="flex items-center justify-between text-slate-700">
@@ -1512,7 +1781,6 @@ export function AdminThermalStrategyPanel() {
                       </div>
                     </div>
 
-                    {/* Métricas de Horas dentro da Sala */}
                     <div className="space-y-2.5">
                       <div className="grid grid-cols-3 gap-2 text-center">
                         <div className="p-2 rounded-xl bg-slate-50 border border-slate-100">
@@ -1528,9 +1796,7 @@ export function AdminThermalStrategyPanel() {
 
                         <div className="p-2 rounded-xl bg-slate-50 border border-slate-100">
                           <span className="text-[10px] text-slate-400 block">
-                            {rm.contractHours > 0
-                              ? "Contr + Alugadas"
-                              : "Já Alugadas"}
+                            Já Alugadas
                           </span>
                           <strong className="text-xs font-bold text-slate-800">
                             {rm.contractHours + subleasedOrBookedHours}h
@@ -1547,7 +1813,6 @@ export function AdminThermalStrategyPanel() {
                         </div>
                       </div>
 
-                      {/* Barra Visual de Divisão das Horas da Sala */}
                       <div className="space-y-1">
                         <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden flex">
                           {rm.availableHours > 0 && (
@@ -1574,8 +1839,8 @@ export function AdminThermalStrategyPanel() {
                           <span>
                             {rm.freeHours > 0 ? (
                               <strong className="text-slate-800">
-                                {freeSharePct}% da capacidade aberta ainda está
-                                livre
+                                {freeSharePct}% livre • Hist. 30d:{" "}
+                                {rm.hist30dOccupancyPct}%
                               </strong>
                             ) : (
                               "100% preenchida no período"
@@ -1601,7 +1866,7 @@ export function AdminThermalStrategyPanel() {
           <button
             type="button"
             onClick={() => setSelectedRoomId("all")}
-            className={`min-w-[195px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
+            className={`min-w-[205px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
               selectedRoomId === "all"
                 ? "bg-slate-900 text-white border-slate-900"
                 : "bg-white text-slate-800 border-slate-200 hover:border-slate-300"
@@ -1611,8 +1876,8 @@ export function AdminThermalStrategyPanel() {
               <span className="text-[10px] font-semibold uppercase tracking-wider opacity-75">
                 Consolidado ({roomsInSelectedClinic.length} salas)
               </span>
-              <span className="text-[11px] font-bold tabular-nums">
-                {thermalAnalysis.totals.overallOccupancyPct}%
+              <span className="text-[10px] font-bold tabular-nums bg-white/15 px-1.5 py-0.5 rounded">
+                30d: {thermalAnalysis.totals.overallHist30Pct}%
               </span>
             </div>
             <p className="text-xs font-bold mt-1 truncate">
@@ -1624,14 +1889,8 @@ export function AdminThermalStrategyPanel() {
                     ? "Todas as Salas"
                     : clinicsList.find((c) => c.id === selectedClinicId)?.name}
             </p>
-            <div className="mt-2 flex items-center justify-between text-[10px] opacity-80 tabular-nums">
-              <span>Contr: {thermalAnalysis.totals.totalContract}h</span>
-              <span>
-                Loc:{" "}
-                {thermalAnalysis.totals.totalPackage +
-                  thermalAnalysis.totals.totalAvulso}
-                h
-              </span>
+            <div className="mt-2 flex items-center justify-between text-[10px] opacity-85 tabular-nums">
+              <span>Alugados: {thermalAnalysis.totals.totalOccupied}h</span>
               <span>Livres: {thermalAnalysis.totals.totalFree}h</span>
             </div>
           </button>
@@ -1643,7 +1902,7 @@ export function AdminThermalStrategyPanel() {
                 key={rm.id}
                 type="button"
                 onClick={() => setSelectedRoomId(isSelected ? "all" : rm.id)}
-                className={`min-w-[215px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
+                className={`min-w-[220px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
                   isSelected
                     ? "bg-[#BF4B24] text-white border-[#BF4B24]"
                     : "bg-white text-slate-800 border-slate-200 hover:border-slate-300"
@@ -1657,8 +1916,8 @@ export function AdminThermalStrategyPanel() {
                   >
                     {rm.clinicName} • {rm.tierLabel}
                   </span>
-                  <span className="text-[11px] font-bold tabular-nums">
-                    {rm.occupancyPct}%
+                  <span className="text-[10px] font-bold tabular-nums">
+                    30d: {rm.hist30dOccupancyPct}%
                   </span>
                 </div>
 
@@ -1682,8 +1941,7 @@ export function AdminThermalStrategyPanel() {
                     isSelected ? "text-white/90" : "text-slate-500"
                   }`}
                 >
-                  <span>Contr: {rm.contractHours}h</span>
-                  <span>Loc: {rm.packageHours + rm.avulsoHours}h</span>
+                  <span>Alugados: {rm.occupiedHours}h</span>
                   <span
                     className={
                       !isSelected && rm.freeHours > 0
@@ -1700,51 +1958,51 @@ export function AdminThermalStrategyPanel() {
         </div>
       </div>
 
-      {/* RESUMO NUMÉRICO */}
+      {/* RESUMO NUMÉRICO DO PERÍODO SELECIONADO vs ÚLTIMOS 30 DIAS */}
       <div className="grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-slate-200 border-b border-slate-200 bg-white tabular-nums">
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Taxa de Ocupação no Período
+            Horários Já Alugados no Período
           </span>
           <p className="text-xl font-bold text-slate-900 mt-1">
-            {thermalAnalysis.totals.overallOccupancyPct}%{" "}
+            {thermalAnalysis.totals.totalOccupied}h{" "}
             <span className="text-xs font-normal text-slate-400">
-              ({thermalAnalysis.totals.totalOccupied}h /{" "}
-              {thermalAnalysis.totals.totalAvail}h)
+              de {thermalAnalysis.totals.totalAvail}h (
+              {thermalAnalysis.totals.overallOccupancyPct}%)
             </span>
           </p>
         </div>
 
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Horas Bloqueadas em Turnos Fixos
-          </span>
-          <p className="text-xl font-bold text-slate-900 mt-1">
-            {thermalAnalysis.totals.totalContract}h{" "}
-            <span className="text-xs font-normal text-slate-500">
-              ({thermalAnalysis.totals.overallContractPct}% do estoque)
-            </span>
-          </p>
-        </div>
-
-        <div className="p-4 sm:px-6">
-          <span className="text-[11px] font-medium text-slate-500 block">
-            Reservas Pass+ e Avulsas (Sublocadas)
+            Termômetro Histórico (Últimos 30 Dias)
           </span>
           <p className="text-xl font-bold text-[#BF4B24] mt-1">
-            {thermalAnalysis.totals.totalPackage +
-              thermalAnalysis.totals.totalAvulso}
-            h{" "}
+            {thermalAnalysis.totals.overallHist30Pct}%{" "}
             <span className="text-xs font-normal text-slate-500">
-              ({thermalAnalysis.totals.totalPackage}h Pass+ •{" "}
-              {thermalAnalysis.totals.totalAvulso}h Avulso)
+              de ocupação média nos últimos 30d
             </span>
           </p>
         </div>
 
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Demanda de Horas Livres p/ Alugar
+            Divisão dos Alugados no Período
+          </span>
+          <p className="text-xl font-bold text-slate-900 mt-1">
+            {thermalAnalysis.totals.totalContract}h Fixo{" "}
+            <span className="text-xs font-normal text-slate-500">
+              •{" "}
+              {thermalAnalysis.totals.totalPackage +
+                thermalAnalysis.totals.totalAvulso}
+              h Avulso/Pass+
+            </span>
+          </p>
+        </div>
+
+        <div className="p-4 sm:px-6">
+          <span className="text-[11px] font-medium text-slate-500 block">
+            Horários Livres p/ Alugar no Período
           </span>
           <p className="text-xl font-bold text-emerald-700 mt-1">
             {thermalAnalysis.totals.totalFree}h{" "}
@@ -1771,21 +2029,22 @@ export function AdminThermalStrategyPanel() {
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-xs bg-[#9A3C1D]" />
-              Alta Ocupação (≥70%)
+              🔥 Horário Quente (≥65% nos últimos 30d)
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-xs bg-orange-200 border border-orange-300" />
-              Ocupação Moderada {"(35%–69%)"}
+              ☀️ Horário Morno {"(35%–64% nos últimos 30d)"}
             </span>
             <span className="inline-flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-xs bg-sky-100 border border-sky-300" />
-              Baixa Ocupação {"(<35%)"}
+              ❄️ Horário Frio {"(<35% nos últimos 30d — Ideal p/ Promoção)"}
             </span>
           </div>
 
-          <span className="text-[11px] text-slate-400">
-            Clique em qualquer bloco para ver quantas horas livres cada sala tem
-            naquele turno
+          <span className="text-[11px] text-slate-500 font-medium">
+            {matrixGranularity === "hourly"
+              ? "Cada coluna representa exatamente 1 hora de relógio (ex: 08h às 09h = 1h)"
+              : "Clique em qualquer bloco para ver os horários alugados vs. termômetro de 30 dias por sala"}
           </span>
         </div>
 
@@ -1793,8 +2052,8 @@ export function AdminThermalStrategyPanel() {
           <div
             className={
               matrixGranularity === "shifts"
-                ? "min-w-[680px]"
-                : "min-w-[1150px]"
+                ? "min-w-[720px]"
+                : "min-w-[1320px]"
             }
           >
             <div
@@ -1802,8 +2061,8 @@ export function AdminThermalStrategyPanel() {
               style={{
                 gridTemplateColumns:
                   matrixGranularity === "shifts"
-                    ? "110px repeat(4, minmax(130px, 1fr))"
-                    : "90px repeat(15, minmax(66px, 1fr))",
+                    ? "115px repeat(4, minmax(140px, 1fr))"
+                    : "100px repeat(15, minmax(76px, 1fr))",
               }}
             >
               <div className="text-[10px] font-semibold uppercase text-slate-400 self-end pb-1">
@@ -1812,9 +2071,18 @@ export function AdminThermalStrategyPanel() {
               {thermalAnalysis.columns.map((col) => (
                 <div
                   key={col.id}
-                  className="text-center text-[10px] font-bold text-slate-600 uppercase tracking-wider bg-slate-100/80 py-2 rounded-lg"
+                  className="text-center text-[10px] font-bold text-slate-700 uppercase tracking-wider bg-slate-100 py-2 rounded-lg"
                 >
-                  {matrixGranularity === "shifts" ? col.label : col.shortLabel}
+                  {matrixGranularity === "shifts" ? (
+                    col.label
+                  ) : (
+                    <div className="flex flex-col items-center leading-tight">
+                      <span>{col.shortLabel}</span>
+                      <span className="text-[8px] font-semibold text-slate-400 normal-case">
+                        (1 hora)
+                      </span>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -1827,8 +2095,8 @@ export function AdminThermalStrategyPanel() {
                   style={{
                     gridTemplateColumns:
                       matrixGranularity === "shifts"
-                        ? "110px repeat(4, minmax(130px, 1fr))"
-                        : "90px repeat(15, minmax(66px, 1fr))",
+                        ? "115px repeat(4, minmax(140px, 1fr))"
+                        : "100px repeat(15, minmax(76px, 1fr))",
                   }}
                 >
                   <div className="flex flex-col justify-center pr-2">
@@ -1836,12 +2104,18 @@ export function AdminThermalStrategyPanel() {
                       {row.dayFull.split("-")[0]}
                     </span>
                     <span className="text-[10px] text-slate-400">
-                      {row.occurrences} {row.occurrences === 1 ? "dia" : "dias"}
+                      {row.occurrences}{" "}
+                      {row.occurrences === 1
+                        ? "data no filtro"
+                        : "datas no filtro"}
                     </span>
                   </div>
 
                   {row.cells.map((cell) => {
                     const styleClass = getCellVisualStyle(cell);
+                    const isDarkBg =
+                      cell.status === "contract_locked" ||
+                      cell.status === "hot";
 
                     if (matrixGranularity === "hourly") {
                       return (
@@ -1849,17 +2123,37 @@ export function AdminThermalStrategyPanel() {
                           key={cell.colId}
                           type="button"
                           onClick={() => setSelectedCell(cell)}
-                          className={`h-13 rounded-xl border p-1.5 flex flex-col items-center justify-center transition-all cursor-pointer tabular-nums ${styleClass}`}
+                          className={`min-h-[64px] rounded-xl border p-1.5 flex flex-col items-center justify-between transition-all cursor-pointer tabular-nums ${styleClass}`}
                         >
                           {cell.status === "closed" ? (
-                            <span className="text-[10px]">–</span>
+                            <span className="text-[10px] m-auto">–</span>
                           ) : (
                             <>
-                              <span className="text-xs font-bold">
-                                {cell.occupancyPct}%
-                              </span>
-                              <span className="text-[9px] opacity-80">
-                                {cell.freeHours}h livres
+                              <div className="text-center leading-tight">
+                                <span className="text-[10px] font-extrabold block">
+                                  Alug: {cell.occupiedHours}/
+                                  {cell.availableHours}
+                                </span>
+                                <span className="text-[9px] opacity-85 block">
+                                  Livres: {cell.freeHours}
+                                </span>
+                              </div>
+
+                              <span
+                                className={`text-[8px] font-bold px-1 py-0.5 rounded w-full text-center truncate ${
+                                  isDarkBg
+                                    ? "bg-black/25 text-white"
+                                    : cell.hist30dTemperature === "cold"
+                                      ? "bg-sky-200/80 text-sky-950"
+                                      : "bg-orange-200/80 text-[#9A3C1D]"
+                                }`}
+                              >
+                                30d: {cell.hist30dOccupancyPct}%{" "}
+                                {cell.hist30dTemperature === "hot"
+                                  ? "🔥"
+                                  : cell.hist30dTemperature === "warm"
+                                    ? "☀️"
+                                    : "❄️"}
                               </span>
                             </>
                           )}
@@ -1872,7 +2166,7 @@ export function AdminThermalStrategyPanel() {
                         key={cell.colId}
                         type="button"
                         onClick={() => setSelectedCell(cell)}
-                        className={`min-h-[74px] rounded-xl border p-3 flex flex-col justify-between text-left transition-all cursor-pointer tabular-nums ${styleClass}`}
+                        className={`min-h-[88px] rounded-xl border p-3 flex flex-col justify-between text-left transition-all cursor-pointer tabular-nums ${styleClass}`}
                       >
                         {cell.status === "closed" ? (
                           <div className="m-auto text-center">
@@ -1882,36 +2176,34 @@ export function AdminThermalStrategyPanel() {
                           </div>
                         ) : (
                           <>
-                            <div className="flex items-center justify-between w-full gap-1">
-                              <span className="text-base font-bold tracking-tight">
-                                {cell.occupancyPct}%
-                              </span>
-                              <span className="text-[10px] font-medium opacity-85">
-                                {cell.occupiedHours}h / {cell.availableHours}h
-                              </span>
+                            <div className="flex items-start justify-between w-full gap-1">
+                              <div>
+                                <span className="text-sm font-black tracking-tight block">
+                                  Alugados: {cell.occupiedHours}h
+                                </span>
+                                <span className="text-[10px] font-semibold opacity-85 block">
+                                  de {cell.availableHours}h no período (
+                                  {cell.occupancyPct}%)
+                                </span>
+                              </div>
+                              {renderTemperatureBadge(
+                                cell.hist30dTemperature,
+                                cell.hist30dOccupancyPct,
+                                isDarkBg,
+                              )}
                             </div>
 
-                            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] font-medium opacity-90">
-                              {cell.contractHours > 0 && (
-                                <span>Contr: {cell.contractHours}h</span>
-                              )}
-                              {cell.packageHours + cell.avulsoHours > 0 && (
-                                <span>
-                                  {cell.contractHours > 0 ? "• " : ""}Loc:{" "}
-                                  {cell.packageHours + cell.avulsoHours}h
-                                </span>
-                              )}
-                              {cell.freeHours > 0 && (
-                                <span>
-                                  {cell.contractHours +
-                                    cell.packageHours +
-                                    cell.avulsoHours >
-                                  0
-                                    ? "• "
-                                    : ""}
-                                  Livres: {cell.freeHours}h
-                                </span>
-                              )}
+                            <div className="mt-2 pt-1.5 border-t border-current/10 flex flex-wrap items-center justify-between gap-1 text-[10px] font-semibold opacity-95">
+                              <span>
+                                {cell.contractHours > 0
+                                  ? `Fixo: ${cell.contractHours}h • `
+                                  : ""}
+                                Avulso/Pass:{" "}
+                                {cell.packageHours + cell.avulsoHours}h
+                              </span>
+                              <span className="underline">
+                                Livres: {cell.freeHours}h
+                              </span>
                             </div>
                           </>
                         )}
@@ -1925,7 +2217,7 @@ export function AdminThermalStrategyPanel() {
         </div>
       </div>
 
-      {/* MODAL DE DETALHAMENTO POR SALA */}
+      {/* MODAL DE DETALHAMENTO POR SALA (PERÍODO SELECIONADO + COMPARATIVO 30 DIAS) */}
       <Dialog
         open={Boolean(selectedCell)}
         onOpenChange={(open) => !open && setSelectedCell(null)}
@@ -1936,17 +2228,36 @@ export function AdminThermalStrategyPanel() {
               <DialogHeader className="px-6 py-4 bg-slate-900 text-white shrink-0">
                 <div className="flex items-center justify-between pr-6">
                   <div>
-                    <DialogTitle className="text-base font-bold text-white flex items-center gap-2">
+                    <DialogTitle className="text-base font-bold text-white flex items-center gap-2 flex-wrap">
                       <span>
                         {selectedCell.dayFull} • {selectedCell.colLabel}
                       </span>
-                      <Badge className="bg-[#BF4B24] text-white border-0 text-xs font-bold">
-                        {selectedCell.occupancyPct}% Ocupado
+                      <Badge
+                        className={`border-0 text-xs font-bold ${
+                          selectedCell.hist30dTemperature === "hot"
+                            ? "bg-[#BF4B24] text-white"
+                            : selectedCell.hist30dTemperature === "warm"
+                              ? "bg-amber-400 text-slate-950"
+                              : "bg-sky-400 text-slate-950"
+                        }`}
+                      >
+                        {selectedCell.hist30dTemperature === "hot"
+                          ? `🔥 Horário Quente (30d: ${selectedCell.hist30dOccupancyPct}%)`
+                          : selectedCell.hist30dTemperature === "warm"
+                            ? `☀️ Horário Morno (30d: ${selectedCell.hist30dOccupancyPct}%)`
+                            : `❄️ Horário Frio — Ideal p/ Promoção (30d: ${selectedCell.hist30dOccupancyPct}%)`}
                       </Badge>
                     </DialogTitle>
-                    <DialogDescription className="text-xs text-slate-400 mt-0.5">
-                      {selectedCell.occupiedHours}h ocupadas e{" "}
-                      {selectedCell.freeHours}h livres para alugar no período.
+                    <DialogDescription className="text-xs text-slate-300 mt-1">
+                      Duração da janela:{" "}
+                      <strong>
+                        {selectedCell.windowDurationHours}h por dia
+                      </strong>{" "}
+                      ({selectedCell.occurrencesInPeriod}{" "}
+                      {selectedCell.occurrencesInPeriod === 1
+                        ? "data no período selecionado"
+                        : "datas no período selecionado"}
+                      ).
                     </DialogDescription>
                   </div>
                 </div>
@@ -1955,24 +2266,27 @@ export function AdminThermalStrategyPanel() {
               <div className="grid grid-cols-3 divide-x divide-slate-200 border-b border-slate-200 bg-slate-50 text-center py-3 text-xs tabular-nums shrink-0">
                 <div>
                   <span className="text-[10px] text-slate-500 block">
-                    Turnos Fixos Bloqueados
+                    Já Alugados no Período
                   </span>
                   <strong className="text-sm font-bold text-slate-900">
-                    {selectedCell.contractHours}h (
-                    {selectedCell.contractSharePct}%)
+                    {selectedCell.occupiedHours}h de{" "}
+                    {selectedCell.availableHours}h ({selectedCell.occupancyPct}
+                    %)
                   </strong>
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-500 block">
-                    Pass+ e Horas Avulsas
+                    Histórico Últimos 30 Dias
                   </span>
                   <strong className="text-sm font-bold text-[#BF4B24]">
-                    {selectedCell.packageHours + selectedCell.avulsoHours}h
+                    {selectedCell.hist30dOccupancyPct}% ocupado (
+                    {selectedCell.hist30dOccupiedHours}h /{" "}
+                    {selectedCell.hist30dAvailableHours}h)
                   </strong>
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-500 block">
-                    Horas Livres p/ Alugar
+                    Livres p/ Alugar no Período
                   </span>
                   <strong className="text-sm font-bold text-emerald-700">
                     {selectedCell.freeHours}h (R${" "}
@@ -1995,6 +2309,21 @@ export function AdminThermalStrategyPanel() {
                         <Badge className="bg-slate-100 text-slate-700 border-0 text-[10px]">
                           {rb.tierLabel}
                         </Badge>
+                        <Badge
+                          className={`border-0 text-[10px] font-bold ${
+                            rb.hist30dTemperature === "hot"
+                              ? "bg-orange-100 text-[#9A3C1D]"
+                              : rb.hist30dTemperature === "warm"
+                                ? "bg-amber-100 text-amber-900"
+                                : "bg-sky-100 text-sky-900"
+                          }`}
+                        >
+                          {rb.hist30dTemperature === "hot"
+                            ? `🔥 30d: ${rb.hist30dOccupancyPct}% (Quente)`
+                            : rb.hist30dTemperature === "warm"
+                              ? `☀️ 30d: ${rb.hist30dOccupancyPct}% (Morno)`
+                              : `❄️ 30d: ${rb.hist30dOccupancyPct}% (Frio • Promo)`}
+                        </Badge>
                         {rb.isCohostRoom && (
                           <Badge className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold">
                             Co-Host: {rb.cohostName}
@@ -2006,21 +2335,25 @@ export function AdminThermalStrategyPanel() {
                           </Badge>
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-500 mt-0.5">
-                        {rb.clinicName} • R$ {formatBRL(rb.hourlyRate)}/h
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        {rb.clinicName} • R$ {formatBRL(rb.hourlyRate)}/h •
+                        Janela de{" "}
+                        <strong>{rb.windowDurationHours}h por dia</strong>
                       </p>
                     </div>
 
                     <div className="text-right text-xs">
                       <span className="font-bold text-slate-900 block">
                         {rb.availableHours === 0
-                          ? "Fechada p/ Uso Próprio"
-                          : `${rb.freeHours}h livres p/ alugar (de ${rb.availableHours}h)`}
+                          ? "Fechada neste horário"
+                          : `Alugados: ${rb.occupiedHours}h • Livres: ${rb.freeHours}h`}
                       </span>
                       <span className="text-[10px] text-slate-500">
-                        Contr: {rb.contractHours}h • Sublocadas:{" "}
-                        {rb.packageHours + rb.avulsoHours}h • Ocupação:{" "}
-                        {rb.occupancyPct}%
+                        {rb.daysInPeriod === 1
+                          ? `Capacidade de ${rb.windowDurationHours}h nesta data`
+                          : `${rb.daysInPeriod} datas no período (${rb.availableHours}h totais)`}{" "}
+                        • Contr: {rb.contractHours}h • Avulso/Pass:{" "}
+                        {rb.packageHours + rb.avulsoHours}h
                       </span>
                     </div>
                   </div>
