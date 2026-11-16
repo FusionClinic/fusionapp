@@ -19,7 +19,10 @@ import {
   Clock,
   Layers,
   Loader2,
-  BarChart3,
+  Users,
+  FileText,
+  Unlock,
+  Lock,
 } from "lucide-react";
 import {
   format,
@@ -93,6 +96,8 @@ const ALL_HOURS_LIST = [
   8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
 ];
 
+type ContractFilterMode = "all" | "cohost_only" | "contracts_only";
+
 interface CellRoomBreakdown {
   roomId: string;
   roomName: string;
@@ -107,6 +112,8 @@ interface CellRoomBreakdown {
   freeHours: number;
   occupancyPct: number;
   hasFixedContract: boolean;
+  isCohostRoom: boolean;
+  cohostName: string | null;
   contractNote: string | null;
 }
 
@@ -278,6 +285,61 @@ function getRoomOpenHoursOnDate(room: any, dateObj: Date): Set<number> {
   return openHours;
 }
 
+/**
+ * Resume quais dias e quantas horas por semana a sala deixa aberta na vitrine
+ * (muito útil para salas com Coanfitrião).
+ */
+function summarizeRoomWeeklySubleaseSchedule(room: any): {
+  weeklyOpenHours: number;
+  daysSummary: string;
+} {
+  let availability = room?.availability;
+  if (typeof availability === "string") {
+    try {
+      availability = JSON.parse(availability);
+    } catch {
+      availability = null;
+    }
+  }
+
+  if (!availability || !Array.isArray(availability.weekConfig)) {
+    return {
+      weeklyOpenHours: 54,
+      daysSummary: "Seg a Sex (10h/dia) • Sáb (4h)",
+    };
+  }
+
+  let totalWeekly = 0;
+  const parts: string[] = [];
+
+  WEEKDAYS_ORDER.forEach((wd) => {
+    const dayCfg = availability.weekConfig.find(
+      (w: any) => Number(w.day) === wd.dow,
+    );
+    if (dayCfg && dayCfg.enabled) {
+      const count = Array.isArray(dayCfg.availableHours)
+        ? dayCfg.availableHours.length
+        : 9;
+      if (count > 0) {
+        totalWeekly += count;
+        parts.push(`${wd.short} (${count}h)`);
+      }
+    }
+  });
+
+  return {
+    weeklyOpenHours: totalWeekly,
+    daysSummary:
+      parts.length > 0 ? parts.join(" • ") : "Nenhum dia aberto p/ sublocar",
+  };
+}
+
+/**
+ * Calcula quais horas abertas da sala naquela data estão bloqueadas por Contratos Fixos.
+ * IMPORTANTE: Se o contrato for de Coanfitrião (`monthly_exclusive` + `allow_sublease = true`),
+ * os horários que estão abertos em `openHours` (vitrine da sala) NÃO são marcados como bloqueados,
+ * pois são exatamente os horários que o Coanfitrião liberou para sublocação!
+ */
 function getContractCoveredHoursOnDate(
   roomContracts: any[],
   dateObj: Date,
@@ -301,13 +363,16 @@ function getContractCoveredHoursOnDate(
     const specName = c.specialist_name || "Locatário Fixo";
 
     if (cType.includes("monthly_exclusive")) {
-      openHours.forEach((h) => covered.add(h));
-      notes.push(
-        c.allow_sublease
-          ? `Contrato Mensal / Co-Host (${specName})`
-          : `Sala Exclusiva (${specName})`,
-      );
-      return;
+      if (c.allow_sublease) {
+        // Coanfitrião: As horas abertas em `openHours` estão disponíveis para sublocar!
+        notes.push(`Coanfitrião (${specName})`);
+        return;
+      } else {
+        // Sala 100% exclusiva sem sublocação: bloqueia todas as horas
+        openHours.forEach((h) => covered.add(h));
+        notes.push(`Sala Exclusiva (${specName})`);
+        return;
+      }
     }
 
     let sched = c.schedule_config;
@@ -320,15 +385,72 @@ function getContractCoveredHoursOnDate(
     }
 
     if (sched && typeof sched === "object") {
-      const daysArray = Array.isArray(sched.days)
-        ? sched.days.map(Number)
-        : Array.isArray(sched.weekdays)
-          ? sched.weekdays.map(Number)
-          : null;
+      let matchedAnyHour = false;
+
+      // 1. Novo formato multi-turnos por dia (`scheduleRules`)
+      if (
+        Array.isArray(sched.scheduleRules) &&
+        sched.scheduleRules.length > 0
+      ) {
+        sched.scheduleRules.forEach((rule: any) => {
+          if (Number(rule.dayOfWeek) !== dow) return;
+          const sH = Number(rule.startHour ?? 8);
+          const eH = Number(rule.endHour ?? 20);
+          for (let h = sH; h < eH; h++) {
+            if (openHours.has(h)) {
+              covered.add(h);
+              matchedAnyHour = true;
+            }
+          }
+        });
+        if (matchedAnyHour) {
+          notes.push(`Turno Fixo (${specName})`);
+        }
+        return;
+      }
+
+      // 2. Formato mapa `day_hours`
+      if (sched.day_hours && typeof sched.day_hours === "object") {
+        const dayArr = sched.day_hours[String(dow)];
+        if (Array.isArray(dayArr) && dayArr.length > 0) {
+          dayArr.map(Number).forEach((h: number) => {
+            if (openHours.has(h)) {
+              covered.add(h);
+              matchedAnyHour = true;
+            }
+          });
+          if (matchedAnyHour) {
+            notes.push(`Turno Fixo (${specName})`);
+          }
+          return;
+        }
+      }
+
+      // 3. Formato legado: `daysOfWeek` / `days` + `startHour` / `endHour` ou `shifts`
+      const daysArray = Array.isArray(sched.daysOfWeek)
+        ? sched.daysOfWeek.map(Number)
+        : Array.isArray(sched.days)
+          ? sched.days.map(Number)
+          : Array.isArray(sched.weekdays)
+            ? sched.weekdays.map(Number)
+            : null;
 
       if (daysArray && !daysArray.includes(dow)) return;
 
-      let matchedAnyHour = false;
+      if (
+        sched.startHour !== undefined &&
+        sched.endHour !== undefined &&
+        !Array.isArray(sched.hours)
+      ) {
+        const sH = Number(sched.startHour ?? 8);
+        const eH = Number(sched.endHour ?? 20);
+        for (let h = sH; h < eH; h++) {
+          if (openHours.has(h)) {
+            covered.add(h);
+            matchedAnyHour = true;
+          }
+        }
+      }
 
       if (Array.isArray(sched.hours) && sched.hours.length > 0) {
         sched.hours.forEach((hRaw: any) => {
@@ -346,33 +468,35 @@ function getContractCoveredHoursOnDate(
           ? [sched.shift]
           : [];
 
-      shiftsArr.forEach((sh: string) => {
-        const s = String(sh).toLowerCase();
-        if (s.includes("morn") || s.includes("manh")) {
-          [8, 9, 10, 11].forEach((h) => {
-            if (openHours.has(h)) {
-              covered.add(h);
-              matchedAnyHour = true;
-            }
-          });
-        }
-        if (s.includes("after") || s.includes("tard")) {
-          [12, 13, 14, 15, 16, 17].forEach((h) => {
-            if (openHours.has(h)) {
-              covered.add(h);
-              matchedAnyHour = true;
-            }
-          });
-        }
-        if (s.includes("night") || s.includes("noit")) {
-          [18, 19, 20, 21, 22].forEach((h) => {
-            if (openHours.has(h)) {
-              covered.add(h);
-              matchedAnyHour = true;
-            }
-          });
-        }
-      });
+      if (!matchedAnyHour) {
+        shiftsArr.forEach((sh: string) => {
+          const s = String(sh).toLowerCase();
+          if (s.includes("morn") || s.includes("manh")) {
+            [8, 9, 10, 11].forEach((h) => {
+              if (openHours.has(h)) {
+                covered.add(h);
+                matchedAnyHour = true;
+              }
+            });
+          }
+          if (s.includes("after") || s.includes("tard")) {
+            [12, 13, 14, 15, 16, 17].forEach((h) => {
+              if (openHours.has(h)) {
+                covered.add(h);
+                matchedAnyHour = true;
+              }
+            });
+          }
+          if (s.includes("night") || s.includes("noit")) {
+            [18, 19, 20, 21, 22].forEach((h) => {
+              if (openHours.has(h)) {
+                covered.add(h);
+                matchedAnyHour = true;
+              }
+            });
+          }
+        });
+      }
 
       if (matchedAnyHour) {
         notes.push(`Turno Fixo (${specName})`);
@@ -407,6 +531,10 @@ export function AdminThermalStrategyPanel() {
 
   const [selectedClinicId, setSelectedClinicId] = useState<string>("all");
   const [selectedRoomId, setSelectedRoomId] = useState<string>("all");
+
+  // Novo filtro dedicado: Todas | Salas c/ Coanfitrião | Salas c/ Contrato Fixo
+  const [contractFilterMode, setContractFilterMode] =
+    useState<ContractFilterMode>("all");
 
   const [matrixGranularity, setMatrixGranularity] = useState<
     "shifts" | "hourly"
@@ -519,6 +647,52 @@ export function AdminThermalStrategyPanel() {
     fetchThermalData();
   }, [fetchThermalData]);
 
+  // Mapeia quais salas possuem Coanfitrião ou Contratos Fixos vigentes no período
+  const roomContractMetaMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        hasAnyActiveContract: boolean;
+        isCohostRoom: boolean;
+        cohostContract: any | null;
+        fixedSubContracts: any[];
+      }
+    >();
+
+    rooms.forEach((r: any) => {
+      const activeForRoom = contracts.filter(
+        (c: any) =>
+          c.room_id === r.id &&
+          c.status === "active" &&
+          (!c.start_date || String(c.start_date).slice(0, 10) <= endDate) &&
+          (!c.end_date || String(c.end_date).slice(0, 10) >= startDate),
+      );
+
+      const cohostC =
+        activeForRoom.find(
+          (c: any) =>
+            c.contract_type === "monthly_exclusive" &&
+            c.allow_sublease === true,
+        ) || null;
+
+      const fixedSubs = activeForRoom.filter(
+        (c: any) =>
+          !(
+            c.contract_type === "monthly_exclusive" && c.allow_sublease === true
+          ),
+      );
+
+      map.set(r.id, {
+        hasAnyActiveContract: activeForRoom.length > 0,
+        isCohostRoom: Boolean(cohostC),
+        cohostContract: cohostC,
+        fixedSubContracts: fixedSubs,
+      });
+    });
+
+    return map;
+  }, [rooms, contracts, startDate, endDate]);
+
   const clinicsList = useMemo(() => {
     const map = new Map<
       string,
@@ -539,18 +713,50 @@ export function AdminThermalStrategyPanel() {
   }, [rooms, profilesMap]);
 
   const roomsInSelectedClinic = useMemo(() => {
-    if (selectedClinicId === "all") return rooms;
-    return rooms.filter(
-      (r: any) => (r.host_id || "fusion") === selectedClinicId,
-    );
-  }, [rooms, selectedClinicId]);
+    let base = rooms;
+    if (selectedClinicId !== "all") {
+      base = base.filter(
+        (r: any) => (r.host_id || "fusion") === selectedClinicId,
+      );
+    }
+    if (contractFilterMode === "cohost_only") {
+      base = base.filter(
+        (r: any) => roomContractMetaMap.get(r.id)?.isCohostRoom,
+      );
+    } else if (contractFilterMode === "contracts_only") {
+      base = base.filter(
+        (r: any) => roomContractMetaMap.get(r.id)?.hasAnyActiveContract,
+      );
+    }
+    return base;
+  }, [rooms, selectedClinicId, contractFilterMode, roomContractMetaMap]);
 
   const activeScopedRooms = useMemo(() => {
     if (selectedRoomId !== "all") {
-      return roomsInSelectedClinic.filter((r: any) => r.id === selectedRoomId);
+      const found = roomsInSelectedClinic.filter(
+        (r: any) => r.id === selectedRoomId,
+      );
+      if (found.length > 0) return found;
     }
     return roomsInSelectedClinic;
   }, [roomsInSelectedClinic, selectedRoomId]);
+
+  const filterCounts = useMemo(() => {
+    let cohostCount = 0;
+    let contractRoomsCount = 0;
+    rooms.forEach((r: any) => {
+      if (
+        selectedClinicId !== "all" &&
+        (r.host_id || "fusion") !== selectedClinicId
+      ) {
+        return;
+      }
+      const meta = roomContractMetaMap.get(r.id);
+      if (meta?.isCohostRoom) cohostCount += 1;
+      if (meta?.hasAnyActiveContract) contractRoomsCount += 1;
+    });
+    return { cohostCount, contractRoomsCount };
+  }, [rooms, selectedClinicId, roomContractMetaMap]);
 
   const thermalAnalysis = useMemo(() => {
     const parsedStart = startDate
@@ -616,9 +822,8 @@ export function AdminThermalStrategyPanel() {
           const hostId = r.host_id || "fusion";
           const clinicName =
             profilesMap.get(hostId)?.full_name || "Fusion Clinic";
-          const rContracts = (contractsByRoom.get(r.id) || []).filter(
-            (c: any) => c.status === "active",
-          );
+          const meta = roomContractMetaMap.get(r.id);
+
           roomBreakdownsMap.set(r.id, {
             roomId: r.id,
             roomName: r.name,
@@ -632,7 +837,9 @@ export function AdminThermalStrategyPanel() {
             avulsoHours: 0,
             freeHours: 0,
             occupancyPct: 0,
-            hasFixedContract: rContracts.length > 0,
+            hasFixedContract: Boolean(meta?.hasAnyActiveContract),
+            isCohostRoom: Boolean(meta?.isCohostRoom),
+            cohostName: meta?.cohostContract?.specialist_name || null,
             contractNote: null,
           });
         });
@@ -651,6 +858,9 @@ export function AdminThermalStrategyPanel() {
 
           activeScopedRooms.forEach((r: any) => {
             const rb = roomBreakdownsMap.get(r.id)!;
+            const meta = roomContractMetaMap.get(r.id);
+            const cohostContractId = meta?.cohostContract?.id || null;
+
             const openHoursSet = getRoomOpenHoursOnDate(r, d);
             const rContracts = contractsByRoom.get(r.id) || [];
             const { hours: contractCoveredSet, contractNotes } =
@@ -673,6 +883,11 @@ export function AdminThermalStrategyPanel() {
             });
 
             dayBookings.forEach((b: any) => {
+              // Ignora eventual bloqueio antigo do próprio contrato principal do Coanfitrião
+              if (cohostContractId && b.contract_id === cohostContractId) {
+                return;
+              }
+
               const startD = parseISO(b.start_time);
               const endD = b.end_time ? parseISO(b.end_time) : null;
               const startH = getHours(startD);
@@ -825,6 +1040,8 @@ export function AdminThermalStrategyPanel() {
       let avulsoH = 0;
       let freeH = 0;
       const hourlyRate = resolveRoomHourlyRate(r);
+      const meta = roomContractMetaMap.get(r.id);
+      const weeklyScheduleInfo = summarizeRoomWeeklySubleaseSchedule(r);
 
       matrixRows.forEach((row) => {
         row.cells.forEach((c) => {
@@ -859,6 +1076,16 @@ export function AdminThermalStrategyPanel() {
         freeHours: freeH,
         occupancyPct: occPct,
         idleOpportunityBrl: freeH * hourlyRate,
+        hasAnyActiveContract: Boolean(meta?.hasAnyActiveContract),
+        isCohostRoom: Boolean(meta?.isCohostRoom),
+        cohostName: meta?.cohostContract?.specialist_name || null,
+        cohostSplitPct: Number(meta?.cohostContract?.cohost_split_pct || 80),
+        fixedContractsCount: meta?.fixedSubContracts?.length || 0,
+        fixedContractNames: (meta?.fixedSubContracts || [])
+          .map((c: any) => c.specialist_name)
+          .filter(Boolean),
+        weeklyOpenHours: weeklyScheduleInfo.weeklyOpenHours,
+        daysSummary: weeklyScheduleInfo.daysSummary,
       };
     });
 
@@ -870,10 +1097,8 @@ export function AdminThermalStrategyPanel() {
     let totalFree = 0;
     let totalIdleOpportunityBrl = 0;
 
-    const allCellsFlat: ThermalCellStats[] = [];
     matrixRows.forEach((r) => {
       r.cells.forEach((c) => {
-        allCellsFlat.push(c);
         totalAvail += c.availableHours;
         totalOccupied += c.occupiedHours;
         totalContract += c.contractHours;
@@ -893,17 +1118,6 @@ export function AdminThermalStrategyPanel() {
         ? Math.min(100, Math.round((totalContract / totalAvail) * 100))
         : 0;
 
-    const openCells = allCellsFlat.filter((c) => c.availableHours > 0);
-    const coldestCells = [...openCells]
-      .filter((c) => c.status === "cold")
-      .sort((a, b) => b.freeHours - a.freeHours);
-
-    const hottestCells = [...openCells]
-      .filter((c) => c.status === "hot" || c.status === "contract_locked")
-      .sort((a, b) => b.occupancyPct - a.occupancyPct);
-
-    const contractProtectedCells = openCells.filter((c) => c.contractHours > 0);
-
     return {
       columns,
       matrixRows,
@@ -919,11 +1133,6 @@ export function AdminThermalStrategyPanel() {
         overallContractPct,
         totalIdleOpportunityBrl,
       },
-      insights: {
-        topColdCell: coldestCells[0] || null,
-        topHotCell: hottestCells[0] || null,
-        contractProtectedCount: contractProtectedCells.length,
-      },
     };
   }, [
     startDate,
@@ -934,6 +1143,7 @@ export function AdminThermalStrategyPanel() {
     bookings,
     profilesMap,
     matrixGranularity,
+    roomContractMetaMap,
   ]);
 
   const getCellVisualStyle = (cell: ThermalCellStats) => {
@@ -952,17 +1162,27 @@ export function AdminThermalStrategyPanel() {
     return "bg-sky-50/80 border-sky-200/90 text-sky-950 hover:bg-sky-100/70";
   };
 
+  // Filtra apenas os cards de salas que têm Coanfitrião ou Contrato Fixo para o painel de Demanda
+  const contractAndCohostRooms = useMemo(() => {
+    return thermalAnalysis.roomSummaries.filter((rm) =>
+      contractFilterMode === "cohost_only"
+        ? rm.isCohostRoom
+        : rm.hasAnyActiveContract,
+    );
+  }, [thermalAnalysis.roomSummaries, contractFilterMode]);
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200/90 mb-8 overflow-hidden shadow-2xs print:break-inside-avoid">
       <div className="p-6 border-b border-slate-200/80 bg-[#FAF7F4]">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
           <div>
             <h2 className="text-base font-bold text-slate-900 tracking-tight">
-              Ocupação por Turno, Clínica e Sala
+              Ocupação por Turno, Clínica, Coanfitriões e Salas
             </h2>
             <p className="text-xs text-slate-500 mt-0.5 max-w-3xl">
-              Acompanhe os horários de maior procura, turnos já ocupados por
-              contratos fixos e janelas disponíveis em cada consultório.
+              Visualize a ocupação geral ou filtre as salas com Coanfitrião e
+              Contratos Fixos para acompanhar quantas horas livres ainda restam
+              para alugar em cada sala.
             </p>
           </div>
 
@@ -1017,8 +1237,69 @@ export function AdminThermalStrategyPanel() {
           </div>
         </div>
 
-        <div className="mt-5 pt-4 border-t border-stone-200/80 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        {/* BARRA DE FILTROS + BOTÕES DE SALAS COM COANFITRIÃO / CONTRATO FIXO */}
+        <div className="mt-5 pt-4 border-t border-stone-200/80 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2.5">
+            {/* Botões de Modo de Visão: Todas | Coanfitrião | Contratos Fixos */}
+            <div className="flex flex-wrap items-center bg-white p-1 rounded-xl border border-stone-200">
+              <button
+                type="button"
+                onClick={() => {
+                  setContractFilterMode("all");
+                  setSelectedRoomId("all");
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  contractFilterMode === "all"
+                    ? "bg-slate-900 text-white"
+                    : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                Todas as Salas ({rooms.length})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setContractFilterMode(
+                    contractFilterMode === "cohost_only"
+                      ? "all"
+                      : "cohost_only",
+                  );
+                  setSelectedRoomId("all");
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  contractFilterMode === "cohost_only"
+                    ? "bg-[#BF4B24] text-white"
+                    : "text-slate-700 hover:bg-orange-50 hover:text-[#BF4B24]"
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Salas c/ Coanfitrião ({filterCounts.cohostCount})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setContractFilterMode(
+                    contractFilterMode === "contracts_only"
+                      ? "all"
+                      : "contracts_only",
+                  );
+                  setSelectedRoomId("all");
+                }}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                  contractFilterMode === "contracts_only"
+                    ? "bg-slate-900 text-white"
+                    : "text-slate-700 hover:bg-slate-100"
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>
+                  Salas c/ Contrato Fixo ({filterCounts.contractRoomsCount})
+                </span>
+              </button>
+            </div>
+
             <div className="flex items-center gap-2 bg-white border border-stone-200 rounded-xl px-3 h-10">
               <Building2 className="w-4 h-4 text-[#BF4B24] shrink-0" />
               <span className="text-[11px] font-semibold text-slate-400">
@@ -1064,7 +1345,9 @@ export function AdminThermalStrategyPanel() {
               </select>
             </div>
 
-            {(selectedClinicId !== "all" || selectedRoomId !== "all") && (
+            {(selectedClinicId !== "all" ||
+              selectedRoomId !== "all" ||
+              contractFilterMode !== "all") && (
               <Button
                 type="button"
                 variant="ghost"
@@ -1072,15 +1355,16 @@ export function AdminThermalStrategyPanel() {
                 onClick={() => {
                   setSelectedClinicId("all");
                   setSelectedRoomId("all");
+                  setContractFilterMode("all");
                 }}
-                className="h-9 text-xs font-semibold text-[#BF4B24] hover:bg-orange-50 rounded-xl"
+                className="h-9 text-xs font-semibold text-[#BF4B24] hover:bg-orange-50 rounded-xl cursor-pointer"
               >
-                Limpar seleção
+                Limpar filtros
               </Button>
             )}
           </div>
 
-          <div className="flex items-center gap-2 self-start lg:self-auto">
+          <div className="flex items-center gap-2 self-start xl:self-auto">
             <div className="flex bg-white p-1 rounded-xl border border-stone-200">
               <button
                 type="button"
@@ -1111,6 +1395,206 @@ export function AdminThermalStrategyPanel() {
         </div>
       </div>
 
+      {/* ================================================================== */}
+      {/* PAINEL DETALHADO DE DEMANDA POR SALA (COANFITRIÕES & CONTRATOS)    */}
+      {/* Aparece quando o botão Coanfitrião ou Contrato Fixo está ativo     */}
+      {/* ================================================================== */}
+      {contractFilterMode !== "all" && (
+        <div className="p-6 bg-stone-50/90 border-b border-slate-200 space-y-4 animate-in fade-in duration-200">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[#BF4B24] block">
+                {contractFilterMode === "cohost_only"
+                  ? "Estoque de Sublocação de Coanfitriões"
+                  : "Capacidade e Horas Livres em Salas com Contrato Fixo"}
+              </span>
+              <h3 className="text-sm sm:text-base font-bold text-slate-900">
+                {contractFilterMode === "cohost_only"
+                  ? `Salas com Coanfitrião Ativo (${contractAndCohostRooms.length}) — Demanda de Horas para Alugar`
+                  : `Salas com Contrato / Turno Fixo (${contractAndCohostRooms.length}) — Horas Disponíveis dentro de Cada Sala`}
+              </h3>
+            </div>
+
+            <div className="flex items-center gap-3 text-xs tabular-nums">
+              <span className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 font-semibold text-slate-700">
+                Total Livre p/ Alugar nestas salas:{" "}
+                <strong className="text-[#BF4B24]">
+                  {thermalAnalysis.totals.totalFree}h
+                </strong>{" "}
+                (R$ {formatBRL(thermalAnalysis.totals.totalIdleOpportunityBrl)})
+              </span>
+            </div>
+          </div>
+
+          {contractAndCohostRooms.length === 0 ? (
+            <div className="p-8 rounded-2xl bg-white border border-slate-200 text-center text-xs text-slate-500">
+              Nenhuma sala com{" "}
+              {contractFilterMode === "cohost_only"
+                ? "Coanfitrião ativo"
+                : "Contrato Fixo vigente"}{" "}
+              encontrada neste filtro.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 tabular-nums">
+              {contractAndCohostRooms.map((rm) => {
+                const isSelected = selectedRoomId === rm.id;
+                const subleasedOrBookedHours = rm.packageHours + rm.avulsoHours;
+                const freeSharePct =
+                  rm.availableHours > 0
+                    ? Math.round((rm.freeHours / rm.availableHours) * 100)
+                    : 0;
+
+                return (
+                  <div
+                    key={rm.id}
+                    onClick={() =>
+                      setSelectedRoomId(isSelected ? "all" : rm.id)
+                    }
+                    className={`p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3.5 ${
+                      isSelected
+                        ? "bg-white border-[#BF4B24] ring-2 ring-[#BF4B24]/20 shadow-md"
+                        : "bg-white border-slate-200/90 hover:border-slate-300 shadow-2xs"
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <h4 className="text-sm font-bold text-slate-900">
+                              {rm.name}
+                            </h4>
+                            <Badge className="bg-slate-100 text-slate-700 border-0 text-[10px] font-semibold">
+                              {rm.tierLabel}
+                            </Badge>
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            {rm.clinicName} • R$ {formatBRL(rm.hourlyRate)}/h
+                          </p>
+                        </div>
+
+                        {rm.isCohostRoom ? (
+                          <Badge className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold shrink-0">
+                            Co-Host ({rm.cohostSplitPct}%)
+                          </Badge>
+                        ) : (
+                          <Badge className="bg-slate-900 text-white border-0 text-[10px] font-semibold shrink-0">
+                            {rm.fixedContractsCount} Turno(s) Fixo(s)
+                          </Badge>
+                        )}
+                      </div>
+
+                      {/* Identificação do Coanfitrião ou Locatários de Turno Fixo */}
+                      <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 text-[11px] space-y-1">
+                        {rm.isCohostRoom && (
+                          <div className="flex items-center justify-between text-slate-700">
+                            <span className="text-slate-500">Coanfitrião:</span>
+                            <strong className="text-slate-900 truncate max-w-[170px]">
+                              {rm.cohostName}
+                            </strong>
+                          </div>
+                        )}
+                        {rm.fixedContractNames.length > 0 && (
+                          <div className="flex items-center justify-between text-slate-700">
+                            <span className="text-slate-500">
+                              Contratos Fixos:
+                            </span>
+                            <strong className="text-slate-900 truncate max-w-[170px]">
+                              {rm.fixedContractNames.join(", ")}
+                            </strong>
+                          </div>
+                        )}
+                        <div className="flex items-start justify-between gap-2 pt-1 border-t border-slate-200/60 text-[10px] text-slate-500">
+                          <span className="shrink-0">Vitrine Semanal:</span>
+                          <span className="font-semibold text-slate-700 text-right">
+                            {rm.daysSummary}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Métricas de Horas dentro da Sala */}
+                    <div className="space-y-2.5">
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="p-2 rounded-xl bg-slate-50 border border-slate-100">
+                          <span className="text-[10px] text-slate-400 block">
+                            {rm.isCohostRoom
+                              ? "Abertas p/ Sublocar"
+                              : "Horas Abertas"}
+                          </span>
+                          <strong className="text-xs font-bold text-slate-800">
+                            {rm.availableHours}h
+                          </strong>
+                        </div>
+
+                        <div className="p-2 rounded-xl bg-slate-50 border border-slate-100">
+                          <span className="text-[10px] text-slate-400 block">
+                            {rm.contractHours > 0
+                              ? "Contr + Alugadas"
+                              : "Já Alugadas"}
+                          </span>
+                          <strong className="text-xs font-bold text-slate-800">
+                            {rm.contractHours + subleasedOrBookedHours}h
+                          </strong>
+                        </div>
+
+                        <div className="p-2 rounded-xl bg-orange-50/80 border border-orange-200/80">
+                          <span className="text-[10px] font-bold text-[#BF4B24] block">
+                            Livres p/ Alugar
+                          </span>
+                          <strong className="text-sm font-black text-[#BF4B24]">
+                            {rm.freeHours}h
+                          </strong>
+                        </div>
+                      </div>
+
+                      {/* Barra Visual de Divisão das Horas da Sala */}
+                      <div className="space-y-1">
+                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden flex">
+                          {rm.availableHours > 0 && (
+                            <>
+                              <div
+                                title={`Contratos Fixos: ${rm.contractHours}h`}
+                                className="h-full bg-slate-900"
+                                style={{
+                                  width: `${(rm.contractHours / rm.availableHours) * 100}%`,
+                                }}
+                              />
+                              <div
+                                title={`Alugadas (Pass+ / Avulso): ${subleasedOrBookedHours}h`}
+                                className="h-full bg-emerald-600"
+                                style={{
+                                  width: `${(subleasedOrBookedHours / rm.availableHours) * 100}%`,
+                                }}
+                              />
+                            </>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between text-[10px] text-slate-500">
+                          <span>
+                            {rm.freeHours > 0 ? (
+                              <strong className="text-slate-800">
+                                {freeSharePct}% da capacidade aberta ainda está
+                                livre
+                              </strong>
+                            ) : (
+                              "100% preenchida no período"
+                            )}
+                          </span>
+                          <span className="font-bold text-[#BF4B24]">
+                            Potencial: R$ {formatBRL(rm.idleOpportunityBrl)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* CARDS DE SELEÇÃO RÁPIDA DE SALA */}
       <div className="px-6 py-4 bg-slate-50/70 border-b border-slate-200/80">
         <div className="flex items-stretch gap-3 overflow-x-auto pb-1 no-scrollbar">
@@ -1125,16 +1609,20 @@ export function AdminThermalStrategyPanel() {
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-[10px] font-semibold uppercase tracking-wider opacity-75">
-                Consolidado
+                Consolidado ({roomsInSelectedClinic.length} salas)
               </span>
               <span className="text-[11px] font-bold tabular-nums">
                 {thermalAnalysis.totals.overallOccupancyPct}%
               </span>
             </div>
             <p className="text-xs font-bold mt-1 truncate">
-              {selectedClinicId === "all"
-                ? "Todas as Salas"
-                : clinicsList.find((c) => c.id === selectedClinicId)?.name}
+              {contractFilterMode === "cohost_only"
+                ? "Salas com Coanfitrião"
+                : contractFilterMode === "contracts_only"
+                  ? "Salas com Contrato Fixo"
+                  : selectedClinicId === "all"
+                    ? "Todas as Salas"
+                    : clinicsList.find((c) => c.id === selectedClinicId)?.name}
             </p>
             <div className="mt-2 flex items-center justify-between text-[10px] opacity-80 tabular-nums">
               <span>Contr: {thermalAnalysis.totals.totalContract}h</span>
@@ -1155,7 +1643,7 @@ export function AdminThermalStrategyPanel() {
                 key={rm.id}
                 type="button"
                 onClick={() => setSelectedRoomId(isSelected ? "all" : rm.id)}
-                className={`min-w-[205px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
+                className={`min-w-[215px] p-3.5 rounded-xl border text-left transition-all shrink-0 cursor-pointer ${
                   isSelected
                     ? "bg-[#BF4B24] text-white border-[#BF4B24]"
                     : "bg-white text-slate-800 border-slate-200 hover:border-slate-300"
@@ -1174,7 +1662,20 @@ export function AdminThermalStrategyPanel() {
                   </span>
                 </div>
 
-                <p className="text-xs font-bold mt-1 truncate">{rm.name}</p>
+                <div className="flex items-center justify-between gap-1.5 mt-1">
+                  <p className="text-xs font-bold truncate">{rm.name}</p>
+                  {rm.isCohostRoom && (
+                    <span
+                      className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 ${
+                        isSelected
+                          ? "bg-black/25 text-white"
+                          : "bg-emerald-50 text-emerald-800"
+                      }`}
+                    >
+                      Co-Host
+                    </span>
+                  )}
+                </div>
 
                 <div
                   className={`mt-2 flex items-center justify-between text-[10px] tabular-nums ${
@@ -1183,7 +1684,15 @@ export function AdminThermalStrategyPanel() {
                 >
                   <span>Contr: {rm.contractHours}h</span>
                   <span>Loc: {rm.packageHours + rm.avulsoHours}h</span>
-                  <span>Livres: {rm.freeHours}h</span>
+                  <span
+                    className={
+                      !isSelected && rm.freeHours > 0
+                        ? "font-bold text-[#BF4B24]"
+                        : ""
+                    }
+                  >
+                    Livres: {rm.freeHours}h
+                  </span>
                 </div>
               </button>
             );
@@ -1208,7 +1717,7 @@ export function AdminThermalStrategyPanel() {
 
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Horas em Contratos / Turnos Fixos
+            Horas Bloqueadas em Turnos Fixos
           </span>
           <p className="text-xl font-bold text-slate-900 mt-1">
             {thermalAnalysis.totals.totalContract}h{" "}
@@ -1220,7 +1729,7 @@ export function AdminThermalStrategyPanel() {
 
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Reservas Pass+ e Avulsas
+            Reservas Pass+ e Avulsas (Sublocadas)
           </span>
           <p className="text-xl font-bold text-[#BF4B24] mt-1">
             {thermalAnalysis.totals.totalPackage +
@@ -1235,9 +1744,9 @@ export function AdminThermalStrategyPanel() {
 
         <div className="p-4 sm:px-6">
           <span className="text-[11px] font-medium text-slate-500 block">
-            Horas Livres (Potencial em Aberto)
+            Demanda de Horas Livres p/ Alugar
           </span>
-          <p className="text-xl font-bold text-slate-900 mt-1">
+          <p className="text-xl font-bold text-emerald-700 mt-1">
             {thermalAnalysis.totals.totalFree}h{" "}
             <span className="text-xs font-normal text-slate-500">
               (R$ {formatBRL(thermalAnalysis.totals.totalIdleOpportunityBrl)})
@@ -1275,8 +1784,8 @@ export function AdminThermalStrategyPanel() {
           </div>
 
           <span className="text-[11px] text-slate-400">
-            Clique em qualquer bloco para ver a ocupação de cada sala naquele
-            horário
+            Clique em qualquer bloco para ver quantas horas livres cada sala tem
+            naquele turno
           </span>
         </div>
 
@@ -1350,7 +1859,7 @@ export function AdminThermalStrategyPanel() {
                                 {cell.occupancyPct}%
                               </span>
                               <span className="text-[9px] opacity-80">
-                                {cell.occupiedHours}/{cell.availableHours}h
+                                {cell.freeHours}h livres
                               </span>
                             </>
                           )}
@@ -1388,11 +1897,20 @@ export function AdminThermalStrategyPanel() {
                               )}
                               {cell.packageHours + cell.avulsoHours > 0 && (
                                 <span>
-                                  • Loc: {cell.packageHours + cell.avulsoHours}h
+                                  {cell.contractHours > 0 ? "• " : ""}Loc:{" "}
+                                  {cell.packageHours + cell.avulsoHours}h
                                 </span>
                               )}
                               {cell.freeHours > 0 && (
-                                <span>• Livres: {cell.freeHours}h</span>
+                                <span>
+                                  {cell.contractHours +
+                                    cell.packageHours +
+                                    cell.avulsoHours >
+                                  0
+                                    ? "• "
+                                    : ""}
+                                  Livres: {cell.freeHours}h
+                                </span>
                               )}
                             </div>
                           </>
@@ -1427,8 +1945,8 @@ export function AdminThermalStrategyPanel() {
                       </Badge>
                     </DialogTitle>
                     <DialogDescription className="text-xs text-slate-400 mt-0.5">
-                      {selectedCell.occupiedHours}h ocupadas de{" "}
-                      {selectedCell.availableHours}h disponíveis no período.
+                      {selectedCell.occupiedHours}h ocupadas e{" "}
+                      {selectedCell.freeHours}h livres para alugar no período.
                     </DialogDescription>
                   </div>
                 </div>
@@ -1437,7 +1955,7 @@ export function AdminThermalStrategyPanel() {
               <div className="grid grid-cols-3 divide-x divide-slate-200 border-b border-slate-200 bg-slate-50 text-center py-3 text-xs tabular-nums shrink-0">
                 <div>
                   <span className="text-[10px] text-slate-500 block">
-                    Contratos / Turnos Fixos
+                    Turnos Fixos Bloqueados
                   </span>
                   <strong className="text-sm font-bold text-slate-900">
                     {selectedCell.contractHours}h (
@@ -1454,9 +1972,9 @@ export function AdminThermalStrategyPanel() {
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-500 block">
-                    Horas Livres
+                    Horas Livres p/ Alugar
                   </span>
-                  <strong className="text-sm font-bold text-slate-800">
+                  <strong className="text-sm font-bold text-emerald-700">
                     {selectedCell.freeHours}h (R${" "}
                     {formatBRL(selectedCell.idleOpportunityBrl)})
                   </strong>
@@ -1470,16 +1988,21 @@ export function AdminThermalStrategyPanel() {
                     className="p-3.5 rounded-xl border border-slate-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 tabular-nums"
                   >
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-xs font-bold text-slate-900">
                           {rb.roomName}
                         </span>
                         <Badge className="bg-slate-100 text-slate-700 border-0 text-[10px]">
                           {rb.tierLabel}
                         </Badge>
+                        {rb.isCohostRoom && (
+                          <Badge className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold">
+                            Co-Host: {rb.cohostName}
+                          </Badge>
+                        )}
                         {rb.contractHours > 0 && (
                           <Badge className="bg-slate-900 text-white border-0 text-[10px]">
-                            {rb.contractNote || "Contrato Fixo"}
+                            {rb.contractNote || "Turno Fixo"}
                           </Badge>
                         )}
                       </div>
@@ -1491,13 +2014,13 @@ export function AdminThermalStrategyPanel() {
                     <div className="text-right text-xs">
                       <span className="font-bold text-slate-900 block">
                         {rb.availableHours === 0
-                          ? "Fechada"
-                          : `${rb.occupancyPct}% (${rb.occupiedHours}h / ${rb.availableHours}h)`}
+                          ? "Fechada p/ Uso Próprio"
+                          : `${rb.freeHours}h livres p/ alugar (de ${rb.availableHours}h)`}
                       </span>
                       <span className="text-[10px] text-slate-500">
-                        Contr: {rb.contractHours}h • Loc:{" "}
-                        {rb.packageHours + rb.avulsoHours}h • Livres:{" "}
-                        {rb.freeHours}h
+                        Contr: {rb.contractHours}h • Sublocadas:{" "}
+                        {rb.packageHours + rb.avulsoHours}h • Ocupação:{" "}
+                        {rb.occupancyPct}%
                       </span>
                     </div>
                   </div>
