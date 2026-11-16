@@ -12,6 +12,7 @@ import {
   getDay,
   getHours,
 } from "date-fns";
+import { ptBR } from "date-fns/locale";
 import {
   Ticket,
   Plus,
@@ -35,6 +36,7 @@ import {
   Pencil,
   Copy,
   SlidersHorizontal,
+  Flame,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -187,7 +189,6 @@ export function AdminCouponsTab() {
   const [actionLoading, setActionLoading] = useState(false);
   const [detectingColdHours, setDetectingColdHours] = useState(false);
 
-  // Navegação principal separada: "coupons" vs "campaigns"
   const [activeSection, setActiveSection] = useState<"coupons" | "campaigns">(
     "coupons",
   );
@@ -281,7 +282,6 @@ export function AdminCouponsTab() {
     setActionLoading(false);
   };
 
-  // Separa os registros em Cupons Tradicionais vs Campanhas de Horário
   const { couponsList, campaignsList, summaryStats } = useMemo(() => {
     const cList: any[] = [];
     const campList: any[] = [];
@@ -371,7 +371,6 @@ export function AdminCouponsTab() {
     setView(rules.is_campaign ? "create_campaign" : "create_coupon");
   };
 
-  // Manipuladores da Grade Semanal (Exclusivo para Campanhas)
   const handleToggleDayHourCell = (dow: number, hour: number) => {
     const key = String(dow);
     setFormData((prev) => {
@@ -458,7 +457,6 @@ export function AdminCouponsTab() {
     );
   }, [formData.day_hours]);
 
-  // Sugestão de horários com baixa procura (descontando contratos fixos)
   const handleAutoSelectLowOccupancyHours = async () => {
     setDetectingColdHours(true);
     try {
@@ -649,7 +647,6 @@ export function AdminCouponsTab() {
     }
   };
 
-  // Salvar Cupom Tradicional
   const handleSaveCoupon = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.code) {
@@ -721,7 +718,6 @@ export function AdminCouponsTab() {
     }
   };
 
-  // Salvar Campanha de Horários
   const handleSaveCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.campaign_name.trim()) {
@@ -973,9 +969,6 @@ export function AdminCouponsTab() {
       </div>
     );
 
-  // ==========================================================================
-  // FORMULÁRIO A: CRIAR / EDITAR CUPOM TRADICIONAL (CÓDIGO & AFILIADOS)
-  // ==========================================================================
   if (view === "create_coupon") {
     return (
       <div className="p-6 lg:p-8 max-w-4xl mx-auto animate-in fade-in pb-32">
@@ -1098,7 +1091,6 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
-            {/* SALAS PERMITIDAS */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-4">
               <div>
                 <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
@@ -1201,7 +1193,6 @@ export function AdminCouponsTab() {
               )}
             </div>
 
-            {/* VÍNCULO DE AFILIADO */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-3">
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
                 <Users className="w-4 h-4 text-slate-500" /> Afiliado ou
@@ -1284,9 +1275,6 @@ export function AdminCouponsTab() {
     );
   }
 
-  // ==========================================================================
-  // FORMULÁRIO B: CRIAR / EDITAR CAMPANHA DE HORÁRIOS (CALENDÁRIO DA SALA)
-  // ==========================================================================
   if (view === "create_campaign") {
     return (
       <div className="p-6 lg:p-8 max-w-5xl mx-auto animate-in fade-in pb-32">
@@ -1456,7 +1444,6 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
-            {/* 1. SALAS PARTICIPANTES DA CAMPANHA */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-slate-500" /> 1. Salas
@@ -1558,7 +1545,6 @@ export function AdminCouponsTab() {
               )}
             </div>
 
-            {/* 2. GRADE SEMANAL POR DIA E HORÁRIO */}
             <div className="p-5 bg-stone-50 rounded-2xl border border-stone-200 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
@@ -1736,89 +1722,196 @@ export function AdminCouponsTab() {
   }
 
   // ==========================================================================
-  // VISÃO DETALHADA DE USOS (SERVE TANTO PARA CUPOM QUANTO PARA CAMPANHA)
+  // VISÃO DETALHADA DO RAIO-X (CUPOM OU CAMPANHA COMPLETA COM SALAS)
   // ==========================================================================
   if (view === "details" && selectedRecord) {
     const rules = extractCouponRules(selectedRecord);
+    const creationDate = selectedRecord.created_at
+      ? format(parseISO(selectedRecord.created_at), "dd/MM/yyyy")
+      : "Indisponível";
+    const startDate = rules.start_date
+      ? format(parseISO(rules.start_date), "dd/MM/yyyy")
+      : "Imediato";
+    const validUntil = selectedRecord.valid_until
+      ? format(parseISO(selectedRecord.valid_until), "dd/MM/yyyy")
+      : "Vitalício";
 
     return (
       <div className="p-6 lg:p-8 max-w-5xl mx-auto animate-in fade-in pb-32">
         <Button
           variant="ghost"
           onClick={() => setView("list")}
-          className="mb-6 text-slate-500 font-semibold"
+          className="mb-6 text-slate-500 font-semibold cursor-pointer"
         >
           <ArrowLeft className="w-4 h-4 mr-2" /> Voltar para a listagem
         </Button>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-          <div className="md:col-span-2 bg-slate-900 text-white p-6 sm:p-8 rounded-2xl">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-              {rules.is_campaign
-                ? "Relatório da Campanha de Horário"
-                : "Relatório do Cupom de Desconto"}
-            </p>
-            <h2 className="text-2xl sm:text-3xl font-bold tracking-tight mb-3">
-              {rules.is_campaign
-                ? rules.campaign_name || selectedRecord.code
-                : selectedRecord.code}
-            </h2>
-            <div className="flex flex-wrap gap-2.5">
-              {getTypeDisplay(
-                selectedRecord.type,
-                selectedRecord.discount_value,
-              )}
-              <Badge className="bg-white/10 text-white border-0 font-semibold">
-                {selectedRecord.current_uses || 0}{" "}
-                {selectedRecord.max_uses ? `/ ${selectedRecord.max_uses}` : ""}{" "}
-                utilizações registradas
-              </Badge>
+          <div className="md:col-span-2 bg-slate-900 text-white p-6 sm:p-8 rounded-2xl flex flex-col justify-between">
+            <div>
+              <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+                {rules.is_campaign
+                  ? "Raio-X da Campanha de Horário"
+                  : "Raio-X do Cupom Promocional"}
+              </p>
+              <h2 className="text-2xl sm:text-3xl font-bold tracking-tight mb-4">
+                {rules.is_campaign
+                  ? rules.campaign_name || selectedRecord.code
+                  : selectedRecord.code}
+              </h2>
+              <div className="flex flex-wrap gap-2.5">
+                {getTypeDisplay(
+                  selectedRecord.type,
+                  selectedRecord.discount_value,
+                )}
+                <Badge className="bg-white/10 text-white border-0 font-semibold">
+                  {selectedRecord.current_uses || 0}{" "}
+                  {selectedRecord.max_uses
+                    ? `/ ${selectedRecord.max_uses}`
+                    : ""}{" "}
+                  utilizações registradas
+                </Badge>
+              </div>
             </div>
 
-            {rules.is_campaign && (
-              <div className="mt-5 pt-4 border-t border-white/10 text-xs text-slate-300 space-y-2">
-                <p className="font-semibold text-slate-200">
-                  Horários configurados por dia:
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                  {WEEKDAYS_LIST.map((w) => {
-                    const hrs = rules.day_hours[String(w.id)] || [];
-                    if (hrs.length === 0) return null;
-                    return (
-                      <div
-                        key={w.id}
-                        className="bg-white/5 px-2.5 py-1.5 rounded-lg text-[11px]"
-                      >
-                        <strong className="text-white">{w.short}:</strong>{" "}
-                        {hrs
-                          .map((h) => `${String(h).padStart(2, "0")}h`)
-                          .join(", ")}
-                      </div>
-                    );
-                  })}
+            <div className="mt-8 pt-4 border-t border-white/10 flex items-center justify-between text-xs text-slate-300">
+              <span>
+                Criado em:{" "}
+                <strong className="text-white">{creationDate}</strong>
+              </span>
+              <span>
+                Vigência: <strong className="text-white">{startDate}</strong> a{" "}
+                <strong className="text-white">{validUntil}</strong>
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 p-6 sm:p-8 rounded-2xl flex flex-col">
+            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
+              Regras e Aplicação
+            </p>
+            <div className="flex-1 space-y-3">
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center gap-3">
+                <Percent className="w-5 h-5 text-[#BF4B24]" />
+                <div>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase">
+                    Desconto
+                  </p>
+                  <p className="text-sm font-bold text-slate-900">
+                    {selectedRecord.type === "percentage"
+                      ? `${selectedRecord.discount_value}% OFF`
+                      : selectedRecord.type === "fixed"
+                        ? `R$ ${selectedRecord.discount_value} OFF`
+                        : "Compre 1 Leve 2"}
+                  </p>
                 </div>
+              </div>
+
+              {rules.is_campaign ? (
+                <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-100 flex items-center gap-3">
+                  <Flame className="w-5 h-5 text-emerald-600" />
+                  <div>
+                    <p className="text-[10px] text-emerald-700 font-bold uppercase">
+                      Calendário
+                    </p>
+                    <p className="text-xs font-bold text-emerald-900 leading-snug">
+                      {rules.show_on_calendar
+                        ? "Aplicado diretamente nos horários com desconto"
+                        : "Ativado ao digitar o código"}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-blue-50 rounded-xl border border-blue-100 flex items-center gap-3">
+                  <UserCheck className="w-5 h-5 text-blue-600" />
+                  <div>
+                    <p className="text-[10px] text-blue-700 font-bold uppercase">
+                      Afiliado
+                    </p>
+                    <p className="text-xs font-bold text-blue-900 leading-snug">
+                      {selectedRecord.profiles?.full_name || "Nenhum (Global)"}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          {/* BLOCO DE SALAS VINCULADAS */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-6">
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-4">
+              <Building2 className="w-4 h-4 text-slate-500" />
+              Salas Participantes
+            </h3>
+            {Array.isArray(selectedRecord.valid_room_ids) &&
+            selectedRecord.valid_room_ids.length > 0 ? (
+              <div className="max-h-48 overflow-y-auto pr-2 space-y-2">
+                {selectedRecord.valid_room_ids.map((id: string) => {
+                  const roomObj = rooms.find((r) => r.id === id);
+                  return (
+                    <div
+                      key={id}
+                      className="p-2.5 rounded-lg border border-slate-100 bg-slate-50 flex items-center justify-between gap-2"
+                    >
+                      <span className="text-xs font-bold text-slate-800 truncate">
+                        {roomObj?.name || "Sala Removida"}
+                      </span>
+                      <Badge className="bg-slate-200 text-slate-700 border-0 text-[9px] shrink-0">
+                        {roomObj?.profiles?.full_name || "Sem Anfitrião"}
+                      </Badge>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-xl text-center">
+                <p className="text-xs font-bold text-emerald-800">
+                  Global (Todas as Salas)
+                </p>
+                <p className="text-[11px] text-emerald-600 mt-0.5">
+                  Válido em todos os consultórios da plataforma.
+                </p>
               </div>
             )}
           </div>
 
-          <div className="bg-white border border-slate-200 p-6 sm:p-8 rounded-2xl flex flex-col justify-center">
-            <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-              {rules.is_campaign ? "Escopo da Campanha" : "Afiliado Vinculado"}
-            </p>
-            <h3 className="text-base font-bold text-slate-900">
-              {rules.is_campaign
-                ? selectedRecord.valid_room_ids?.length > 0
-                  ? `${selectedRecord.valid_room_ids.length} sala(s) selecionada(s)`
-                  : "Todas as salas ativas"
-                : selectedRecord.profiles?.full_name || "Uso Institucional"}
-            </h3>
-            <p className="text-xs font-medium text-slate-500 mt-2 flex items-center gap-1.5">
-              <CalendarClock className="w-4 h-4 text-slate-400" />
-              {selectedRecord.valid_until
-                ? `Expira em ${format(parseISO(selectedRecord.valid_until), "dd/MM/yyyy")}`
-                : "Sem data de expiração"}
-            </p>
-          </div>
+          {/* BLOCO DE HORÁRIOS CONFIGURADOS */}
+          {rules.is_campaign && (
+            <div className="bg-white border border-slate-200 rounded-2xl p-6">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-4">
+                <Clock className="w-4 h-4 text-slate-500" />
+                Horários Configuráveis
+              </h3>
+              <div className="space-y-3">
+                {WEEKDAYS_LIST.map((w) => {
+                  const hrs = rules.day_hours[String(w.id)] || [];
+                  if (hrs.length === 0) return null;
+                  return (
+                    <div
+                      key={w.id}
+                      className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 p-2.5 rounded-lg bg-slate-50 border border-slate-100"
+                    >
+                      <span className="text-xs font-bold text-slate-800 w-12 shrink-0">
+                        {w.short}
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {hrs.map((h) => (
+                          <span
+                            key={h}
+                            className="px-2 py-0.5 rounded-md bg-[#BF4B24] text-white text-[10px] font-bold tabular-nums"
+                          >
+                            {String(h).padStart(2, "0")}h
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
@@ -1884,7 +1977,6 @@ export function AdminCouponsTab() {
   // ==========================================================================
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto animate-in fade-in pb-32 font-sans">
-      {/* CABEÇALHO E KPIS SEPARADOS */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
@@ -1941,7 +2033,6 @@ export function AdminCouponsTab() {
         </div>
       </div>
 
-      {/* RESUMO SEPARADO: CUPONS VS CAMPANHAS */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 tabular-nums">
         <div
           onClick={() => setActiveSection("coupons")}
@@ -2010,7 +2101,6 @@ export function AdminCouponsTab() {
         </div>
       </div>
 
-      {/* SELETOR DE ABA */}
       <div className="flex items-center gap-2 mb-4">
         <button
           type="button"
@@ -2036,9 +2126,6 @@ export function AdminCouponsTab() {
         </button>
       </div>
 
-      {/* ================================================================== */}
-      {/* TABELA 1: APENAS CUPONS DE CÓDIGO E AFILIADOS                      */}
-      {/* ================================================================== */}
       {activeSection === "coupons" ? (
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
           {couponsList.length === 0 ? (
@@ -2195,9 +2282,6 @@ export function AdminCouponsTab() {
           )}
         </div>
       ) : (
-        /* ================================================================== */
-        /* TABELA 2: APENAS CAMPANHAS DE HORÁRIO (CALENDÁRIO DAS SALAS)       */
-        /* ================================================================== */
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
           {campaignsList.length === 0 ? (
             <div className="text-center py-16 px-4">
