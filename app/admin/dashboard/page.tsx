@@ -1,3 +1,4 @@
+// app/admin/dashboard/page.tsx
 "use client";
 
 import { useState, useEffect } from "react";
@@ -13,6 +14,7 @@ import { PushCampaignManager } from "@/components/admin/PushCampaignManager";
 import { AdminCouponsTab } from "@/components/admin/coupons-tab";
 import { AdminContractsTab } from "@/components/admin/contracts-tab";
 import { AdminAiAgentTab } from "@/components/admin/ai-agent-tab";
+import { AdminNotificationsBell } from "@/components/admin/admin-notifications-bell";
 
 import {
   Users,
@@ -26,7 +28,6 @@ import {
   Eye,
   Trash2,
   Loader2,
-  Clock,
   LogOut,
   MapPin,
   User,
@@ -147,6 +148,12 @@ export default function AdminDashboardPage() {
     setIsMobileMenuOpen(false);
   };
 
+  const handleNotificationNavigateTab = (tabName: string) => {
+    if (menuItems.some((m) => m.id === tabName)) {
+      setActiveTab(tabName);
+    }
+  };
+
   // ==========================================
   // MOTOR DE LOGOUT BLINDADO
   // ==========================================
@@ -194,7 +201,7 @@ export default function AdminDashboardPage() {
             type="button"
             onClick={() => setIsSidebarCollapsed(true)}
             title="Recolher menu lateral (Tela Cheia)"
-            className="p-2 rounded-xl border border-slate-200 text-slate-500 hover:text-[#BF4B24] hover:bg-orange-50 transition-colors"
+            className="p-2 rounded-xl border border-slate-200 text-slate-500 hover:text-[#BF4B24] hover:bg-orange-50 transition-colors cursor-pointer"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
@@ -208,7 +215,7 @@ export default function AdminDashboardPage() {
               <button
                 key={item.id}
                 onClick={() => handleSelectTab(item.id)}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all ${
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all cursor-pointer ${
                   isActive
                     ? "bg-[#BF4B24]/10 text-[#BF4B24]"
                     : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
@@ -226,7 +233,7 @@ export default function AdminDashboardPage() {
         <div className="p-4 border-t border-slate-100 min-w-[16rem]">
           <button
             onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm text-slate-500 hover:bg-red-50 hover:text-red-600 transition-all"
+            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm text-slate-500 hover:bg-red-50 hover:text-red-600 transition-all cursor-pointer"
           >
             <LogOut className="w-5 h-5" /> Sair do Painel
           </button>
@@ -260,7 +267,7 @@ export default function AdminDashboardPage() {
               <button
                 type="button"
                 onClick={() => setIsMobileMenuOpen(false)}
-                className="p-2 rounded-xl bg-slate-100 text-slate-600"
+                className="p-2 rounded-xl bg-slate-100 text-slate-600 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -274,7 +281,7 @@ export default function AdminDashboardPage() {
                   <button
                     key={item.id}
                     onClick={() => handleSelectTab(item.id)}
-                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all ${
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-sm transition-all cursor-pointer ${
                       isActive
                         ? "bg-[#BF4B24] text-white shadow-xs"
                         : "text-slate-600 hover:bg-slate-50"
@@ -292,7 +299,7 @@ export default function AdminDashboardPage() {
             <div className="p-4 border-t border-slate-100">
               <button
                 onClick={handleLogout}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-bold text-sm bg-red-50 text-red-600"
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-bold text-sm bg-red-50 text-red-600 cursor-pointer"
               >
                 <LogOut className="w-4 h-4" /> Sair da Conta Admin
               </button>
@@ -308,7 +315,7 @@ export default function AdminDashboardPage() {
             <button
               type="button"
               onClick={() => setIsMobileMenuOpen(true)}
-              className="lg:hidden flex items-center justify-center h-9 w-9 rounded-xl border border-slate-200 bg-slate-50 text-slate-700 shrink-0"
+              className="lg:hidden flex items-center justify-center h-9 w-9 rounded-xl border border-slate-200 bg-slate-50 text-slate-700 shrink-0 cursor-pointer"
             >
               <Menu className="w-5 h-5" />
             </button>
@@ -321,7 +328,7 @@ export default function AdminDashboardPage() {
                   ? "Expandir menu lateral"
                   : "Recolher menu lateral (Tela Cheia)"
               }
-              className="hidden lg:flex items-center justify-center h-9 w-9 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 hover:text-[#BF4B24] hover:border-orange-200 hover:bg-orange-50 transition-all shrink-0"
+              className="hidden lg:flex items-center justify-center h-9 w-9 rounded-xl border border-slate-200 bg-slate-50 text-slate-600 hover:text-[#BF4B24] hover:border-orange-200 hover:bg-orange-50 transition-all shrink-0 cursor-pointer"
             >
               {isSidebarCollapsed ? (
                 <ChevronRight className="w-4 h-4" />
@@ -335,7 +342,12 @@ export default function AdminDashboardPage() {
             </h2>
           </div>
 
+          {/* SINO DE NOTIFICAÇÕES FIXO AO LADO DO EMAIL DO ADMIN */}
           <div className="flex items-center gap-3 shrink-0">
+            <AdminNotificationsBell
+              onNavigateTab={handleNotificationNavigateTab}
+            />
+
             <div className="text-right hidden md:block">
               <p className="text-sm font-bold text-slate-900">Administrador</p>
               <p className="text-xs text-slate-500 font-medium">
@@ -349,7 +361,6 @@ export default function AdminDashboardPage() {
         </header>
 
         <div className="flex-1 overflow-y-auto relative bg-slate-50 pb-20 lg:pb-0">
-          {/* Renderização Condicional das Abas */}
           {activeTab === "dashboard" && <AdminOverviewTab />}
           {activeTab === "ia-agent" && <AdminAiAgentTab />}
           {activeTab === "especialistas" && <AdminSpecialistsTab />}
@@ -392,7 +403,7 @@ export default function AdminDashboardPage() {
                 key={item.id}
                 type="button"
                 onClick={() => handleSelectTab(item.id)}
-                className={`flex flex-col items-center justify-center gap-1 py-2.5 px-2 flex-1 text-[10px] font-bold transition-all ${
+                className={`flex flex-col items-center justify-center gap-1 py-2.5 px-2 flex-1 text-[10px] font-bold transition-all cursor-pointer ${
                   isActive ? "text-[#BF4B24]" : "text-slate-400"
                 }`}
               >
@@ -405,7 +416,7 @@ export default function AdminDashboardPage() {
           <button
             type="button"
             onClick={() => setIsMobileMenuOpen(true)}
-            className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 flex-1 text-[10px] font-bold text-slate-600"
+            className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 flex-1 text-[10px] font-bold text-slate-600 cursor-pointer"
           >
             <Menu className="w-5 h-5" />
             <span>Mais Abas</span>
@@ -447,9 +458,6 @@ function AdminRoomsTab() {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [blockedDates, setBlockedDates] = useState<string[]>([]);
 
-  // ==========================================
-  // ESTADOS PARA RESERVA MANUAL (MULTI-SLOT CARRINHO)
-  // ==========================================
   const [manualDate, setManualDate] = useState<Date>(new Date());
   const [selectedSlots, setSelectedSlots] = useState<
     { date: Date; slot: string }[]

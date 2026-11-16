@@ -281,10 +281,13 @@ export function AdminNotificationsBell({
         n.id === id ? { ...n, is_read: true, read_at: nowIso } : n,
       ),
     );
-    await supabase
-      .from("admin_notifications")
-      .update({ is_read: true, read_at: nowIso })
-      .eq("id", id);
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "mark_read", ids: [id] }),
+      });
+    } catch {}
   };
 
   const handleMarkAllAsRead = async () => {
@@ -296,28 +299,45 @@ export function AdminNotificationsBell({
       prev.map((n) => ({ ...n, is_read: true, read_at: nowIso })),
     );
 
-    await supabase
-      .from("admin_notifications")
-      .update({ is_read: true, read_at: nowIso })
-      .in("id", unreadIds);
-
-    toast({
-      title: "Tudo em dia!",
-      description: "Todas as notificações foram marcadas como lidas.",
-    });
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "mark_read", ids: unreadIds }),
+      });
+      toast({
+        title: "Tudo em dia!",
+        description: "Todas as notificações foram marcadas como lidas.",
+      });
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Erro ao atualizar",
+      });
+    }
   };
 
   const handleClearRead = async () => {
-    const readIds = notifications.filter((n) => n.is_read).map((n) => n.id);
-    if (readIds.length === 0) return;
+    const readCount = notifications.filter((n) => n.is_read).length;
+    if (readCount === 0) return;
 
     setNotifications((prev) => prev.filter((n) => !n.is_read));
-    await supabase.from("admin_notifications").delete().in("id", readIds);
-
-    toast({
-      title: "Histórico limpo",
-      description: "As notificações já lidas foram removidas.",
-    });
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear_read" }),
+      });
+      toast({
+        title: "Histórico limpo",
+        description: "As notificações já lidas foram removidas.",
+      });
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Erro ao limpar",
+      });
+    }
   };
 
   const handleNotificationClick = async (item: AdminNotificationItem) => {
