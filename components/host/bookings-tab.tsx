@@ -1,3 +1,4 @@
+// components/host/bookings-tab.tsx
 "use client";
 
 import { useState, useEffect } from "react";
@@ -16,11 +17,23 @@ import {
   Sparkles,
   ExternalLink,
   Wallet,
+  Info,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { format, isToday, isBefore, startOfToday, isTomorrow } from "date-fns";
 import { ptBR } from "date-fns/locale";
+
+const GATEWAY_FEE_RATE = 0.04; // 4% de taxa de gateway deduzida antes do split
 
 interface BookingUI {
   id: string;
@@ -35,16 +48,19 @@ interface BookingUI {
   isContract: boolean;
   pricingLabel: string;
   grossValueBrl: number;
+  gatewayFeeBrl: number;
+  netAfterGatewayBrl: number;
   hostPayoutBrl: number;
   cohostName: string | null;
   cohostSplitPct: number;
   cohostPayoutBrl: number;
   contractPdfUrl: string | null;
+  notes: string | null;
 }
 
 function normalizeTier(tier?: string | null): "start" | "vip" | "master" {
   const t = (tier || "start").toLowerCase().trim();
-  if (t.includes("master")) return "master";
+  if (t.includes("master") || t.includes("premium")) return "master";
   if (t.includes("vip")) return "vip";
   return "start";
 }
@@ -100,7 +116,7 @@ function calculateSlotUnits(startIso: string, endIso: string): number {
 }
 
 export function HostBookingsTab() {
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
   const [loading, setLoading] = useState(true);
   const [bookings, setBookings] = useState<BookingUI[]>([]);
   const [filter, setFilter] = useState<"hoje" | "proximos" | "historico">(
@@ -110,6 +126,10 @@ export function HostBookingsTab() {
     "all" | "marketplace" | "contract"
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Estado para abrir o Modal do Ícone (i) de Observações
+  const [selectedNoteBooking, setSelectedNoteBooking] =
+    useState<BookingUI | null>(null);
 
   useEffect(() => {
     async function fetchHostBookings() {
@@ -130,6 +150,7 @@ export function HostBookingsTab() {
           setBookings([]);
           return;
         }
+
         const roomIds = myRooms.map((r) => r.id);
         const roomsMap = new Map<string, any>(
           myRooms.map((r: any) => [r.id, r]),
@@ -197,10 +218,10 @@ export function HostBookingsTab() {
 
         const guestProfiles = profilesRes.data || [];
         const contractsData = contractsRes.data || [];
-
         const contractsById = new Map<string, any>(
           contractsData.map((c: any) => [c.id, c]),
         );
+
         const activeCohostByRoomId = new Map<string, any>();
         contractsData.forEach((c: any) => {
           if (
@@ -268,12 +289,14 @@ export function HostBookingsTab() {
           if (!tierPackages || tierPackages.size === 0) {
             return { rate: null, matchedHours: null };
           }
+
           if (targetHours && tierPackages.has(targetHours)) {
             return {
               rate: tierPackages.get(targetHours)!,
               matchedHours: targetHours,
             };
           }
+
           if (targetHours && targetHours > 0) {
             let closestHours: number | null = null;
             let minDiff = Infinity;
@@ -291,6 +314,7 @@ export function HostBookingsTab() {
               };
             }
           }
+
           if (tierPackages.has(1)) {
             return { rate: tierPackages.get(1)!, matchedHours: 1 };
           }
@@ -309,6 +333,19 @@ export function HostBookingsTab() {
           const startDate = new Date(b.start_time);
           const endDate = new Date(b.end_time);
           const slotUnits = calculateSlotUnits(b.start_time, b.end_time);
+
+          const hasCustomAgreed =
+            b.agreed_value_brl !== null &&
+            b.agreed_value_brl !== undefined &&
+            String(b.agreed_value_brl).trim() !== "" &&
+            !isNaN(Number(b.agreed_value_brl)) &&
+            Number(b.agreed_value_brl) >= 0;
+
+          const customAgreedVal = hasCustomAgreed
+            ? Number(b.agreed_value_brl)
+            : null;
+
+          const bookingNotes = b.notes || b.admin_notes || null;
 
           let type: "hoje" | "proximos" | "historico" = "proximos";
           if (isToday(startDate)) {
@@ -336,13 +373,16 @@ export function HostBookingsTab() {
               String(b.booking_origin).startsWith("contract")),
           );
 
+          // 1. Reserva de Contrato Fixo (Deduz 4% de Gateway antes do Split)
           if (isContractBooking) {
             const sessionVal =
-              Number(b.agreed_value_brl) > 0
-                ? Number(b.agreed_value_brl)
+              customAgreedVal !== null
+                ? customAgreedVal
                 : Number(linkedContract?.session_value || 0);
-            const feePct = Number(linkedContract?.platform_fee_pct ?? 15) / 100;
-            const hostPayout = Math.max(0, sessionVal * (1 - feePct));
+            const gatewayFee = sessionVal * GATEWAY_FEE_RATE;
+            const netAfterGateway = Math.max(0, sessionVal - gatewayFee);
+            const feePct = Number(linkedContract?.platform_fee_pct ?? 20) / 100;
+            const hostPayout = Math.max(0, netAfterGateway * (1 - feePct));
 
             const cType =
               linkedContract?.contract_type || b.booking_origin || "";
@@ -371,11 +411,14 @@ export function HostBookingsTab() {
               isContract: true,
               pricingLabel: contractLabel,
               grossValueBrl: sessionVal,
+              gatewayFeeBrl: gatewayFee,
+              netAfterGatewayBrl: netAfterGateway,
               hostPayoutBrl: hostPayout,
               cohostName: null,
               cohostSplitPct: 0,
               cohostPayoutBrl: 0,
               contractPdfUrl: linkedContract?.pdf_url || null,
+              notes: bookingNotes,
             };
           }
 
@@ -385,31 +428,52 @@ export function HostBookingsTab() {
             ? Number(roomCohost.cohost_split_pct || 0)
             : 0;
 
+          // Função central de Split com 4% de Gateway deduzido antes dos 80% / 20%
           const computeAvulsoSplit = (grossVal: number) => {
-            const platformFee = grossVal * 0.2;
-            const netAfterPlatform = Math.max(0, grossVal - platformFee);
+            const gatewayFee = grossVal * GATEWAY_FEE_RATE;
+            const netAfterGateway = Math.max(0, grossVal - gatewayFee);
+            const platformFee = netAfterGateway * 0.2;
+            const netAfterPlatform = Math.max(0, netAfterGateway - platformFee);
             const cohostPayout =
               cohostSplitPct > 0
                 ? netAfterPlatform * (cohostSplitPct / 100)
                 : 0;
             const hostPayout = Math.max(0, netAfterPlatform - cohostPayout);
-            return { cohostPayout, hostPayout };
+            return {
+              gatewayFee,
+              netAfterGateway,
+              cohostPayout,
+              hostPayout,
+            };
           };
 
           const rawTotalCost = Number(b.total_cost || 0);
           const upgradeFee = Number(b.upgrade_fee_amount || 0);
           const discount = couponDiscountMap.get(b.id) || 0;
 
-          if (
-            Number(b.agreed_value_brl) > 0 ||
-            rawTotalCost >= slotUnits * 20
-          ) {
+          const isExplicitWalletOrigin =
+            b.booking_origin && String(b.booking_origin).startsWith("wallet_");
+          const isLegacyWalletOrigin =
+            !b.booking_origin &&
+            !hasCustomAgreed &&
+            rawTotalCost > 0 &&
+            rawTotalCost <= slotUnits * 2;
+
+          if (!isExplicitWalletOrigin && !isLegacyWalletOrigin) {
+            const defaultHourly =
+              roomTier === "master" ? 80 : roomTier === "vip" ? 45 : 40;
             const baseVal =
-              Number(b.agreed_value_brl) > 0
-                ? Number(b.agreed_value_brl)
-                : rawTotalCost;
-            const grossVal = Math.max(0, baseVal + upgradeFee - discount);
-            const { cohostPayout, hostPayout } = computeAvulsoSplit(grossVal);
+              customAgreedVal !== null
+                ? customAgreedVal
+                : rawTotalCost >= slotUnits * 20
+                  ? rawTotalCost
+                  : defaultHourly * slotUnits;
+            const grossVal =
+              customAgreedVal !== null
+                ? customAgreedVal
+                : Math.max(0, baseVal + upgradeFee - discount);
+            const { gatewayFee, netAfterGateway, cohostPayout, hostPayout } =
+              computeAvulsoSplit(grossVal);
 
             return {
               id: b.id,
@@ -424,11 +488,14 @@ export function HostBookingsTab() {
               isContract: false,
               pricingLabel: `${formatTierLabel(roomTier)} • Reserva Direta`,
               grossValueBrl: grossVal,
+              gatewayFeeBrl: gatewayFee,
+              netAfterGatewayBrl: netAfterGateway,
               hostPayoutBrl: hostPayout,
               cohostName,
               cohostSplitPct,
               cohostPayoutBrl: cohostPayout,
               contractPdfUrl: null,
+              notes: bookingNotes,
             };
           }
 
@@ -466,6 +533,7 @@ export function HostBookingsTab() {
                 .toLowerCase()
                 .includes("estorno"),
           );
+
           const validPriorPurchases = purchaseCredits.filter((tx: any) => {
             const createdMs = new Date(tx.created_at).getTime();
             const notAfterBooking = createdMs <= bookingTime + 60 * 1000;
@@ -502,7 +570,6 @@ export function HostBookingsTab() {
               descMatch && Number(descMatch[1]) > 0
                 ? Number(descMatch[1])
                 : txAmt;
-
             if (candidateHours > 0 && candidateHours <= 60) {
               detectedPackageHours = candidateHours;
             }
@@ -556,11 +623,17 @@ export function HostBookingsTab() {
             pricingLabel = `${formatTierLabel(roomTier)} • Tarifa da Sala`;
           }
 
-          const grossVal = Math.max(
-            0,
-            creditsForThisSlot * resolvedHourlyRate + upgradeFee - discount,
-          );
-          const { cohostPayout, hostPayout } = computeAvulsoSplit(grossVal);
+          const grossVal =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(
+                  0,
+                  creditsForThisSlot * resolvedHourlyRate +
+                    upgradeFee -
+                    discount,
+                );
+          const { gatewayFee, netAfterGateway, cohostPayout, hostPayout } =
+            computeAvulsoSplit(grossVal);
 
           return {
             id: b.id,
@@ -575,11 +648,14 @@ export function HostBookingsTab() {
             isContract: false,
             pricingLabel,
             grossValueBrl: grossVal,
+            gatewayFeeBrl: gatewayFee,
+            netAfterGatewayBrl: netAfterGateway,
             hostPayoutBrl: hostPayout,
             cohostName,
             cohostSplitPct,
             cohostPayoutBrl: cohostPayout,
             contractPdfUrl: null,
+            notes: bookingNotes,
           };
         });
 
@@ -603,7 +679,8 @@ export function HostBookingsTab() {
     return (
       b.doctorName.toLowerCase().includes(q) ||
       b.roomName.toLowerCase().includes(q) ||
-      b.pricingLabel.toLowerCase().includes(q)
+      b.pricingLabel.toLowerCase().includes(q) ||
+      (b.notes || "").toLowerCase().includes(q)
     );
   });
 
@@ -644,8 +721,9 @@ export function HostBookingsTab() {
           Agenda de Reservas & Contratos
         </h1>
         <p className="text-sm text-slate-500 font-medium">
-          Controle quem está a utilizar os seus espaços (Take Rate Avulso 20% +
-          Splits de Contratos).
+          Controle quem está a utilizar os seus espaços (Taxa de Gateway 4% +
+          Split 80% Anfitrião / 20% Plataforma) e veja observações operacionais
+          no ícone (i).
         </p>
       </div>
 
@@ -654,19 +732,31 @@ export function HostBookingsTab() {
           <div className="flex bg-slate-100 p-1 rounded-xl w-full md:w-auto overflow-x-auto scrollbar-hide">
             <button
               onClick={() => setFilter("hoje")}
-              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${filter === "hoje" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
+                filter === "hoje"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-900"
+              }`}
             >
               Hoje ({bookings.filter((b) => b.type === "hoje").length})
             </button>
             <button
               onClick={() => setFilter("proximos")}
-              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${filter === "proximos" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
+                filter === "proximos"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-900"
+              }`}
             >
               Próximos ({bookings.filter((b) => b.type === "proximos").length})
             </button>
             <button
               onClick={() => setFilter("historico")}
-              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${filter === "historico" ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"}`}
+              className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition-all ${
+                filter === "historico"
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-900"
+              }`}
             >
               Histórico
             </button>
@@ -686,7 +776,7 @@ export function HostBookingsTab() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
             <Input
               type="text"
-              placeholder="Buscar profissional, sala ou contrato..."
+              placeholder="Buscar profissional, sala, contrato ou observação..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-10 h-11 bg-slate-50 border-slate-200 rounded-xl w-full"
@@ -706,120 +796,254 @@ export function HostBookingsTab() {
             </p>
           </div>
         ) : (
-          filteredBookings.map((booking) => (
-            <div
-              key={booking.id}
-              className={`bg-white rounded-2xl border shadow-sm p-5 hover:border-[#BF4B24]/30 transition-colors ${
-                booking.isContract
-                  ? "border-purple-200 bg-purple-50/10"
-                  : "border-slate-200"
-              }`}
-            >
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div className="flex items-start gap-4">
-                  <div
-                    className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 ${
-                      booking.isContract
-                        ? "bg-purple-100 text-purple-700"
-                        : "bg-orange-50 text-[#BF4B24]"
-                    }`}
-                  >
-                    {booking.isContract ? (
-                      <FileText className="w-6 h-6" />
-                    ) : (
-                      <User className="w-6 h-6" />
-                    )}
-                  </div>
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-lg font-black text-slate-900">
-                        {booking.doctorName}
-                      </h3>
-                      {booking.isContract && (
-                        <Badge className="bg-purple-100 text-purple-800 border-0 text-[10px] font-black">
-                          CONTRATO
-                        </Badge>
+          filteredBookings.map((booking) => {
+            const hasNotes = Boolean(
+              booking.notes && booking.notes.trim().length > 0,
+            );
+
+            return (
+              <div
+                key={booking.id}
+                className={`bg-white rounded-2xl border shadow-sm p-5 hover:border-[#BF4B24]/30 transition-colors ${
+                  booking.isContract
+                    ? "border-purple-200 bg-purple-50/10"
+                    : "border-slate-200"
+                }`}
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <div
+                      className={`w-12 h-12 rounded-full flex items-center justify-center shrink-0 ${
+                        booking.isContract
+                          ? "bg-purple-100 text-purple-700"
+                          : "bg-orange-50 text-[#BF4B24]"
+                      }`}
+                    >
+                      {booking.isContract ? (
+                        <FileText className="w-6 h-6" />
+                      ) : (
+                        <User className="w-6 h-6" />
                       )}
                     </div>
-                    <p className="text-sm font-bold text-slate-500 mb-2">
-                      {booking.specialty}
-                    </p>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-lg font-black text-slate-900">
+                          {booking.doctorName}
+                        </h3>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md inline-flex">
-                        <MapPin className="w-3.5 h-3.5" />
-                        <span className="font-bold">{booking.roomName}</span>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md inline-flex">
-                        <Wallet className="w-3.5 h-3.5 text-emerald-600" />
-                        <span className="font-bold">
-                          {booking.pricingLabel}
-                        </span>
-                      </div>
-
-                      {booking.contractPdfUrl && (
-                        <a
-                          href={booking.contractPdfUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-xs font-bold bg-purple-100 text-purple-800 hover:bg-purple-200 px-2.5 py-1 rounded-md transition-colors"
+                        {/* ÍCONE (i) AO LADO DO NOME DO PROFISSIONAL */}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedNoteBooking(booking)}
+                          title={
+                            hasNotes
+                              ? `Observação da Reserva: ${booking.notes}`
+                              : "Ver observações da reserva"
+                          }
+                          className={`w-6 h-6 rounded-full inline-flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                            hasNotes
+                              ? "bg-blue-600 text-white shadow-sm ring-4 ring-blue-100 animate-pulse"
+                              : "bg-slate-100 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                          }`}
                         >
-                          <FileText className="w-3 h-3" />
-                          Ver PDF
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
+                          <Info className="w-3.5 h-3.5" />
+                        </button>
+
+                        {booking.isContract && (
+                          <Badge className="bg-purple-100 text-purple-800 border-0 text-[10px] font-black">
+                            CONTRATO
+                          </Badge>
+                        )}
+                      </div>
+
+                      <p className="text-sm font-bold text-slate-500 mb-2">
+                        {booking.specialty}
+                      </p>
+
+                      {hasNotes && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedNoteBooking(booking)}
+                          className="mb-2.5 px-3 py-1.5 rounded-xl bg-blue-50 border border-blue-200 text-xs font-bold text-blue-900 flex items-center gap-1.5 hover:bg-blue-100/80 transition-colors cursor-pointer text-left"
+                        >
+                          <Info className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                          <span>Observação: {booking.notes}</span>
+                        </button>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md inline-flex">
+                          <MapPin className="w-3.5 h-3.5" />
+                          <span className="font-bold">{booking.roomName}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 px-2.5 py-1 rounded-md inline-flex">
+                          <Wallet className="w-3.5 h-3.5 text-emerald-600" />
+                          <span className="font-bold">
+                            {booking.pricingLabel}
+                          </span>
+                        </div>
+                        {booking.contractPdfUrl && (
+                          <a
+                            href={booking.contractPdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-bold bg-purple-100 text-purple-800 hover:bg-purple-200 px-2.5 py-1 rounded-md transition-colors"
+                          >
+                            <FileText className="w-3 h-3" />
+                            Ver PDF
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
+                      </div>
+
+                      {booking.cohostName && !booking.isContract && (
+                        <p className="text-xs font-bold text-purple-700 flex items-center gap-1 mt-2">
+                          <Sparkles className="w-3.5 h-3.5" />
+                          Sublocação Co-Anfitrião: {booking.cohostName} (
+                          {booking.cohostSplitPct}% repassado)
+                        </p>
                       )}
                     </div>
-
-                    {booking.cohostName && !booking.isContract && (
-                      <p className="text-xs font-bold text-purple-700 flex items-center gap-1 mt-2">
-                        <Sparkles className="w-3.5 h-3.5" />
-                        Sublocação Co-Anfitrião: {booking.cohostName} (
-                        {booking.cohostSplitPct}% repassado)
-                      </p>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex flex-col md:items-end gap-2 border-t md:border-t-0 border-slate-100 pt-4 md:pt-0">
-                  <div className="flex items-center gap-4 text-sm font-bold text-slate-700 bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
-                    <div className="flex items-center gap-1.5">
-                      <CalendarIcon className="w-4 h-4 text-[#BF4B24]" />
-                      {booking.date}
-                    </div>
-                    <div className="w-px h-4 bg-slate-300"></div>
-                    <div className="flex items-center gap-1.5">
-                      <Clock className="w-4 h-4 text-[#BF4B24]" />
-                      {booking.time}
-                    </div>
                   </div>
 
-                  <div className="flex items-center gap-3 self-start md:self-end mt-1">
-                    <div className="text-left md:text-right">
-                      <p className="text-xs font-bold text-slate-400">
-                        Bruto: R${" "}
-                        {booking.grossValueBrl.toLocaleString("pt-BR", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </p>
-                      <p className="text-sm font-black text-emerald-600">
-                        Seu Repasse: R${" "}
-                        {booking.hostPayoutBrl.toLocaleString("pt-BR", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </p>
+                  <div className="flex flex-col md:items-end gap-2 border-t md:border-t-0 border-slate-100 pt-4 md:pt-0">
+                    <div className="flex items-center gap-4 text-sm font-bold text-slate-700 bg-slate-50 px-4 py-2 rounded-xl border border-slate-100">
+                      <div className="flex items-center gap-1.5">
+                        <CalendarIcon className="w-4 h-4 text-[#BF4B24]" />
+                        {booking.date}
+                      </div>
+                      <div className="w-px h-4 bg-slate-300"></div>
+                      <div className="flex items-center gap-1.5">
+                        <Clock className="w-4 h-4 text-[#BF4B24]" />
+                        {booking.time}
+                      </div>
                     </div>
-                    {getStatusBadge(booking.status, booking.rawStatus)}
+
+                    <div className="flex items-center gap-3 self-start md:self-end mt-1 tabular-nums">
+                      <div className="text-left md:text-right">
+                        <p className="text-xs font-bold text-slate-400">
+                          Bruto: R${" "}
+                          {booking.grossValueBrl.toLocaleString("pt-BR", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{" "}
+                          <span className="text-[10px] text-slate-400">
+                            (-4% gateway: R${" "}
+                            {booking.gatewayFeeBrl.toLocaleString("pt-BR", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                            )
+                          </span>
+                        </p>
+                        <p className="text-sm font-black text-emerald-600">
+                          Seu Repasse: R${" "}
+                          {booking.hostPayoutBrl.toLocaleString("pt-BR", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </p>
+                      </div>
+                      {getStatusBadge(booking.status, booking.rawStatus)}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
       </div>
+
+      {/* MODAL DE OBSERVAÇÃO DA RESERVA (AO CLICAR NO ÍCONE "i") */}
+      <Dialog
+        open={Boolean(selectedNoteBooking)}
+        onOpenChange={(open) => !open && setSelectedNoteBooking(null)}
+      >
+        <DialogContent className="sm:max-w-md bg-white rounded-2xl border border-slate-200 shadow-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Info className="w-5 h-5 text-blue-600" />
+              Observações da Reserva
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              {selectedNoteBooking
+                ? `${selectedNoteBooking.doctorName} • ${selectedNoteBooking.roomName} (${selectedNoteBooking.date} às ${selectedNoteBooking.time})`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+
+          {selectedNoteBooking && (
+            <div className="py-2 space-y-3">
+              {selectedNoteBooking.notes ? (
+                <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 text-sm font-semibold text-blue-950 leading-relaxed">
+                  {selectedNoteBooking.notes}
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
+                  Nenhuma observação especial foi registrada pela administração
+                  para este agendamento.
+                </div>
+              )}
+
+              <div className="p-3.5 rounded-xl bg-slate-900 text-white text-xs space-y-1.5 tabular-nums">
+                <div className="flex justify-between text-slate-300">
+                  <span>Valor Bruto da Reserva:</span>
+                  <span className="font-bold text-white">
+                    R${" "}
+                    {selectedNoteBooking.grossValueBrl.toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+                <div className="flex justify-between text-red-300">
+                  <span>(-) Taxa de Pagamento / Gateway (4%):</span>
+                  <span>
+                    - R${" "}
+                    {selectedNoteBooking.gatewayFeeBrl.toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-200 border-t border-slate-800 pt-1">
+                  <span>(=) Base Líquida Pós-Gateway:</span>
+                  <span className="font-bold">
+                    R${" "}
+                    {selectedNoteBooking.netAfterGatewayBrl.toLocaleString(
+                      "pt-BR",
+                      {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      },
+                    )}
+                  </span>
+                </div>
+                <div className="flex justify-between text-emerald-400 pt-1">
+                  <span>Seu Repasse Líquido (80% pós-taxa):</span>
+                  <span className="font-black">
+                    R${" "}
+                    {selectedNoteBooking.hostPayoutBrl.toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              onClick={() => setSelectedNoteBooking(null)}
+              className="w-full sm:w-auto bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl"
+            >
+              Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

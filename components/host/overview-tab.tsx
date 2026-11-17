@@ -43,6 +43,8 @@ import {
 } from "date-fns";
 import { ptBR } from "date-fns/locale";
 
+const GATEWAY_FEE_RATE = 0.04; // 4% de taxa de gateway deduzida antes do split 80/20
+
 interface HostOverviewProps {
   onNavigate: (view: string) => void;
 }
@@ -52,7 +54,7 @@ const COLORS = ["#BF4B24", "#8b5cf6", "#10b981", "#3b82f6", "#f59e0b"];
 
 function normalizeTier(tier?: string | null): "start" | "vip" | "master" {
   const t = (tier || "start").toLowerCase().trim();
-  if (t.includes("master")) return "master";
+  if (t.includes("master") || t.includes("premium")) return "master";
   if (t.includes("vip")) return "vip";
   return "start";
 }
@@ -102,8 +104,7 @@ function calculateSlotUnits(startIso: string, endIso: string): number {
 }
 
 export function HostOverview({ onNavigate }: HostOverviewProps) {
-  const supabase = createClient();
-
+  const [supabase] = useState(() => createClient());
   const [loading, setLoading] = useState(true);
   const [timeFilter, setTimeFilter] = useState<"hoje" | "7d" | "30d">("30d");
 
@@ -142,7 +143,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
         const now = new Date();
         const todayStr = format(now, "yyyy-MM-dd");
         let startDate = startOfDay(subDays(now, 30));
-        let endDate = endOfDay(now);
+        const endDate = endOfDay(now);
 
         if (timeFilter === "hoje") {
           startDate = startOfDay(now);
@@ -177,7 +178,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               .filter(Boolean),
           ),
         );
-
         setIsCohostUser(cohostRoomIds.length > 0);
 
         let subleasedRooms: any[] = [];
@@ -209,9 +209,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           await Promise.all([
             supabase
               .from("bookings")
-              .select(
-                "id, created_at, room_id, user_id, start_time, end_time, total_cost, upgrade_fee_amount, status, contract_id, booking_origin, agreed_value_brl",
-              )
+              .select("*")
               .in("room_id", roomIds)
               .in("status", ["confirmed", "completed", "in_progress"])
               .gte("start_time", startDate.toISOString())
@@ -224,7 +222,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           ]);
 
         if (bookingsRes.error) throw bookingsRes.error;
-
         const bookings = bookingsRes.data || [];
         const contractsData = contractsRes.data || [];
 
@@ -357,7 +354,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
         };
 
         // ====================================================================
-        // RESOLUÇÃO FINANCEIRA SÊNIOR (ANFITRIÃO DONO vs COANFITRIÃO 80/20)
+        // RESOLUÇÃO FINANCEIRA (GATEWAY 4% DEDUZIDO ANTES DO SPLIT 80/20)
         // ====================================================================
         const resolveBookingFinancials = (
           b: any,
@@ -372,12 +369,23 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           const isRoomOwner = room?.host_id === user.id;
           const roomCohost = activeCohostByRoomId.get(b.room_id);
           const isUserCohostOfRoom = roomCohost?.specialist_id === user.id;
-          const roomTier = normalizeTier(room?.tier);
 
+          const roomTier = normalizeTier(room?.tier);
           const slotUnits =
             b.start_time && b.end_time
               ? calculateSlotUnits(b.start_time, b.end_time)
               : 1;
+
+          const hasCustomAgreed =
+            b.agreed_value_brl !== null &&
+            b.agreed_value_brl !== undefined &&
+            String(b.agreed_value_brl).trim() !== "" &&
+            !isNaN(Number(b.agreed_value_brl)) &&
+            Number(b.agreed_value_brl) >= 0;
+
+          const customAgreedVal = hasCustomAgreed
+            ? Number(b.agreed_value_brl)
+            : null;
 
           const linkedContract = b.contract_id
             ? contractsById.get(b.contract_id)
@@ -388,7 +396,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               String(b.booking_origin).startsWith("contract")),
           );
 
-          // 1. Reserva de Contrato Fixo: pertence ao Anfitrião Dono da Sala
+          // 1. Reserva de Contrato Fixo (Deduz 4% Gateway antes do Split)
           if (isContractBooking) {
             if (!isRoomOwner) {
               return {
@@ -400,11 +408,12 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               };
             }
             const val =
-              Number(b.agreed_value_brl) > 0
-                ? Number(b.agreed_value_brl)
+              customAgreedVal !== null
+                ? customAgreedVal
                 : Number(linkedContract?.session_value || 0);
-            const feePct = Number(linkedContract?.platform_fee_pct ?? 15) / 100;
-            const hostNet = Math.max(0, val * (1 - feePct));
+            const netAfterGateway = Math.max(0, val * (1 - GATEWAY_FEE_RATE));
+            const feePct = Number(linkedContract?.platform_fee_pct ?? 20) / 100;
+            const hostNet = Math.max(0, netAfterGateway * (1 - feePct));
             return {
               grossRevenue: val,
               userNetRevenue: hostNet,
@@ -414,20 +423,22 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             };
           }
 
-          // 2. Reserva Avulsa (Sublocação ou Direta):
-          // Se a sala tem Coanfitrião ativo -> 80% Coanfitrião / 20% Fusion / 0% Anfitrião Dono
-          // Se a sala NÃO tem Coanfitrião -> 80% Anfitrião Dono / 20% Fusion
+          // 2. Reserva Avulsa ou Pacote (Deduz 4% Gateway antes do Split 80/20)
           const computeAvulsoUserNet = (grossVal: number) => {
+            const netAfterGateway = Math.max(
+              0,
+              grossVal * (1 - GATEWAY_FEE_RATE),
+            );
             if (roomCohost) {
               const cohostPct = Number(roomCohost.cohost_split_pct || 80) / 100;
-              const cohostShare = Math.max(0, grossVal * cohostPct);
+              const cohostShare = Math.max(0, netAfterGateway * cohostPct);
               return {
                 userNet: isUserCohostOfRoom ? cohostShare : 0,
                 cohostEarned: isUserCohostOfRoom ? cohostShare : 0,
                 countedGross: isUserCohostOfRoom ? grossVal : 0,
               };
             }
-            const ownerNet = Math.max(0, grossVal * 0.8);
+            const ownerNet = Math.max(0, netAfterGateway * 0.8);
             return {
               userNet: isRoomOwner ? ownerNet : 0,
               cohostEarned: 0,
@@ -439,15 +450,27 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           const upgradeFee = Number(b.upgrade_fee_amount || 0);
           const discount = couponDiscountMap.get(b.id) || 0;
 
-          if (
-            Number(b.agreed_value_brl) > 0 ||
-            rawTotalCost >= slotUnits * 20
-          ) {
+          const isExplicitWalletOrigin =
+            b.booking_origin && String(b.booking_origin).startsWith("wallet_");
+          const isLegacyWalletOrigin =
+            !b.booking_origin &&
+            !hasCustomAgreed &&
+            rawTotalCost > 0 &&
+            rawTotalCost <= slotUnits * 2;
+
+          if (!isExplicitWalletOrigin && !isLegacyWalletOrigin) {
+            const defaultHourly =
+              roomTier === "master" ? 80 : roomTier === "vip" ? 45 : 40;
             const baseVal =
-              Number(b.agreed_value_brl) > 0
-                ? Number(b.agreed_value_brl)
-                : rawTotalCost;
-            const grossVal = Math.max(0, baseVal + upgradeFee - discount);
+              customAgreedVal !== null
+                ? customAgreedVal
+                : rawTotalCost >= slotUnits * 20
+                  ? rawTotalCost
+                  : defaultHourly * slotUnits;
+            const grossVal =
+              customAgreedVal !== null
+                ? customAgreedVal
+                : Math.max(0, baseVal + upgradeFee - discount);
             const splitRes = computeAvulsoUserNet(grossVal);
             return {
               grossRevenue: splitRes.countedGross,
@@ -492,6 +515,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                 .toLowerCase()
                 .includes("estorno"),
           );
+
           const validPriorPurchases = purchaseCredits.filter((tx: any) => {
             const createdMs = new Date(tx.created_at).getTime();
             const notAfterBooking = createdMs <= bookingTime + 60 * 1000;
@@ -528,7 +552,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               descMatch && Number(descMatch[1]) > 0
                 ? Number(descMatch[1])
                 : txAmt;
-
             if (candidateHours > 0 && candidateHours <= 60) {
               detectedPackageHours = candidateHours;
             }
@@ -546,7 +569,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             creditTierUsed,
             detectedPackageHours,
           );
-
           if (resolvedHourlyRate === null && creditTierUsed !== roomTier) {
             resolvedHourlyRate = getRateFromPackageTable(
               roomTier,
@@ -576,10 +598,15 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               roomModalityRate || categoryRate || defaultTierRates[roomTier];
           }
 
-          const grossVal = Math.max(
-            0,
-            creditsForThisSlot * resolvedHourlyRate + upgradeFee - discount,
-          );
+          const grossVal =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(
+                  0,
+                  creditsForThisSlot * resolvedHourlyRate +
+                    upgradeFee -
+                    discount,
+                );
           const splitRes = computeAvulsoUserNet(grossVal);
 
           return {
@@ -595,7 +622,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
         let netTotal = 0;
         let contractRevTotal = 0;
         let cohostNetTotal = 0;
-        let bookTotal = bookings.length;
+        const bookTotal = bookings.length;
         let areaTotal = 0;
         let totalOccupiedHours = 0;
 
@@ -607,7 +634,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               typeof r.address_details === "string"
                 ? JSON.parse(r.address_details)
                 : r.address_details;
-          } catch (e) {}
+          } catch {}
 
           const area = Number(addr?.size || 15);
           areaTotal += area;
@@ -637,6 +664,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
         const dailyRev: any = {};
         const daysDiff =
           timeFilter === "hoje" ? 1 : timeFilter === "7d" ? 7 : 30;
+
         for (let i = daysDiff - 1; i >= 0; i--) {
           const d = subDays(now, i);
           const dateStr = format(d, "dd MMM", { locale: ptBR });
@@ -709,8 +737,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           });
         });
 
-        // Contabiliza para o Anfitrião Dono os contratos mensais com Coanfitrião ativo
-        // (já que eles não geram bloqueios na tabela `bookings` para manter a vitrine aberta)
+        // Contabiliza para o Anfitrião Dono os contratos mensais com Coanfitrião ativo (deduzindo 4% gateway)
         contractsData.forEach((c: any) => {
           const rObj = roomsMap.get(c.room_id);
           const isOwner = rObj?.host_id === user.id;
@@ -733,8 +760,9 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                     ? 7 / 30
                     : 1;
               const cGross = Number(c.contract_value || 0) * factor;
-              const feePct = Number(c.platform_fee_pct ?? 15) / 100;
-              const cNet = Math.max(0, cGross * (1 - feePct));
+              const cNetAfterGw = cGross * (1 - GATEWAY_FEE_RATE);
+              const feePct = Number(c.platform_fee_pct ?? 20) / 100;
+              const cNet = Math.max(0, cNetAfterGw * (1 - feePct));
 
               revTotal += cGross;
               netTotal += cNet;
@@ -760,7 +788,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
           1,
           rooms.length * capacityPerRoomHours,
         );
-
         setOccupancyRate(
           totalOccupiedHours > 0
             ? Math.min(
@@ -784,8 +811,8 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             occupancy: Math.min(100, finalOcc),
           };
         });
-        setRoomPerformance(perfArray.sort((a, b) => b.revenue - a.revenue));
 
+        setRoomPerformance(perfArray.sort((a, b) => b.revenue - a.revenue));
         setRevenueData(Object.values(dailyRev));
 
         const orderedHeatmap = [
@@ -838,7 +865,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-base font-black text-white">
-                  Modo Coanfitrião Ativo (Sublocação 80/20)
+                  Modo Coanfitrião Ativo (Sublocação 80/20 pós-gateway)
                 </h2>
                 <Badge className="bg-purple-500 text-white border-0 text-[10px] font-black">
                   80% Seu
@@ -846,8 +873,8 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               </div>
               <p className="text-xs text-slate-300 font-medium mt-1">
                 Libere os dias e horários que você não estiver utilizando a sala
-                e receba <strong>80% do valor</strong> de todas as locações
-                avulsas realizadas.
+                e receba <strong>80% do valor líquido</strong> (após 4% de
+                gateway) de todas as locações avulsas realizadas.
               </p>
             </div>
           </div>
@@ -867,8 +894,8 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             Visão Geral de Desempenho
           </h1>
           <p className="text-sm text-slate-500 font-medium mt-1">
-            Análise de rendimentos (Take Rate Avulso 20% + Contratos &
-            Sublocações), ocupação e rentabilidade por m².
+            Análise de rendimentos (Taxa Gateway 4% + Split 80% Anfitrião / 20%
+            Plataforma), ocupação e rentabilidade por m².
           </p>
         </div>
 
@@ -925,7 +952,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               })}
             </h3>
             <p className="text-xs font-bold text-emerald-600 mt-1">
-              Seu Repasse Líquido: R${" "}
+              Seu Repasse Líquido (pós-4%): R${" "}
               {netHostRevenue.toLocaleString("pt-BR", {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
@@ -994,11 +1021,10 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                 Evolução de Receita
               </h2>
               <p className="text-xs font-medium text-slate-500">
-                Acompanhamento de rendimentos no período
+                Acompanhamento de rendimentos no período.
               </p>
             </div>
           </div>
-
           <div className="h-[300px] w-full">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart
@@ -1057,7 +1083,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               Horários de maior fluxo.
             </p>
           </div>
-
           <div className="flex-1 flex flex-col justify-center">
             <div className="grid grid-cols-5 gap-2 mb-2">
               <div className="col-span-1"></div>
@@ -1072,7 +1097,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                 </div>
               ))}
             </div>
-
             <div className="flex flex-col gap-2">
               {heatmapData.map((row) => (
                 <div
@@ -1107,7 +1131,8 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               Desempenho Imobiliário (R$/m²)
             </h2>
             <p className="text-xs font-medium text-slate-500">
-              Rentabilidade exata de cada espaço.
+              Rentabilidade exata de cada espaço (Repasse líquido após 4%
+              gateway + split).
             </p>
           </div>
           <Button
@@ -1127,7 +1152,9 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                 <th className="px-6 py-4 text-center">Tamanho (m²)</th>
                 <th className="px-6 py-4 text-center">Ocupação Est.</th>
                 <th className="px-6 py-4 text-right">Rendimento Bruto</th>
-                <th className="px-6 py-4 text-right">Seu Repasse Líquido</th>
+                <th className="px-6 py-4 text-right">
+                  Seu Repasse Líquido (pós-4%)
+                </th>
                 <th className="px-6 py-4 text-right bg-orange-50/50 text-[#BF4B24]">
                   Rendimento / m²
                 </th>
@@ -1147,6 +1174,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                 roomPerformance.map((room) => {
                   const revPerSqM =
                     room.areaSqM > 0 ? room.revenue / room.areaSqM : 0;
+
                   return (
                     <tr
                       key={room.id}
@@ -1182,9 +1210,11 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                           </div>
                         </div>
                       </td>
+
                       <td className="px-6 py-5 text-center font-bold text-slate-600">
                         {room.areaSqM} m²
                       </td>
+
                       <td className="px-6 py-5">
                         <div className="flex items-center justify-center gap-2">
                           <span className="font-bold text-slate-700 w-8 text-right">
@@ -1201,6 +1231,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                           </div>
                         </div>
                       </td>
+
                       <td className="px-6 py-5 text-right font-black text-slate-700">
                         R${" "}
                         {room.revenue.toLocaleString("pt-BR", {
@@ -1208,6 +1239,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                           maximumFractionDigits: 2,
                         })}
                       </td>
+
                       <td className="px-6 py-5 text-right font-black text-emerald-600">
                         R${" "}
                         {room.netRevenue.toLocaleString("pt-BR", {
@@ -1215,6 +1247,7 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
                           maximumFractionDigits: 2,
                         })}
                       </td>
+
                       <td className="px-6 py-5 text-right font-black text-slate-900 bg-orange-50/20">
                         <div className="flex items-center justify-end gap-1">
                           <span className="text-xs text-[#BF4B24] font-bold">
@@ -1251,7 +1284,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               <span className="font-bold">Adicionar Sala</span>
             </Button>
           )}
-
           <Button
             onClick={() => onNavigate("contracts")}
             variant="outline"
@@ -1260,7 +1292,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             <FileText className="w-8 h-8" />
             <span className="font-bold">Contratos & Fixos</span>
           </Button>
-
           <Button
             onClick={() => onNavigate("availability")}
             variant="outline"
@@ -1271,7 +1302,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
               {isCohostUser ? "Horários de Sublocação" : "Bloquear Agenda"}
             </span>
           </Button>
-
           <Button
             onClick={() => onNavigate("messages")}
             variant="outline"
@@ -1280,7 +1310,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             <MessageSquare className="w-8 h-8" />
             <span className="font-bold">Ver Mensagens</span>
           </Button>
-
           <Button
             onClick={() => onNavigate("reviews")}
             variant="outline"
@@ -1289,7 +1318,6 @@ export function HostOverview({ onNavigate }: HostOverviewProps) {
             <Star className="w-8 h-8" />
             <span className="font-bold">Ver Avaliações</span>
           </Button>
-
           <button
             onClick={handleLogout}
             className="lg:hidden col-span-2 flex flex-col items-center justify-center p-6 bg-red-50/50 border border-red-100 rounded-2xl hover:bg-red-50 transition-colors text-red-600 gap-3 mt-2"

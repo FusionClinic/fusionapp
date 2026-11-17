@@ -54,6 +54,7 @@ import {
   Hash,
   ShieldCheck,
   ArrowDownRight,
+  Info,
 } from "lucide-react";
 import {
   ComposedChart,
@@ -104,6 +105,8 @@ import {
 import { ptBR } from "date-fns/locale";
 import { useToast } from "@/hooks/use-toast";
 
+const GATEWAY_FEE_RATE = 0.04; // 4% de taxa de gateway deduzida do valor bruto antes do split 80/20
+
 const shiftLabels = [
   "Manhã (08h–12h)",
   "Tarde (12h–16h)",
@@ -149,12 +152,15 @@ interface LedgerEntry {
   modality_label: string;
   duration_hours: number;
   gross_brl: number;
+  gateway_fee_brl: number;
+  net_after_gateway_brl: number;
   room_base_brl: number;
   fusion_fee_brl: number;
   fusion_fee_pct: number;
   cohost_name: string | null;
   cohost_payout_brl: number;
   host_payout_brl: number;
+  notes?: string | null;
 }
 
 interface RoomCapacityMetric {
@@ -1088,6 +1094,17 @@ export function AdminNotificationsBell({
           0,
         );
 
+        const hasCustomAgreed =
+          bookingRecord.agreed_value_brl !== null &&
+          bookingRecord.agreed_value_brl !== undefined &&
+          String(bookingRecord.agreed_value_brl).trim() !== "" &&
+          !isNaN(Number(bookingRecord.agreed_value_brl)) &&
+          Number(bookingRecord.agreed_value_brl) >= 0;
+
+        const customAgreedVal = hasCustomAgreed
+          ? Number(bookingRecord.agreed_value_brl)
+          : null;
+
         const linkedContract = bookingRecord.contract_id
           ? roomContracts.find((c: any) => c.id === bookingRecord.contract_id)
           : null;
@@ -1131,6 +1148,8 @@ export function AdminNotificationsBell({
         let paymentDetailsText = "";
         let unitHourlyBrl = 0;
         let grossSingleBrl = 0;
+        let gatewayFeeSingleBrl = 0;
+        let netAfterGatewaySingleBrl = 0;
         let roomBaseSingleBrl = 0;
         let standardFeeSingleBrl = 0;
         let downgradeSpreadSingleBrl = 0;
@@ -1142,16 +1161,24 @@ export function AdminNotificationsBell({
 
         if (isContractBooking) {
           const sessionVal =
-            Number(bookingRecord.agreed_value_brl) > 0
-              ? Number(bookingRecord.agreed_value_brl)
+            customAgreedVal !== null
+              ? customAgreedVal
               : Number(linkedContract?.session_value || 0);
-          const feePct = Number(linkedContract?.platform_fee_pct ?? 15) / 100;
+          gatewayFeeSingleBrl = sessionVal * GATEWAY_FEE_RATE;
+          netAfterGatewaySingleBrl = Math.max(
+            0,
+            sessionVal - gatewayFeeSingleBrl,
+          );
+          const feePct = Number(linkedContract?.platform_fee_pct ?? 20) / 100;
           unitHourlyBrl = sessionVal / Math.max(1, singleSlotUnits);
           grossSingleBrl = sessionVal;
           roomBaseSingleBrl = sessionVal;
-          standardFeeSingleBrl = sessionVal * feePct;
+          standardFeeSingleBrl = netAfterGatewaySingleBrl * feePct;
           fusionProfitSingleBrl = standardFeeSingleBrl;
-          hostPayoutSingleBrl = Math.max(0, sessionVal - standardFeeSingleBrl);
+          hostPayoutSingleBrl = Math.max(
+            0,
+            netAfterGatewaySingleBrl - standardFeeSingleBrl,
+          );
           originTitle = "Contrato Fixo / Recorrente";
           paymentMethodBadge = "Fatura Contratual";
           paymentDetailsText = linkedContract?.contract_type
@@ -1194,8 +1221,8 @@ export function AdminNotificationsBell({
             });
 
           const creditHourlyRate =
-            Number(bookingRecord.agreed_value_brl) > 0
-              ? Number(bookingRecord.agreed_value_brl) / singleSlotUnits
+            customAgreedVal !== null
+              ? customAgreedVal / singleSlotUnits
               : exactUserCreditRate;
 
           const cohostSplitPct = activeCohostContract
@@ -1213,19 +1240,43 @@ export function AdminNotificationsBell({
           });
 
           unitHourlyBrl = arbitrage.creditHourlyRateBrl;
-          grossSingleBrl = Math.max(
+          grossSingleBrl =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(
+                  0,
+                  arbitrage.grossCreditValueBrl + upgradeFee - discount,
+                );
+          gatewayFeeSingleBrl = grossSingleBrl * GATEWAY_FEE_RATE;
+          netAfterGatewaySingleBrl = Math.max(
             0,
-            arbitrage.grossCreditValueBrl + upgradeFee - discount,
+            grossSingleBrl - gatewayFeeSingleBrl,
           );
-          roomBaseSingleBrl = arbitrage.roomBaseValueBrl;
-          standardFeeSingleBrl = arbitrage.standardPlatformFeeBrl;
-          downgradeSpreadSingleBrl = arbitrage.downgradeSpreadProfitBrl;
-          fusionProfitSingleBrl = arbitrage.totalPlatformProfitBrl;
-          hostPayoutSingleBrl = arbitrage.hostPayoutBrl;
-          cohostPayoutSingleBrl = arbitrage.cohostPayoutBrl;
+
+          roomBaseSingleBrl =
+            customAgreedVal !== null
+              ? Math.min(customAgreedVal, arbitrage.roomBaseValueBrl)
+              : arbitrage.roomBaseValueBrl;
+          const roomBaseAfterGw = roomBaseSingleBrl * (1 - GATEWAY_FEE_RATE);
+
+          const hostTotalShare = roomBaseAfterGw * 0.8;
+          cohostPayoutSingleBrl =
+            activeCohostContract && cohostSplitPct !== null
+              ? hostTotalShare * (cohostSplitPct / 100)
+              : 0;
+          hostPayoutSingleBrl = activeCohostContract
+            ? Math.max(0, hostTotalShare - cohostPayoutSingleBrl)
+            : hostTotalShare;
+
+          standardFeeSingleBrl = roomBaseAfterGw * 0.2;
+          downgradeSpreadSingleBrl = Math.max(
+            0,
+            netAfterGatewaySingleBrl - roomBaseAfterGw,
+          );
+          fusionProfitSingleBrl =
+            standardFeeSingleBrl + downgradeSpreadSingleBrl;
           isDowngrade = arbitrage.isDowngrade;
 
-          // Identifica como o assinante pagou o pacote dele (PIX ou Cartão)
           const hasPixPurchase = userTxs.some((tx: any) =>
             String(tx.description || "")
               .toUpperCase()
@@ -1241,16 +1292,24 @@ export function AdminNotificationsBell({
             ? `Usou crédito ${formatTierLabel(creditTierNormalized)} em Sala ${formatTierLabel(roomTier)} (Downgrade c/ margem extra)`
             : `Abatimento de saldo na Carteira Digital (${formatTierLabel(creditTierNormalized)})`;
         } else {
-          // HORA AVULSA OU RESERVA ADMIN MANUAL
+          // HORA AVULSA OU RESERVA ADMIN MANUAL (DEDUZ 4% GATEWAY ANTES DO SPLIT 80/20)
           const baseAvulsoVal =
-            Number(bookingRecord.agreed_value_brl) > 0
-              ? Number(bookingRecord.agreed_value_brl)
+            customAgreedVal !== null
+              ? customAgreedVal
               : rawTotalCost >= singleSlotUnits * 20
                 ? rawTotalCost
                 : (roomTier === "master" ? 80 : roomTier === "vip" ? 45 : 40) *
                   singleSlotUnits;
 
-          grossSingleBrl = Math.max(0, baseAvulsoVal + upgradeFee - discount);
+          grossSingleBrl =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(0, baseAvulsoVal + upgradeFee - discount);
+          gatewayFeeSingleBrl = grossSingleBrl * GATEWAY_FEE_RATE;
+          netAfterGatewaySingleBrl = Math.max(
+            0,
+            grossSingleBrl - gatewayFeeSingleBrl,
+          );
           unitHourlyBrl = grossSingleBrl / Math.max(1, singleSlotUnits);
           roomBaseSingleBrl = grossSingleBrl;
 
@@ -1258,20 +1317,18 @@ export function AdminNotificationsBell({
             const cohostPct = Number(
               activeCohostContract.cohost_split_pct || 80,
             );
-            cohostPayoutSingleBrl = grossSingleBrl * (cohostPct / 100);
+            cohostPayoutSingleBrl =
+              netAfterGatewaySingleBrl * (cohostPct / 100);
             standardFeeSingleBrl = Math.max(
               0,
-              grossSingleBrl - cohostPayoutSingleBrl,
+              netAfterGatewaySingleBrl - cohostPayoutSingleBrl,
             );
             fusionProfitSingleBrl = standardFeeSingleBrl;
             hostPayoutSingleBrl = 0;
           } else {
-            standardFeeSingleBrl = grossSingleBrl * 0.2;
+            standardFeeSingleBrl = netAfterGatewaySingleBrl * 0.2;
             fusionProfitSingleBrl = standardFeeSingleBrl;
-            hostPayoutSingleBrl = Math.max(
-              0,
-              grossSingleBrl - standardFeeSingleBrl,
-            );
+            hostPayoutSingleBrl = netAfterGatewaySingleBrl * 0.8;
           }
 
           if (isAdminManual) {
@@ -1321,6 +1378,8 @@ export function AdminNotificationsBell({
           discountBrl: discount * multiplier,
           upgradeFeeBrl: upgradeFee * multiplier,
           grossTotalBrl: grossSingleBrl * multiplier,
+          gatewayFeeTotalBrl: gatewayFeeSingleBrl * multiplier,
+          netAfterGatewayTotalBrl: netAfterGatewaySingleBrl * multiplier,
           roomBaseTotalBrl: roomBaseSingleBrl * multiplier,
           standardFeeTotalBrl: standardFeeSingleBrl * multiplier,
           downgradeSpreadTotalBrl: downgradeSpreadSingleBrl * multiplier,
@@ -1796,6 +1855,17 @@ export function AdminNotificationsBell({
                   </p>
                 </div>
 
+                {detailData.booking.notes && (
+                  <div className="p-3.5 rounded-2xl bg-blue-50 border border-blue-200 text-blue-950 space-y-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 flex items-center gap-1">
+                      <Info className="w-3.5 h-3.5" /> Observação da Reserva
+                    </span>
+                    <p className="text-xs font-medium">
+                      {detailData.booking.notes}
+                    </p>
+                  </div>
+                )}
+
                 {/* 2. SALA, CLÍNICA E DATA/HORÁRIOS RESERVADOS */}
                 <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
                   <div className="flex items-start justify-between gap-3">
@@ -1893,12 +1963,12 @@ export function AdminNotificationsBell({
                   )}
                 </div>
 
-                {/* 3. RAIO-X FINANCEIRO E SPLIT */}
+                {/* 3. RAIO-X FINANCEIRO E SPLIT (COM GATEWAY 4%) */}
                 <div className="bg-slate-900 text-white p-4 rounded-2xl space-y-2.5 tabular-nums">
                   <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
                     <div>
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                        Valor Total da Reserva ({detailData.totalBatchHours}h)
+                        Valor Total Bruto ({detailData.totalBatchHours}h)
                       </span>
                       <span className="text-xl font-black text-white">
                         R$ {formatBRL(detailData.grossTotalBrl)}
@@ -1912,6 +1982,20 @@ export function AdminNotificationsBell({
                         R$ {formatBRL(detailData.unitHourlyBrl)}/h
                       </span>
                     </div>
+                  </div>
+
+                  <div className="flex justify-between text-xs text-red-300">
+                    <span>(-) Taxa de Pagamento / Gateway (4%):</span>
+                    <span className="font-semibold">
+                      - R$ {formatBRL(detailData.gatewayFeeTotalBrl)}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between text-xs text-slate-200 border-b border-slate-800 pb-1.5">
+                    <span>(=) Base Líquida Pós-Gateway:</span>
+                    <span className="font-bold">
+                      R$ {formatBRL(detailData.netAfterGatewayTotalBrl)}
+                    </span>
                   </div>
 
                   {detailData.discountBrl > 0 && (
@@ -1947,7 +2031,7 @@ export function AdminNotificationsBell({
                   )}
 
                   <div className="flex justify-between text-xs text-slate-300">
-                    <span>Taxa Base Plataforma:</span>
+                    <span>Taxa Base Plataforma (20% pós-4%):</span>
                     <span className="font-semibold text-white">
                       R$ {formatBRL(detailData.standardFeeTotalBrl)}
                     </span>
@@ -1966,7 +2050,7 @@ export function AdminNotificationsBell({
 
                   <div className="flex justify-between text-xs text-slate-300">
                     <span>
-                      Repasse Clínica (
+                      Repasse Clínica (80% pós-4% •{" "}
                       {detailData.hostProfile?.full_name || "Fusion Clinic"}):
                     </span>
                     <span className="font-semibold text-white">
@@ -2222,6 +2306,8 @@ function extractContractBaixaEvents(contract: any): {
   competence: string;
   paidDateIso: string;
   grossBrl: number;
+  gatewayFeeBrl: number;
+  netAfterGatewayBrl: number;
   fusionFeeBrl: number;
   fusionFeePct: number;
   hostPayoutBrl: number;
@@ -2230,6 +2316,8 @@ function extractContractBaixaEvents(contract: any): {
     competence: string;
     paidDateIso: string;
     grossBrl: number;
+    gatewayFeeBrl: number;
+    netAfterGatewayBrl: number;
     fusionFeeBrl: number;
     fusionFeePct: number;
     hostPayoutBrl: number;
@@ -2242,9 +2330,13 @@ function extractContractBaixaEvents(contract: any): {
 
   if (contractVal <= 0) return events;
 
-  const feePct = Number(contract?.platform_fee_pct ?? 15);
-  const fusionFee = contractVal * (feePct / 100);
-  const hostPayout = Math.max(0, contractVal - fusionFee);
+  // Deduz 4% de taxa de gateway sobre o valor bruto do contrato antes do split
+  const gatewayFee = contractVal * GATEWAY_FEE_RATE;
+  const netAfterGateway = Math.max(0, contractVal - gatewayFee);
+
+  const feePct = Number(contract?.platform_fee_pct ?? 20);
+  const fusionFee = netAfterGateway * (feePct / 100);
+  const hostPayout = Math.max(0, netAfterGateway - fusionFee);
 
   const dueDayRaw = Math.max(1, Math.min(31, Number(contract?.due_day) || 8));
   const sched =
@@ -2297,6 +2389,8 @@ function extractContractBaixaEvents(contract: any): {
       competence,
       paidDateIso,
       grossBrl: contractVal,
+      gatewayFeeBrl: gatewayFee,
+      netAfterGatewayBrl: netAfterGateway,
       fusionFeeBrl: fusionFee,
       fusionFeePct: feePct,
       hostPayoutBrl: hostPayout,
@@ -2339,6 +2433,7 @@ export function AdminOverviewTab({
 
   // Estados Globais
   const [gmv, setGmv] = useState(0);
+  const [totalGatewayFeeBrl, setTotalGatewayFeeBrl] = useState(0);
   const [takeRate, setTakeRate] = useState(0);
   const [hostPayoutTotal, setHostPayoutTotal] = useState(0);
   const [activeDoctors, setActiveDoctors] = useState(0);
@@ -2349,12 +2444,15 @@ export function AdminOverviewTab({
 
   // Subgrupo 1: Horas Avulsas
   const [avulsoGmv, setAvulsoGmv] = useState(0);
+  const [avulsoGatewayFee, setAvulsoGatewayFee] = useState(0);
+  const [avulsoHostPayout, setAvulsoHostPayout] = useState(0);
   const [avulsoTakeRate, setAvulsoTakeRate] = useState(0);
   const [avulsoBookingsCount, setAvulsoBookingsCount] = useState(0);
   const [avulsoHoursCount, setAvulsoHoursCount] = useState(0);
 
   // Subgrupo 2: Pacotes Fusion Pass+
   const [packageGmv, setPackageGmv] = useState(0);
+  const [packageGatewayFee, setPackageGatewayFee] = useState(0);
   const [packageStandardFee, setPackageStandardFee] = useState(0);
   const [packageDowngradeSpread, setPackageDowngradeSpread] = useState(0);
   const [packageTotalTakeRate, setPackageTotalTakeRate] = useState(0);
@@ -2410,6 +2508,8 @@ export function AdminOverviewTab({
 
   // Subgrupo 3: Contratos Fixos
   const [contractGmv, setContractGmv] = useState(0);
+  const [contractGatewayFee, setContractGatewayFee] = useState(0);
+  const [contractHostPayout, setContractHostPayout] = useState(0);
   const [contractTakeRate, setContractTakeRate] = useState(0);
   const [contractBookingsCount, setContractBookingsCount] = useState(0);
   const [contractHoursCount, setContractHoursCount] = useState(0);
@@ -2487,17 +2587,13 @@ export function AdminOverviewTab({
         ] = await Promise.all([
           supabase
             .from("bookings")
-            .select(
-              "id, created_at, start_time, end_time, total_cost, upgrade_fee_amount, room_id, user_id, status, contract_id, booking_origin, agreed_value_brl",
-            )
+            .select("*")
             .gte("start_time", startDateObj.toISOString())
             .lte("start_time", maxFutureEndObj.toISOString())
             .in("status", ["confirmed", "completed", "pending_payment"]),
           supabase
             .from("bookings")
-            .select(
-              "id, created_at, start_time, end_time, total_cost, upgrade_fee_amount, room_id, user_id, status, contract_id, booking_origin, agreed_value_brl",
-            )
+            .select("*")
             .gte("created_at", startDateObj.toISOString())
             .lte("created_at", endDateObj.toISOString())
             .in("status", ["confirmed", "completed", "pending_payment"]),
@@ -2751,6 +2847,17 @@ export function AdminOverviewTab({
               ? calculateSlotUnits(b.start_time, b.end_time)
               : 1;
 
+          const hasCustomAgreed =
+            b.agreed_value_brl !== null &&
+            b.agreed_value_brl !== undefined &&
+            String(b.agreed_value_brl).trim() !== "" &&
+            !isNaN(Number(b.agreed_value_brl)) &&
+            Number(b.agreed_value_brl) >= 0;
+
+          const customAgreedVal = hasCustomAgreed
+            ? Number(b.agreed_value_brl)
+            : null;
+
           const linkedContract = b.contract_id
             ? contractsById.get(b.contract_id)
             : null;
@@ -2761,7 +2868,7 @@ export function AdminOverviewTab({
           );
 
           if (isContractBooking) {
-            const feePct = Number(linkedContract?.platform_fee_pct ?? 15);
+            const feePct = Number(linkedContract?.platform_fee_pct ?? 20);
             const cType =
               linkedContract?.contract_type || b.booking_origin || "";
             let modalityLabel = "Contrato • Alocação Fixa";
@@ -2799,19 +2906,22 @@ export function AdminOverviewTab({
               modality_label: modalityLabel,
               duration_hours: slotUnits,
               gross_brl: 0,
+              gateway_fee_brl: 0,
+              net_after_gateway_brl: 0,
               room_base_brl: 0,
               fusion_fee_brl: 0,
               fusion_fee_pct: feePct,
               cohost_name: null,
               cohost_payout_brl: 0,
               host_payout_brl: 0,
+              notes: b.notes || null,
             };
           }
 
           const roomCohost = activeCohostByRoomId.get(b.room_id);
           const cohostName = roomCohost?.specialist_name || null;
           const cohostSplitPct = roomCohost
-            ? Number(roomCohost.cohost_split_pct || 0)
+            ? Number(roomCohost.cohost_split_pct || 80)
             : 0;
 
           const rawTotalCost = Number(b.total_cost || 0);
@@ -2830,6 +2940,9 @@ export function AdminOverviewTab({
             isExplicitWalletOrigin || isLegacyWalletOrigin,
           );
 
+          // ==================================================================
+          // 2. PACOTES FUSION PASS+ (DEDUZ 4% GATEWAY ANTES DO SPLIT 80/20)
+          // ==================================================================
           if (isPackageBooking) {
             const userTxs = userWalletMap.get(b.user_id) || [];
             const userSubs = userSubsMap.get(b.user_id) || [];
@@ -2870,8 +2983,8 @@ export function AdminOverviewTab({
               });
 
             const creditHourlyRate =
-              Number(b.agreed_value_brl) > 0
-                ? Number(b.agreed_value_brl) / slotUnits
+              customAgreedVal !== null
+                ? customAgreedVal / slotUnits
                 : exactUserCreditRate;
 
             const arbitrage = calculatePackageBookingArbitrage({
@@ -2884,18 +2997,46 @@ export function AdminOverviewTab({
               cohostSplitPct: roomCohost ? cohostSplitPct : null,
             });
 
-            const rev = Math.max(
+            const rev =
+              customAgreedVal !== null
+                ? customAgreedVal
+                : Math.max(
+                    0,
+                    arbitrage.grossCreditValueBrl + upgradeFee - discount,
+                  );
+
+            const gatewayFee = rev * GATEWAY_FEE_RATE;
+            const netAfterGateway = Math.max(0, rev - gatewayFee);
+
+            const effectiveRoomBaseGross =
+              customAgreedVal !== null
+                ? Math.min(customAgreedVal, arbitrage.roomBaseValueBrl)
+                : arbitrage.roomBaseValueBrl;
+            const roomBaseAfterGateway =
+              effectiveRoomBaseGross * (1 - GATEWAY_FEE_RATE);
+
+            const hostTotalShare = roomBaseAfterGateway * 0.8;
+            const cohostPayout = roomCohost
+              ? hostTotalShare * (cohostSplitPct / 100)
+              : 0;
+            const hostPayout = roomCohost
+              ? Math.max(0, hostTotalShare - cohostPayout)
+              : hostTotalShare;
+
+            const standardFee = roomBaseAfterGateway * 0.2;
+            const downgradeSpread = Math.max(
               0,
-              arbitrage.grossCreditValueBrl + upgradeFee - discount,
+              netAfterGateway - roomBaseAfterGateway,
             );
+            const totalFusionProfit = standardFee + downgradeSpread;
 
             const modalityLabel = arbitrage.isDowngrade
               ? `Pacote ${formatTierLabel(creditTierUsed)} → Sala ${formatTierLabel(roomTier)}`
               : `Pacote ${formatTierLabel(creditTierUsed)} (${matchedHours || detectedPackageHours}h)`;
 
             const effectivePct =
-              rev > 0
-                ? Math.round((arbitrage.totalPlatformProfitBrl / rev) * 100)
+              netAfterGateway > 0
+                ? Math.round((totalFusionProfit / netAfterGateway) * 100)
                 : 20;
 
             return {
@@ -2912,8 +3053,8 @@ export function AdminOverviewTab({
               room_tier: roomTier,
               credit_tier: creditTierUsed,
               is_downgrade: arbitrage.isDowngrade,
-              downgrade_spread_brl: arbitrage.downgradeSpreadProfitBrl,
-              standard_fusion_fee_brl: arbitrage.standardPlatformFeeBrl,
+              downgrade_spread_brl: downgradeSpread,
+              standard_fusion_fee_brl: standardFee,
               clinic_id: room?.host_id || "fusion",
               clinic_name: clinicName,
               user_id: b.user_id,
@@ -2924,36 +3065,60 @@ export function AdminOverviewTab({
               modality_label: modalityLabel,
               duration_hours: slotUnits,
               gross_brl: rev,
-              room_base_brl: arbitrage.roomBaseValueBrl,
-              fusion_fee_brl: arbitrage.totalPlatformProfitBrl,
+              gateway_fee_brl: gatewayFee,
+              net_after_gateway_brl: netAfterGateway,
+              room_base_brl: effectiveRoomBaseGross,
+              fusion_fee_brl: totalFusionProfit,
               fusion_fee_pct: effectivePct,
               cohost_name: cohostName,
-              cohost_payout_brl: arbitrage.cohostPayoutBrl,
-              host_payout_brl: arbitrage.hostPayoutBrl,
+              cohost_payout_brl: cohostPayout,
+              host_payout_brl: hostPayout,
+              notes: b.notes || null,
             };
           }
 
+          // ==================================================================
+          // 1. HORAS AVULSAS (DEDUZ 4% GATEWAY -> 80% HOST / 20% FUSION)
+          // ==================================================================
           const computeAvulsoSplit = (grossVal: number) => {
-            const fusionFee = grossVal * 0.2;
-            const netAfterFusion = Math.max(0, grossVal - fusionFee);
-            const cohostPayout =
-              cohostSplitPct > 0 ? netAfterFusion * (cohostSplitPct / 100) : 0;
-            const hostPayout = Math.max(0, netAfterFusion - cohostPayout);
-            return { fusionFee, cohostPayout, hostPayout };
+            const gatewayFee = grossVal * GATEWAY_FEE_RATE;
+            const netAfterGateway = Math.max(0, grossVal - gatewayFee);
+
+            if (roomCohost && cohostSplitPct > 0) {
+              const cohostPayout = netAfterGateway * (cohostSplitPct / 100);
+              const fusionFee = Math.max(0, netAfterGateway - cohostPayout);
+              return {
+                gatewayFee,
+                netAfterGateway,
+                fusionFee,
+                cohostPayout,
+                hostPayout: 0,
+              };
+            }
+
+            const fusionFee = netAfterGateway * 0.2;
+            const hostPayout = netAfterGateway * 0.8;
+            return {
+              gatewayFee,
+              netAfterGateway,
+              fusionFee,
+              cohostPayout: 0,
+              hostPayout,
+            };
           };
 
           const baseAvulsoVal =
-            Number(b.agreed_value_brl) > 0
-              ? Number(b.agreed_value_brl)
+            customAgreedVal !== null
+              ? customAgreedVal
               : rawTotalCost >= slotUnits * 20
                 ? rawTotalCost
                 : (roomTier === "master" ? 80 : roomTier === "vip" ? 45 : 40) *
                   slotUnits;
 
-          const finalAvulsoBrl = Math.max(
-            0,
-            baseAvulsoVal + upgradeFee - discount,
-          );
+          const finalAvulsoBrl =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(0, baseAvulsoVal + upgradeFee - discount);
           const avulsoSplit = computeAvulsoSplit(finalAvulsoBrl);
 
           return {
@@ -2982,12 +3147,15 @@ export function AdminOverviewTab({
             modality_label: `Hora Avulsa • Sala ${formatTierLabel(roomTier)}`,
             duration_hours: slotUnits,
             gross_brl: finalAvulsoBrl,
+            gateway_fee_brl: avulsoSplit.gatewayFee,
+            net_after_gateway_brl: avulsoSplit.netAfterGateway,
             room_base_brl: finalAvulsoBrl,
             fusion_fee_brl: avulsoSplit.fusionFee,
             fusion_fee_pct: 20,
             cohost_name: cohostName,
             cohost_payout_brl: avulsoSplit.cohostPayout,
             host_payout_brl: avulsoSplit.hostPayout,
+            notes: b.notes || null,
           };
         };
 
@@ -3018,15 +3186,19 @@ export function AdminOverviewTab({
         });
 
         let totalGmv = 0;
+        let totalGwFee = 0;
         let totalTakeRate = 0;
         let totalHostNet = 0;
 
         let sumAvulsoGmv = 0;
+        let sumAvulsoGw = 0;
+        let sumAvulsoHost = 0;
         let sumAvulsoTake = 0;
         let countAvulsoBookings = 0;
         let sumAvulsoHours = 0;
 
         let sumPkgGmv = 0;
+        let sumPkgGw = 0;
         let sumPkgStandardFee = 0;
         let sumPkgDowngradeSpread = 0;
         let sumPkgTotalTake = 0;
@@ -3041,6 +3213,8 @@ export function AdminOverviewTab({
         };
 
         let sumContractGmv = 0;
+        let sumContractGw = 0;
+        let sumContractHost = 0;
         let sumContractTake = 0;
         let countContractBookings = 0;
         let sumContractHours = 0;
@@ -3157,6 +3331,7 @@ export function AdminOverviewTab({
           }
 
           totalGmv += entry.gross_brl;
+          totalGwFee += entry.gateway_fee_brl;
           totalTakeRate += entry.fusion_fee_brl;
           totalHostNet += entry.host_payout_brl + entry.cohost_payout_brl;
 
@@ -3185,6 +3360,7 @@ export function AdminOverviewTab({
 
           if (entry.subgroup === "package") {
             sumPkgGmv += entry.gross_brl;
+            sumPkgGw += entry.gateway_fee_brl;
             sumPkgStandardFee += entry.standard_fusion_fee_brl;
             sumPkgDowngradeSpread += entry.downgrade_spread_brl;
             sumPkgTotalTake += entry.fusion_fee_brl;
@@ -3224,6 +3400,8 @@ export function AdminOverviewTab({
             }
           } else {
             sumAvulsoGmv += entry.gross_brl;
+            sumAvulsoGw += entry.gateway_fee_brl;
+            sumAvulsoHost += entry.host_payout_brl + entry.cohost_payout_brl;
             sumAvulsoTake += entry.fusion_fee_brl;
             countAvulsoBookings += 1;
             sumAvulsoHours += entry.duration_hours;
@@ -3284,10 +3462,13 @@ export function AdminOverviewTab({
 
             if (paidMs >= startMs && paidMs <= endMs) {
               totalGmv += ev.grossBrl;
+              totalGwFee += ev.gatewayFeeBrl;
               totalTakeRate += ev.fusionFeeBrl;
               totalHostNet += ev.hostPayoutBrl;
 
               sumContractGmv += ev.grossBrl;
+              sumContractGw += ev.gatewayFeeBrl;
+              sumContractHost += ev.hostPayoutBrl;
               sumContractTake += ev.fusionFeeBrl;
               countContractBookings += 1;
 
@@ -3353,12 +3534,15 @@ export function AdminOverviewTab({
                 modality_label: `${modalityLabel} (Baixa ${ev.competence})`,
                 duration_hours: roomContractHoursInPeriod,
                 gross_brl: ev.grossBrl,
+                gateway_fee_brl: ev.gatewayFeeBrl,
+                net_after_gateway_brl: ev.netAfterGatewayBrl,
                 room_base_brl: ev.grossBrl,
                 fusion_fee_brl: ev.fusionFeeBrl,
                 fusion_fee_pct: ev.fusionFeePct,
                 cohost_name: null,
                 cohost_payout_brl: 0,
                 host_payout_brl: ev.hostPayoutBrl,
+                notes: null,
               });
             }
           });
@@ -3394,15 +3578,19 @@ export function AdminOverviewTab({
         setFutureResolvedEntries(futureEntries);
 
         setGmv(totalGmv);
+        setTotalGatewayFeeBrl(totalGwFee);
         setTakeRate(totalTakeRate);
         setHostPayoutTotal(totalHostNet);
 
         setAvulsoGmv(sumAvulsoGmv);
+        setAvulsoGatewayFee(sumAvulsoGw);
+        setAvulsoHostPayout(sumAvulsoHost);
         setAvulsoTakeRate(sumAvulsoTake);
         setAvulsoBookingsCount(countAvulsoBookings);
         setAvulsoHoursCount(sumAvulsoHours);
 
         setPackageGmv(sumPkgGmv);
+        setPackageGatewayFee(sumPkgGw);
         setPackageStandardFee(sumPkgStandardFee);
         setPackageDowngradeSpread(sumPkgDowngradeSpread);
         setPackageTotalTakeRate(sumPkgTotalTake);
@@ -3413,6 +3601,8 @@ export function AdminOverviewTab({
         setPackageByTierStats(pkgTierAcc);
 
         setContractGmv(sumContractGmv);
+        setContractGatewayFee(sumContractGw);
+        setContractHostPayout(sumContractHost);
         setContractTakeRate(sumContractTake);
         setContractBookingsCount(countContractBookings);
         setContractHoursCount(sumContractHours);
@@ -3633,7 +3823,8 @@ export function AdminOverviewTab({
         e.room_name.toLowerCase().includes(q) ||
         e.clinic_name.toLowerCase().includes(q) ||
         e.modality_label.toLowerCase().includes(q) ||
-        e.booking_id.toLowerCase().includes(q)
+        e.booking_id.toLowerCase().includes(q) ||
+        (e.notes || "").toLowerCase().includes(q)
       );
     });
 
@@ -3662,12 +3853,13 @@ export function AdminOverviewTab({
     return processedLedger.reduce(
       (acc, curr) => {
         acc.gmv += curr.gross_brl;
+        acc.gatewayFee += curr.gateway_fee_brl;
         acc.fusionNet += curr.fusion_fee_brl;
         acc.hostPayout += curr.host_payout_brl + curr.cohost_payout_brl;
         acc.hours += curr.duration_hours;
         return acc;
       },
-      { gmv: 0, fusionNet: 0, hostPayout: 0, hours: 0 },
+      { gmv: 0, gatewayFee: 0, fusionNet: 0, hostPayout: 0, hours: 0 },
     );
   }, [processedLedger]);
 
@@ -3783,7 +3975,7 @@ export function AdminOverviewTab({
       return toast({ title: "Sem lançamentos para exportar." });
     }
     let csv =
-      "Data do Agendamento / Baixa;Data da Sessao / Competencia;Codigo Transacao;Subgrupo;Clinica;Sala;Profissional;Especialidade;Modalidade;Horas;Entrada Bruta GMV (R$);Base Sala Entregue (R$);Repasse Clinica/CoHost (R$);Ganho Extra Downgrade (R$);Credito Liquido Total Fusion (R$);Saldo Acumulado Fusion (R$)\n";
+      "Data do Agendamento / Baixa;Data da Sessao / Competencia;Codigo Transacao;Subgrupo;Clinica;Sala;Profissional;Especialidade;Modalidade;Horas;Entrada Bruta GMV (R$);Taxa Gateway 4% (R$);Base Pos-Gateway (R$);Repasse Clinica/CoHost 80% (R$);Ganho Extra Downgrade (R$);Credito Liquido Total Fusion 20% (R$);Saldo Acumulado Fusion (R$);Observacoes\n";
 
     [...processedLedger].reverse().forEach((row) => {
       const createdDt = format(
@@ -3801,7 +3993,7 @@ export function AdminOverviewTab({
             : "1. HORA AVULSA";
       const hostTotal = row.host_payout_brl + row.cohost_payout_brl;
 
-      csv += `${createdDt};${sessionDt};#${row.booking_id.slice(0, 8)};"${nat}";"${row.clinic_name}";"${row.room_name}";"${row.specialist_name}";"${row.specialty}";"${row.modality_label}";${row.duration_hours};${row.gross_brl.toFixed(2).replace(".", ",")};${row.room_base_brl.toFixed(2).replace(".", ",")};-${hostTotal.toFixed(2).replace(".", ",")};${row.downgrade_spread_brl.toFixed(2).replace(".", ",")};${row.fusion_fee_brl.toFixed(2).replace(".", ",")};${row.running_fusion_balance.toFixed(2).replace(".", ",")}\n`;
+      csv += `${createdDt};${sessionDt};#${row.booking_id.slice(0, 8)};"${nat}";"${row.clinic_name}";"${row.room_name}";"${row.specialist_name}";"${row.specialty}";"${row.modality_label}";${row.duration_hours};${row.gross_brl.toFixed(2).replace(".", ",")};-${row.gateway_fee_brl.toFixed(2).replace(".", ",")};${row.net_after_gateway_brl.toFixed(2).replace(".", ",")};-${hostTotal.toFixed(2).replace(".", ",")};${row.downgrade_spread_brl.toFixed(2).replace(".", ",")};${row.fusion_fee_brl.toFixed(2).replace(".", ",")};${row.running_fusion_balance.toFixed(2).replace(".", ",")};"${(row.notes || "").replace(/"/g, '""')}"\n`;
     });
 
     downloadCSV(
@@ -3914,8 +4106,8 @@ export function AdminOverviewTab({
             Centro de Comando Fusion
           </h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Faturamento por canal (Horas Avulsas, Pacotes e Contratos Fixos) e
-            capacidade instalada.
+            Faturamento por canal (Horas Avulsas, Pacotes e Contratos Fixos) com
+            taxa de gateway de 4% deduzida antes do split.
           </p>
         </div>
 
@@ -4012,8 +4204,10 @@ export function AdminOverviewTab({
             R$ {formatBRL(gmv)}
           </h3>
           <p className="text-xs text-slate-500 mt-2 tabular-nums">
-            {totalBookingsCount} lançamentos • Ticket médio R${" "}
-            {formatBRL(avgTicketPerBooking)}
+            {totalBookingsCount} lançamentos • Gateway (4%):{" "}
+            <strong className="text-red-600">
+              -R$ {formatBRL(totalGatewayFeeBrl)}
+            </strong>
           </p>
         </div>
 
@@ -4025,7 +4219,7 @@ export function AdminOverviewTab({
           <div className="relative z-10">
             <div className="flex justify-between items-center mb-3">
               <span className="text-xs font-medium text-slate-400">
-                Receita Líquida Fusion
+                Receita Líquida Fusion (Pós-4%)
               </span>
               <span className="text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-md">
                 {gmv > 0
@@ -4049,7 +4243,7 @@ export function AdminOverviewTab({
               )}
             </h3>
             <p className="text-xs text-slate-400 mt-2 tabular-nums">
-              Repasse Clínicas: R$ {formatBRL(hostPayoutTotal)}
+              Repasse Clínicas (80% pós-4%): R$ {formatBRL(hostPayoutTotal)}
             </p>
           </div>
         </div>
@@ -4112,7 +4306,7 @@ export function AdminOverviewTab({
                     1. Horas Avulsas
                   </h2>
                   <p className="text-[11px] text-slate-500">
-                    PIX ou Cartão direto (sem pacote)
+                    Bruto - 4% Gateway → 80% Host / 20% Fusion
                   </p>
                 </div>
               </div>
@@ -4137,18 +4331,20 @@ export function AdminOverviewTab({
 
             <div className="space-y-2.5 text-xs tabular-nums">
               <div className="flex items-center justify-between text-slate-600">
-                <span>Repasse Clínicas (80%)</span>
-                <span className="font-semibold text-slate-900">
-                  R$ {formatBRL(Math.max(0, avulsoGmv - avulsoTakeRate))}
+                <span>Taxa Gateway (4%)</span>
+                <span className="font-semibold text-red-600">
+                  - R$ {formatBRL(avulsoGatewayFee)}
                 </span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
-                <span>Taxa média aplicada</span>
-                <span className="font-medium text-slate-500">20% fixo</span>
+                <span>Repasse Clínicas (80% pós-4%)</span>
+                <span className="font-semibold text-slate-900">
+                  R$ {formatBRL(avulsoHostPayout)}
+                </span>
               </div>
               <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between">
                 <span className="font-semibold text-slate-900">
-                  Receita Líquida Fusion
+                  Receita Líquida Fusion (20% pós-4%)
                 </span>
                 <span className="text-sm font-bold text-emerald-700">
                   + R$ {formatBRL(avulsoTakeRate)}
@@ -4180,7 +4376,7 @@ export function AdminOverviewTab({
                   </h2>
                   <p className="text-[11px] text-slate-500">
                     PIX ({breakageTotals.pixSubscribersCount}) • Cartão (
-                    {breakageTotals.cardSubscribersCount}) • Sobras & Downgrade
+                    {breakageTotals.cardSubscribersCount}) • Taxa 4% Gateway
                   </p>
                 </div>
               </div>
@@ -4230,7 +4426,14 @@ export function AdminOverviewTab({
 
             <div className="space-y-2 text-xs tabular-nums">
               <div className="flex items-center justify-between text-slate-600">
-                <span>Taxa Base (20%) / Repasse</span>
+                <span>Taxa Gateway (4%)</span>
+                <span className="font-semibold text-red-600">
+                  - R$ {formatBRL(packageGatewayFee)}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between text-slate-600">
+                <span>Taxa Base (20%) / Repasse (80% pós-4%)</span>
                 <span className="font-semibold text-slate-900">
                   R$ {formatBRL(packageStandardFee)} / R${" "}
                   {formatBRL(packageHostPayout)}
@@ -4331,23 +4534,20 @@ export function AdminOverviewTab({
 
             <div className="space-y-2.5 text-xs tabular-nums">
               <div className="flex items-center justify-between text-slate-600">
-                <span>Repasse Clínicas (Líquido)</span>
-                <span className="font-semibold text-slate-900">
-                  R$ {formatBRL(Math.max(0, contractGmv - contractTakeRate))}
+                <span>Taxa Gateway (4%)</span>
+                <span className="font-semibold text-red-600">
+                  - R$ {formatBRL(contractGatewayFee)}
                 </span>
               </div>
               <div className="flex items-center justify-between text-slate-600">
-                <span>Taxa média de administração</span>
-                <span className="font-medium text-slate-500">
-                  {contractGmv > 0
-                    ? ((contractTakeRate / contractGmv) * 100).toFixed(1)
-                    : "0.0"}
-                  %
+                <span>Repasse Clínicas (Líquido pós-4%)</span>
+                <span className="font-semibold text-slate-900">
+                  R$ {formatBRL(contractHostPayout)}
                 </span>
               </div>
               <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between">
                 <span className="font-semibold text-slate-900">
-                  Receita Líquida Fusion
+                  Receita Líquida Fusion (pós-4%)
                 </span>
                 <span className="text-sm font-bold text-emerald-700">
                   + R$ {formatBRL(contractTakeRate)}
@@ -4939,7 +5139,9 @@ export function AdminOverviewTab({
                   3. GMV Contratos
                 </th>
                 <th className="px-6 py-3.5 text-right">Volume Total (R$)</th>
-                <th className="px-6 py-3.5 text-right">Receita Fusion</th>
+                <th className="px-6 py-3.5 text-right">
+                  Receita Fusion (pós-4%)
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -5398,7 +5600,7 @@ export function AdminOverviewTab({
       </Dialog>
 
       {/* ==================================================================== */}
-      {/* MODAL 2: EXTRATO BANCÁRIO FUSION (LEDGER COMPLETO)                   */}
+      {/* MODAL 2: EXTRATO BANCÁRIO FUSION (LEDGER COMPLETO COM 4% GATEWAY)    */}
       {/* ==================================================================== */}
       <Dialog open={isLedgerOpen} onOpenChange={setIsLedgerOpen}>
         <DialogContent className="max-w-[95vw] sm:max-w-6xl h-[88vh] p-0 gap-0 overflow-hidden flex flex-col bg-white border-slate-200 shadow-2xl rounded-2xl">
@@ -5409,8 +5611,8 @@ export function AdminOverviewTab({
                   Extrato Contábil Fusion ({processedLedger.length} lançamentos)
                 </DialogTitle>
                 <DialogDescription className="text-xs text-slate-400">
-                  Horas Avulsas, Pacotes Fusion Pass+ e Contratos Fixos (pelo
-                  valor integral no dia da baixa).
+                  Horas Avulsas, Pacotes Fusion Pass+ e Contratos Fixos (Valor
+                  Bruto - 4% Gateway = Base Líquida 80/20).
                 </DialogDescription>
               </div>
 
@@ -5437,23 +5639,23 @@ export function AdminOverviewTab({
             </div>
             <div className="px-6 py-3">
               <p className="text-[11px] font-medium text-slate-500">
-                Repasse Clínicas / Co-Hosts
+                Taxas de Gateway (4%)
+              </p>
+              <p className="text-lg font-bold text-red-600 mt-0.5">
+                - R$ {formatBRL(ledgerTotals.gatewayFee)}
+              </p>
+            </div>
+            <div className="px-6 py-3">
+              <p className="text-[11px] font-medium text-slate-500">
+                Repasse Clínicas / Co-Hosts (80% pós-4%)
               </p>
               <p className="text-lg font-bold text-slate-700 mt-0.5">
                 - R$ {formatBRL(ledgerTotals.hostPayout)}
               </p>
             </div>
-            <div className="px-6 py-3">
-              <p className="text-[11px] font-medium text-slate-500">
-                Horas Auditadas
-              </p>
-              <p className="text-lg font-bold text-slate-900 mt-0.5">
-                {ledgerTotals.hours}h utilizadas
-              </p>
-            </div>
             <div className="px-6 py-3 bg-emerald-50/60">
               <p className="text-[11px] font-medium text-emerald-800">
-                Receita Líquida Fusion
+                Receita Líquida Fusion (20% pós-4%)
               </p>
               <p className="text-lg font-bold text-emerald-700 mt-0.5">
                 + R$ {formatBRL(ledgerTotals.fusionNet)}
@@ -5514,14 +5716,15 @@ export function AdminOverviewTab({
             <table className="w-full text-left text-xs whitespace-nowrap tabular-nums">
               <thead className="bg-slate-50 text-slate-500 font-semibold text-[11px] sticky top-0 z-10 border-b border-slate-200">
                 <tr>
-                  <th className="px-6 py-3">Data / Sessão</th>
-                  <th className="px-6 py-3">Cód.</th>
-                  <th className="px-6 py-3">Locatário / Sala</th>
-                  <th className="px-6 py-3">Canal</th>
-                  <th className="px-6 py-3 text-right">Valor Bruto</th>
-                  <th className="px-6 py-3 text-right">Repasse Clínica</th>
-                  <th className="px-6 py-3 text-right">Receita Fusion</th>
-                  <th className="px-6 py-3 text-right bg-slate-50">
+                  <th className="px-5 py-3">Data / Sessão</th>
+                  <th className="px-5 py-3">Cód.</th>
+                  <th className="px-5 py-3">Locatário / Sala</th>
+                  <th className="px-5 py-3">Canal</th>
+                  <th className="px-5 py-3 text-right">Valor Bruto</th>
+                  <th className="px-5 py-3 text-right">Gateway (4%)</th>
+                  <th className="px-5 py-3 text-right">Repasse Clínica</th>
+                  <th className="px-5 py-3 text-right">Receita Fusion</th>
+                  <th className="px-5 py-3 text-right bg-slate-50">
                     Saldo Acumulado
                   </th>
                 </tr>
@@ -5530,7 +5733,7 @@ export function AdminOverviewTab({
                 {processedLedger.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={8}
+                      colSpan={9}
                       className="px-6 py-16 text-center text-slate-400"
                     >
                       Nenhum lançamento encontrado para este filtro.
@@ -5545,7 +5748,7 @@ export function AdminOverviewTab({
                         key={item.id}
                         className="hover:bg-slate-50 transition-colors"
                       >
-                        <td className="px-6 py-3">
+                        <td className="px-5 py-3">
                           <p className="font-bold text-slate-900">
                             {item.is_contract
                               ? `Baixa ${format(parseISO(item.transaction_date), "dd/MM/yyyy")}`
@@ -5561,20 +5764,30 @@ export function AdminOverviewTab({
                           </p>
                         </td>
 
-                        <td className="px-6 py-3 font-mono text-[11px] text-slate-400">
+                        <td className="px-5 py-3 font-mono text-[11px] text-slate-400">
                           #{item.booking_id.slice(0, 8)}
                         </td>
 
-                        <td className="px-6 py-3">
-                          <p className="font-semibold text-slate-900">
-                            {item.specialist_name}
-                          </p>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center gap-1.5">
+                            <p className="font-semibold text-slate-900">
+                              {item.specialist_name}
+                            </p>
+                            {item.notes && (
+                              <span
+                                title={`Obs: ${item.notes}`}
+                                className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-blue-600 text-white"
+                              >
+                                <Info className="w-2.5 h-2.5" />
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[11px] text-slate-500">
                             {item.clinic_name} • {item.room_name}
                           </p>
                         </td>
 
-                        <td className="px-6 py-3">
+                        <td className="px-5 py-3">
                           <span className="text-xs font-medium text-slate-700">
                             {item.modality_label}
                           </span>
@@ -5586,19 +5799,23 @@ export function AdminOverviewTab({
                           )}
                         </td>
 
-                        <td className="px-6 py-3 text-right font-semibold text-slate-900">
+                        <td className="px-5 py-3 text-right font-semibold text-slate-900">
                           R$ {formatBRL(item.gross_brl)}
                         </td>
 
-                        <td className="px-6 py-3 text-right text-slate-500">
+                        <td className="px-5 py-3 text-right text-red-600 font-medium">
+                          - R$ {formatBRL(item.gateway_fee_brl)}
+                        </td>
+
+                        <td className="px-5 py-3 text-right text-slate-500">
                           - R$ {formatBRL(hostTotal)}
                         </td>
 
-                        <td className="px-6 py-3 text-right font-bold text-emerald-700">
+                        <td className="px-5 py-3 text-right font-bold text-emerald-700">
                           + R$ {formatBRL(item.fusion_fee_brl)}
                         </td>
 
-                        <td className="px-6 py-3 text-right font-bold text-slate-900 bg-slate-50/60">
+                        <td className="px-5 py-3 text-right font-bold text-slate-900 bg-slate-50/60">
                           R$ {formatBRL(item.running_fusion_balance)}
                         </td>
                       </tr>

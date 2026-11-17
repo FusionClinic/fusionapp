@@ -45,11 +45,15 @@ import {
   Users,
   QrCode,
   RotateCcw,
+  Info,
+  Pencil,
+  Save,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -85,6 +89,8 @@ import {
 } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useToast } from "@/hooks/use-toast";
+
+const GATEWAY_FEE_RATE = 0.04; // 4% de taxa de gateway sobre o valor bruto
 
 interface SpecialistProfile {
   id: string;
@@ -132,6 +138,10 @@ interface BookingInfo {
   credit_tx_type: string;
   credit_expires_at: string | null;
   gross_value_brl: number;
+  gateway_fee_brl: number;
+  net_after_gateway_brl: number;
+  agreed_value_brl: number | null;
+  notes: string | null;
   room_base_value_brl: number;
   hourly_rate_brl: number;
   room_reference_hourly_brl: number;
@@ -280,6 +290,14 @@ export function AdminBookingsTab({
   const [sendCancelEmail, setSendCancelEmail] = useState(true);
   const [shouldRefundCredits, setShouldRefundCredits] = useState(true);
 
+  // Modal de Edição de Valor & Observação da Reserva (Ícone "i" e Lápis)
+  const [isEditBookingMetaOpen, setIsEditBookingMetaOpen] = useState(false);
+  const [editingMetaBooking, setEditingMetaBooking] =
+    useState<BookingInfo | null>(null);
+  const [editValueInput, setEditValueInput] = useState("");
+  const [editNotesInput, setEditNotesInput] = useState("");
+  const [savingMeta, setSavingMeta] = useState(false);
+
   // Modal de Perfil e Créditos
   const [selectedSpecialist, setSelectedSpecialist] =
     useState<SpecialistProfile | null>(null);
@@ -319,6 +337,7 @@ export function AdminBookingsTab({
     string[]
   >([]);
   const [newBookingAgreedBrl, setNewBookingAgreedBrl] = useState<string>("");
+  const [newBookingNotes, setNewBookingNotes] = useState<string>("");
 
   useEffect(() => {
     fetchBookings();
@@ -355,9 +374,7 @@ export function AdminBookingsTab({
         await Promise.all([
           supabase
             .from("bookings")
-            .select(
-              "id, created_at, start_time, end_time, status, total_cost, upgrade_fee_amount, room_id, user_id, contract_id, booking_origin, agreed_value_brl",
-            )
+            .select("*")
             .gte("start_time", start)
             .lte("start_time", end)
             .order("start_time", { ascending: true }),
@@ -548,6 +565,19 @@ export function AdminBookingsTab({
         const specialistProfile = richProfilesMap.get(b.user_id);
         const slotUnits = calculateSlotUnits(b.start_time, b.end_time);
 
+        const hasCustomAgreedValue =
+          b.agreed_value_brl !== null &&
+          b.agreed_value_brl !== undefined &&
+          String(b.agreed_value_brl).trim() !== "" &&
+          !isNaN(Number(b.agreed_value_brl)) &&
+          Number(b.agreed_value_brl) >= 0;
+
+        const customAgreedVal = hasCustomAgreedValue
+          ? Number(b.agreed_value_brl)
+          : null;
+
+        const bookingNotes = b.notes || b.admin_notes || null;
+
         const roomCohostContract = findCohostForBookingDate(
           b.room_id,
           b.start_time,
@@ -560,11 +590,17 @@ export function AdminBookingsTab({
           (b.booking_origin && String(b.booking_origin).startsWith("contract")),
         );
 
+        // ====================================================================
+        // 1. CONTRATOS FIXOS (DEDUZ 4% GATEWAY ANTES DO SPLIT)
+        // ====================================================================
         if (isContractBooking) {
           const contractSessionVal =
-            Number(b.agreed_value_brl) > 0
-              ? Number(b.agreed_value_brl)
+            customAgreedVal !== null
+              ? customAgreedVal
               : Number(linkedContract?.session_value || 0);
+
+          const gatewayFee = contractSessionVal * GATEWAY_FEE_RATE;
+          const netAfterGateway = Math.max(0, contractSessionVal - gatewayFee);
 
           const isSubContractUnderCohost = Boolean(
             roomCohostContract &&
@@ -574,19 +610,18 @@ export function AdminBookingsTab({
 
           const customPlatformFeePctForSubcontract = isSubContractUnderCohost
             ? Number(linkedContract?.platform_fee_pct ?? 20) / 100
-            : Number(linkedContract?.platform_fee_pct ?? 15) / 100;
+            : Number(linkedContract?.platform_fee_pct ?? 20) / 100;
 
           const customCohostPctForSubcontract = isSubContractUnderCohost
             ? Number(linkedContract?.host_split_pct ?? 80) / 100
             : 0;
 
           const platformFee =
-            contractSessionVal * customPlatformFeePctForSubcontract;
-          const cohostPayout =
-            contractSessionVal * customCohostPctForSubcontract;
+            netAfterGateway * customPlatformFeePctForSubcontract;
+          const cohostPayout = netAfterGateway * customCohostPctForSubcontract;
           const hostPayout = isSubContractUnderCohost
             ? 0
-            : Math.max(0, contractSessionVal - platformFee);
+            : Math.max(0, netAfterGateway - platformFee);
 
           const cType = linkedContract?.contract_type || b.booking_origin || "";
           let typeLabel = isSubContractUnderCohost
@@ -618,6 +653,10 @@ export function AdminBookingsTab({
             credit_tx_type: "contract",
             credit_expires_at: null,
             gross_value_brl: contractSessionVal,
+            gateway_fee_brl: gatewayFee,
+            net_after_gateway_brl: netAfterGateway,
+            agreed_value_brl: customAgreedVal,
+            notes: bookingNotes,
             room_base_value_brl: contractSessionVal,
             hourly_rate_brl: contractSessionVal / slotUnits,
             room_reference_hourly_brl: contractSessionVal / slotUnits,
@@ -672,6 +711,9 @@ export function AdminBookingsTab({
           isExplicitWalletOrigin || isLegacyWalletOrigin,
         );
 
+        // ====================================================================
+        // 2. PACOTES FUSION PASS+ (DEDUZ 4% GATEWAY ANTES DO SPLIT 80/20)
+        // ====================================================================
         if (isPackageBooking) {
           const userTxs = userWalletMap.get(b.user_id) || [];
           const userSubs = userSubsMap.get(b.user_id) || [];
@@ -710,8 +752,8 @@ export function AdminBookingsTab({
             });
 
           const creditHourlyRate =
-            Number(b.agreed_value_brl) > 0
-              ? Number(b.agreed_value_brl) / slotUnits
+            customAgreedVal !== null
+              ? customAgreedVal / slotUnits
               : exactUserCreditRate;
 
           const arbitrage = calculatePackageBookingArbitrage({
@@ -724,10 +766,38 @@ export function AdminBookingsTab({
             cohostSplitPct: roomCohostContract ? cohostSplitPct : null,
           });
 
-          const finalGrossBrl = Math.max(
+          const finalGrossBrl =
+            customAgreedVal !== null
+              ? customAgreedVal
+              : Math.max(
+                  0,
+                  arbitrage.grossCreditValueBrl + upgradeFee - discount,
+                );
+
+          const gatewayFee = finalGrossBrl * GATEWAY_FEE_RATE;
+          const netAfterGateway = Math.max(0, finalGrossBrl - gatewayFee);
+
+          const effectiveRoomBaseGross =
+            customAgreedVal !== null
+              ? Math.min(customAgreedVal, arbitrage.roomBaseValueBrl)
+              : arbitrage.roomBaseValueBrl;
+          const roomBaseAfterGateway =
+            effectiveRoomBaseGross * (1 - GATEWAY_FEE_RATE);
+
+          const hostTotalShare = roomBaseAfterGateway * 0.8;
+          const cohostPayout = roomCohostContract
+            ? hostTotalShare * (cohostSplitPct / 100)
+            : 0;
+          const hostPayout = roomCohostContract
+            ? Math.max(0, hostTotalShare - cohostPayout)
+            : hostTotalShare;
+
+          const standardFee = roomBaseAfterGateway * 0.2;
+          const downgradeSpread = Math.max(
             0,
-            arbitrage.grossCreditValueBrl + upgradeFee - discount,
+            netAfterGateway - roomBaseAfterGateway,
           );
+          const totalPlatformProfit = standardFee + downgradeSpread;
 
           if (arbitrage.isDowngrade && b.status !== "cancelled") {
             const currentDg = downgradeStatsByUser.get(b.user_id) || {
@@ -736,8 +806,7 @@ export function AdminBookingsTab({
             };
             downgradeStatsByUser.set(b.user_id, {
               count: currentDg.count + 1,
-              spreadProfitBrl:
-                currentDg.spreadProfitBrl + arbitrage.downgradeSpreadProfitBrl,
+              spreadProfitBrl: currentDg.spreadProfitBrl + downgradeSpread,
             });
           }
 
@@ -760,14 +829,18 @@ export function AdminBookingsTab({
             credit_tx_type: "usage",
             credit_expires_at: null,
             gross_value_brl: finalGrossBrl,
-            room_base_value_brl: arbitrage.roomBaseValueBrl,
-            hourly_rate_brl: arbitrage.creditHourlyRateBrl,
+            gateway_fee_brl: gatewayFee,
+            net_after_gateway_brl: netAfterGateway,
+            agreed_value_brl: customAgreedVal,
+            notes: bookingNotes,
+            room_base_value_brl: effectiveRoomBaseGross,
+            hourly_rate_brl: finalGrossBrl / slotUnits,
             room_reference_hourly_brl: arbitrage.roomReferenceHourlyRateBrl,
             pricing_label: originLabel,
             room_tier: roomTier,
             is_downgrade: arbitrage.isDowngrade,
-            standard_platform_fee_brl: arbitrage.standardPlatformFeeBrl,
-            downgrade_spread_profit_brl: arbitrage.downgradeSpreadProfitBrl,
+            standard_platform_fee_brl: standardFee,
+            downgrade_spread_profit_brl: downgradeSpread,
             room_id: b.room_id,
             specialist_name:
               specialistProfile?.full_name || "Especialista Desconhecido",
@@ -781,36 +854,59 @@ export function AdminBookingsTab({
             contract_pdf_url: null,
             cohost_name: cohostName,
             cohost_split_pct: cohostSplitPct,
-            platform_fee_brl: arbitrage.totalPlatformProfitBrl,
-            cohost_payout_brl: arbitrage.cohostPayoutBrl,
-            host_payout_brl: arbitrage.hostPayoutBrl,
+            platform_fee_brl: totalPlatformProfit,
+            cohost_payout_brl: cohostPayout,
+            host_payout_brl: hostPayout,
           };
         }
 
-        const computeAvulsoSplit = (grossVal: number) => {
+        // ====================================================================
+        // 3. HORAS AVULSAS (DEDUZ 4% GATEWAY -> 80% HOST / 20% FUSION)
+        // ====================================================================
+        const computeAvulsoSplitWithGateway = (grossVal: number) => {
+          const gatewayFee = grossVal * GATEWAY_FEE_RATE;
+          const netAfterGateway = Math.max(0, grossVal - gatewayFee);
+
           if (roomCohostContract) {
-            const cohostShare = grossVal * (cohostSplitPct / 100);
-            const platformFee = Math.max(0, grossVal - cohostShare);
-            return { platformFee, cohostPayout: cohostShare, hostPayout: 0 };
+            const cohostShare = netAfterGateway * (cohostSplitPct / 100);
+            const platformFee = Math.max(0, netAfterGateway - cohostShare);
+            return {
+              gatewayFee,
+              netAfterGateway,
+              platformFee,
+              cohostPayout: cohostShare,
+              hostPayout: 0,
+            };
           }
-          const platformFee = grossVal * 0.2;
-          const netAfterPlatform = Math.max(0, grossVal - platformFee);
-          return { platformFee, cohostPayout: 0, hostPayout: netAfterPlatform };
+
+          const platformFee = netAfterGateway * 0.2;
+          const hostPayout = netAfterGateway * 0.8;
+          return {
+            gatewayFee,
+            netAfterGateway,
+            platformFee,
+            cohostPayout: 0,
+            hostPayout,
+          };
         };
 
-        const baseAvulsoVal =
-          Number(b.agreed_value_brl) > 0
-            ? Number(b.agreed_value_brl)
-            : rawTotalCost >= slotUnits * 20
-              ? rawTotalCost
-              : (roomTier === "master" ? 80 : roomTier === "vip" ? 45 : 40) *
-                slotUnits;
+        const finalAvulsoBrl =
+          customAgreedVal !== null
+            ? customAgreedVal
+            : Math.max(
+                0,
+                (rawTotalCost >= slotUnits * 20
+                  ? rawTotalCost
+                  : (roomTier === "master"
+                      ? 80
+                      : roomTier === "vip"
+                        ? 45
+                        : 40) * slotUnits) +
+                  upgradeFee -
+                  discount,
+              );
 
-        const finalAvulsoBrl = Math.max(
-          0,
-          baseAvulsoVal + upgradeFee - discount,
-        );
-        const avulsoSplit = computeAvulsoSplit(finalAvulsoBrl);
+        const avulsoSplit = computeAvulsoSplitWithGateway(finalAvulsoBrl);
 
         return {
           id: b.id,
@@ -827,6 +923,10 @@ export function AdminBookingsTab({
           credit_tx_type: "credit_card",
           credit_expires_at: null,
           gross_value_brl: finalAvulsoBrl,
+          gateway_fee_brl: avulsoSplit.gatewayFee,
+          net_after_gateway_brl: avulsoSplit.netAfterGateway,
+          agreed_value_brl: customAgreedVal,
+          notes: bookingNotes,
           room_base_value_brl: finalAvulsoBrl,
           hourly_rate_brl: finalAvulsoBrl / slotUnits,
           room_reference_hourly_brl: finalAvulsoBrl / slotUnits,
@@ -879,6 +979,71 @@ export function AdminBookingsTab({
     }
   };
 
+  // ==========================================================================
+  // SALVAR EDIÇÃO DE VALOR E OBSERVAÇÃO DA RESERVA
+  // ==========================================================================
+  const handleOpenEditBookingMeta = (booking: BookingInfo) => {
+    setEditingMetaBooking(booking);
+    setEditValueInput(booking.gross_value_brl.toFixed(2));
+    setEditNotesInput(booking.notes || "");
+    setIsEditBookingMetaOpen(true);
+  };
+
+  const handleSaveBookingMeta = async () => {
+    if (!editingMetaBooking) return;
+    const parsedVal = Number(String(editValueInput).replace(",", "."));
+    if (isNaN(parsedVal) || parsedVal < 0) {
+      return toast({
+        variant: "destructive",
+        title: "Valor inválido",
+        description: "Informe um valor válido em reais (ex: 30 ou 42.50).",
+      });
+    }
+
+    setSavingMeta(true);
+    try {
+      const cleanNotes = editNotesInput.trim() || null;
+      const numericAgreed = Number(parsedVal.toFixed(2));
+
+      const { error } = await supabase
+        .from("bookings")
+        .update({
+          agreed_value_brl: numericAgreed,
+          notes: cleanNotes,
+        })
+        .eq("id", editingMetaBooking.id);
+
+      if (error) {
+        const { error: fallbackErr } = await supabase
+          .from("bookings")
+          .update({
+            agreed_value_brl: numericAgreed,
+          })
+          .eq("id", editingMetaBooking.id);
+
+        if (fallbackErr) throw fallbackErr;
+      }
+
+      toast({
+        title: "Reserva atualizada com sucesso!",
+        description: `Novo valor bruto: R$ ${formatBRL(numericAgreed)}${
+          cleanNotes ? " • Observação sincronizada com o anfitrião." : ""
+        }`,
+      });
+
+      setIsEditBookingMetaOpen(false);
+      await fetchBookings();
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "Erro ao atualizar reserva",
+        description: err.message,
+      });
+    } finally {
+      setSavingMeta(false);
+    }
+  };
+
   const threePillarsAnalytics = useMemo(() => {
     const validBookings = bookings.filter((b) => b.status !== "cancelled");
     const avulsoList = validBookings.filter((b) => b.subgroup === "avulso");
@@ -901,6 +1066,8 @@ export function AdminBookingsTab({
         count: avulsoList.length,
         hours: sum(avulsoList, "credits_used"),
         grossBrl: sum(avulsoList, "gross_value_brl"),
+        gatewayFeeBrl: sum(avulsoList, "gateway_fee_brl"),
+        netAfterGatewayBrl: sum(avulsoList, "net_after_gateway_brl"),
         hostPayoutBrl:
           sum(avulsoList, "host_payout_brl") +
           sum(avulsoList, "cohost_payout_brl"),
@@ -910,6 +1077,8 @@ export function AdminBookingsTab({
         count: packageList.length,
         hoursUsedInPeriod: sum(packageList, "credits_used"),
         grossConsumedBrl: sum(packageList, "gross_value_brl"),
+        gatewayFeeBrl: sum(packageList, "gateway_fee_brl"),
+        netAfterGatewayBrl: sum(packageList, "net_after_gateway_brl"),
         roomBaseBrl: sum(packageList, "room_base_value_brl"),
         hostPayoutBrl:
           sum(packageList, "host_payout_brl") +
@@ -940,6 +1109,8 @@ export function AdminBookingsTab({
         count: contractList.length,
         hours: sum(contractList, "total_cost"),
         grossBrl: sum(contractList, "gross_value_brl"),
+        gatewayFeeBrl: sum(contractList, "gateway_fee_brl"),
+        netAfterGatewayBrl: sum(contractList, "net_after_gateway_brl"),
         hostPayoutBrl:
           sum(contractList, "host_payout_brl") +
           sum(contractList, "cohost_payout_brl"),
@@ -1390,6 +1561,7 @@ export function AdminBookingsTab({
       setNewBookingDate(new Date());
       setNewBookingSelectedSlots([]);
       setNewBookingAgreedBrl("");
+      setNewBookingNotes("");
       setIsNewBookingOpen(true);
     } catch (err: any) {
       toast({
@@ -1448,6 +1620,7 @@ export function AdminBookingsTab({
             !isNaN(customBrl) && customBrl > 0
               ? Number((customBrl / sortedSlots.length).toFixed(2))
               : null,
+          notes: newBookingNotes.trim() || null,
         };
       });
 
@@ -1713,7 +1886,8 @@ export function AdminBookingsTab({
     const matchSearch =
       b.specialist_name.toLowerCase().includes(search.toLowerCase()) ||
       b.clinic_name.toLowerCase().includes(search.toLowerCase()) ||
-      b.room_name.toLowerCase().includes(search.toLowerCase());
+      b.room_name.toLowerCase().includes(search.toLowerCase()) ||
+      (b.notes || "").toLowerCase().includes(search.toLowerCase());
 
     return matchStatus && matchOrigin && matchPkgSub && matchSearch;
   });
@@ -1789,7 +1963,7 @@ export function AdminBookingsTab({
     if (filteredBookings.length === 0)
       return toast({ title: "Sem dados para exportar." });
     let csv =
-      "ID da Reserva;Subgrupo;Clínica;Sala;Tier Sala;Tier Crédito;Origem / Modalidade;Data Agendada;Especialista;Entrada;Saída;Status;Valor Hora (R$);Valor Bruto (R$)\n";
+      "ID da Reserva;Subgrupo;Clínica;Sala;Tier Sala;Tier Crédito;Origem / Modalidade;Data Agendada;Especialista;Entrada;Saída;Status;Valor Bruto (R$);Taxa Gateway 4% (R$);Base Pós-Gateway (R$);Observações\n";
     filteredBookings.forEach((b) => {
       const subgrupoLabel =
         b.subgroup === "avulso"
@@ -1797,12 +1971,13 @@ export function AdminBookingsTab({
           : b.subgroup === "package"
             ? "Pacote Fusion Pass+"
             : "Contrato Fixo";
-      const valorHora = b.hourly_rate_brl.toFixed(2).replace(".", ",");
-      const valorTotal = b.gross_value_brl.toFixed(2).replace(".", ",");
+      const valorBruto = b.gross_value_brl.toFixed(2).replace(".", ",");
+      const gwFee = b.gateway_fee_brl.toFixed(2).replace(".", ",");
+      const netGw = b.net_after_gateway_brl.toFixed(2).replace(".", ",");
       const agendada = format(parseISO(b.created_at), "dd/MM/yyyy HH:mm");
       const entrada = format(parseISO(b.start_time), "dd/MM/yyyy HH:mm");
       const saida = format(parseISO(b.end_time), "dd/MM/yyyy HH:mm");
-      csv += `${b.id};"${subgrupoLabel}";"${b.clinic_name}";"${b.room_name}";"${formatTierLabel(b.room_tier)}";"${formatTierLabel(b.credit_tier_normalized)}";"${b.pricing_label}";${agendada};"${b.specialist_name}";${entrada};${saida};${b.status};${valorHora};${valorTotal}\n`;
+      csv += `${b.id};"${subgrupoLabel}";"${b.clinic_name}";"${b.room_name}";"${formatTierLabel(b.room_tier)}";"${formatTierLabel(b.credit_tier_normalized)}";"${b.pricing_label}";${agendada};"${b.specialist_name}";${entrada};${saida};${b.status};${valorBruto};${gwFee};${netGw};"${(b.notes || "").replace(/"/g, '""')}"\n`;
     });
     downloadCSV(csv, `Fusion_Agendamentos_${startDate}_a_${endDate}.csv`);
   };
@@ -1811,7 +1986,7 @@ export function AdminBookingsTab({
     if (filteredBookings.length === 0)
       return toast({ title: "Sem dados para exportar." });
     let csv =
-      "ID da Reserva;Subgrupo;Clínica (Anfitrião);Sala;Modalidade;Especialista (Cliente);Co-Anfitrião;Valor Bruto Crédito/Reserva (R$);Base Sala Entregue (R$);Taxa Base Fusion (R$);Lucro Extra Downgrade (R$);Lucro Total Fusion (R$);Repasse Co-Anfitrião (R$);Repasse Clínica (R$);Status\n";
+      "ID da Reserva;Subgrupo;Clínica (Anfitrião);Sala;Modalidade;Especialista (Cliente);Co-Anfitrião;Valor Bruto (R$);Taxa Gateway 4% (R$);Base Líquida Pós-Gateway (R$);Taxa Base Fusion 20% (R$);Lucro Extra Downgrade (R$);Lucro Total Fusion (R$);Repasse Co-Anfitrião 80% (R$);Repasse Clínica 80% (R$);Status;Observações\n";
     filteredBookings.forEach((b) => {
       const subgrupoLabel =
         b.subgroup === "avulso"
@@ -1819,7 +1994,7 @@ export function AdminBookingsTab({
           : b.subgroup === "package"
             ? "Pacote Fusion Pass+"
             : "Contrato Fixo";
-      csv += `${b.id};"${subgrupoLabel}";"${b.clinic_name}";"${b.room_name}";"${b.pricing_label}";"${b.specialist_name}";"${b.cohost_name || "N/A"}";${b.gross_value_brl.toFixed(2).replace(".", ",")};${b.room_base_value_brl.toFixed(2).replace(".", ",")};${b.standard_platform_fee_brl.toFixed(2).replace(".", ",")};${b.downgrade_spread_profit_brl.toFixed(2).replace(".", ",")};${b.platform_fee_brl.toFixed(2).replace(".", ",")};${b.cohost_payout_brl.toFixed(2).replace(".", ",")};${b.host_payout_brl.toFixed(2).replace(".", ",")};${b.status}\n`;
+      csv += `${b.id};"${subgrupoLabel}";"${b.clinic_name}";"${b.room_name}";"${b.pricing_label}";"${b.specialist_name}";"${b.cohost_name || "N/A"}";${b.gross_value_brl.toFixed(2).replace(".", ",")};${b.gateway_fee_brl.toFixed(2).replace(".", ",")};${b.net_after_gateway_brl.toFixed(2).replace(".", ",")};${b.standard_platform_fee_brl.toFixed(2).replace(".", ",")};${b.downgrade_spread_profit_brl.toFixed(2).replace(".", ",")};${b.platform_fee_brl.toFixed(2).replace(".", ",")};${b.cohost_payout_brl.toFixed(2).replace(".", ",")};${b.host_payout_brl.toFixed(2).replace(".", ",")};${b.status};"${(b.notes || "").replace(/"/g, '""')}"\n`;
     });
     downloadCSV(csv, `Fusion_Financeiro_${startDate}_a_${endDate}.csv`);
   };
@@ -1829,6 +2004,13 @@ export function AdminBookingsTab({
       return acc;
     }
     return acc + curr.gross_value_brl;
+  }, 0);
+
+  const totalGatewayFeeFiltered = filteredBookings.reduce((acc, curr) => {
+    if (statusFilter !== "cancelled" && curr.status === "cancelled") {
+      return acc;
+    }
+    return acc + curr.gateway_fee_brl;
   }, 0);
 
   const totalPlatformProfitFiltered = filteredBookings.reduce((acc, curr) => {
@@ -1970,6 +2152,19 @@ export function AdminBookingsTab({
     );
   };
 
+  // Simulação em tempo real do novo valor dentro do modal de Edição
+  const liveEditedGross = Math.max(
+    0,
+    Number(String(editValueInput).replace(",", ".")) || 0,
+  );
+  const liveEditedGatewayFee = liveEditedGross * GATEWAY_FEE_RATE;
+  const liveEditedNetAfterGateway = Math.max(
+    0,
+    liveEditedGross - liveEditedGatewayFee,
+  );
+  const liveEditedHostShare = liveEditedNetAfterGateway * 0.8;
+  const liveEditedFusionShare = liveEditedNetAfterGateway * 0.2;
+
   return (
     <div className="p-4 lg:p-8 animate-in fade-in duration-500 w-full pb-32 font-sans">
       {/* CABEÇALHO E SELETOR DE VISÃO */}
@@ -1979,8 +2174,8 @@ export function AdminBookingsTab({
             Agendamentos, Pacotes & Contratos
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Gestão operacional dividida em Horas Avulsas, Pacotes Fusion Pass+ e
-            Contratos Fixos.
+            Gestão operacional com taxa de gateway (4%) deduzida antes do split
+            (80% Anfitrião / 20% Fusion), edição de valores e observações.
           </p>
         </div>
 
@@ -1989,7 +2184,7 @@ export function AdminBookingsTab({
             <button
               type="button"
               onClick={() => setActiveDashboardView("bookings")}
-              className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeDashboardView === "bookings"
                   ? "bg-white text-slate-900 shadow-2xs"
                   : "text-slate-600 hover:text-slate-900"
@@ -2001,7 +2196,7 @@ export function AdminBookingsTab({
             <button
               type="button"
               onClick={() => setActiveDashboardView("subscribers")}
-              className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              className={`px-3.5 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeDashboardView === "subscribers"
                   ? "bg-white text-slate-900 shadow-2xs"
                   : "text-slate-600 hover:text-slate-900"
@@ -2016,7 +2211,7 @@ export function AdminBookingsTab({
           <Button
             onClick={handleOpenNewManualBooking}
             disabled={actionLoading}
-            className="bg-slate-900 hover:bg-slate-800 text-white font-semibold h-10 rounded-xl text-xs"
+            className="bg-slate-900 hover:bg-slate-800 text-white font-semibold h-10 rounded-xl text-xs cursor-pointer"
           >
             <PlusCircle className="w-4 h-4 mr-2" />
             Nova Reserva Manual
@@ -2025,7 +2220,7 @@ export function AdminBookingsTab({
       </div>
 
       {/* ================================================================== */}
-      {/* PAINEL LIMPO DOS 3 SUBGRUPOS FINANCEIROS                           */}
+      {/* PAINEL DOS 3 SUBGRUPOS FINANCEIROS (COM TAXA GATEWAY 4%)           */}
       {/* ================================================================== */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-6">
         {/* 1. HORAS AVULSAS */}
@@ -2051,7 +2246,7 @@ export function AdminBookingsTab({
                     1. Horas Avulsas
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    Checkout direto via PIX ou Cartão
+                    Bruto - 4% Gateway → 80% Host / 20% Fusion
                   </p>
                 </div>
               </div>
@@ -2068,18 +2263,29 @@ export function AdminBookingsTab({
               <p className="text-2xl font-bold text-slate-900 tracking-tight mt-0.5">
                 R$ {formatBRL(threePillarsAnalytics.avulso.grossBrl)}
               </p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Taxa Gateway (4%):{" "}
+                <strong className="text-red-600">
+                  - R$ {formatBRL(threePillarsAnalytics.avulso.gatewayFeeBrl)}
+                </strong>{" "}
+                • Base:{" "}
+                <strong>
+                  R${" "}
+                  {formatBRL(threePillarsAnalytics.avulso.netAfterGatewayBrl)}
+                </strong>
+              </p>
             </div>
 
             <div className="space-y-2 text-xs tabular-nums">
               <div className="flex justify-between text-slate-600">
-                <span>Repasse Clínicas / Co-Hosts (80%)</span>
+                <span>Repasse Clínicas / Co-Hosts (80% pós-taxa)</span>
                 <span className="font-semibold text-slate-900">
                   R$ {formatBRL(threePillarsAnalytics.avulso.hostPayoutBrl)}
                 </span>
               </div>
               <div className="pt-2 border-t border-slate-100 flex justify-between items-center">
                 <span className="font-semibold text-slate-900">
-                  Receita Líquida Fusion (20%)
+                  Receita Líquida Fusion (20% pós-taxa)
                 </span>
                 <span className="text-sm font-bold text-emerald-700">
                   + R${" "}
@@ -2123,7 +2329,7 @@ export function AdminBookingsTab({
                   </h3>
                   <p className="text-[11px] text-slate-500">
                     PIX ({breakageTotals.pixSubscribersCount}) • Cartão (
-                    {breakageTotals.cardSubscribersCount}) • Sobras & Downgrade
+                    {breakageTotals.cardSubscribersCount}) • Taxa 4% Gateway
                   </p>
                 </div>
               </div>
@@ -2145,7 +2351,8 @@ export function AdminBookingsTab({
                   </p>
                 </div>
                 <span className="text-xs font-medium text-slate-500">
-                  MRR Ativo: R$ {formatBRL(breakageTotals.activeMrrBrl)}
+                  Gateway (4%): -R${" "}
+                  {formatBRL(threePillarsAnalytics.packages.gatewayFeeBrl)}
                 </span>
               </div>
 
@@ -2175,7 +2382,7 @@ export function AdminBookingsTab({
 
             <div className="space-y-2 text-xs tabular-nums">
               <div className="flex items-center justify-between text-slate-600">
-                <span>Taxa Base (20%) / Repasse Clínicas</span>
+                <span>Taxa Base (20%) / Repasse (80% pós-4%)</span>
                 <span className="font-semibold text-slate-900">
                   R$ {formatBRL(threePillarsAnalytics.packages.standardFeeBrl)}{" "}
                   / R$ {formatBRL(threePillarsAnalytics.packages.hostPayoutBrl)}
@@ -2261,7 +2468,7 @@ export function AdminBookingsTab({
                     3. Contratos Fixos
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    Turnos fixos, mensais e sublocações
+                    Turnos fixos, mensais e sublocações (Taxa 4% Gateway)
                   </p>
                 </div>
               </div>
@@ -2282,18 +2489,32 @@ export function AdminBookingsTab({
                   {threePillarsAnalytics.contracts.hours}h no período
                 </span>
               </div>
+              <p className="text-[11px] text-slate-500 mt-1">
+                Taxa Gateway (4%):{" "}
+                <strong className="text-red-600">
+                  - R${" "}
+                  {formatBRL(threePillarsAnalytics.contracts.gatewayFeeBrl)}
+                </strong>{" "}
+                • Base:{" "}
+                <strong>
+                  R${" "}
+                  {formatBRL(
+                    threePillarsAnalytics.contracts.netAfterGatewayBrl,
+                  )}
+                </strong>
+              </p>
             </div>
 
             <div className="space-y-2 text-xs tabular-nums">
               <div className="flex items-center justify-between text-slate-600">
-                <span>Repasse Clínicas / Co-Hosts</span>
+                <span>Repasse Clínicas / Co-Hosts (pós-4%)</span>
                 <span className="font-semibold text-slate-900">
                   R$ {formatBRL(threePillarsAnalytics.contracts.hostPayoutBrl)}
                 </span>
               </div>
               <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
                 <span className="font-semibold text-slate-900">
-                  Receita Líquida Fusion
+                  Receita Líquida Fusion (pós-4%)
                 </span>
                 <span className="text-sm font-bold text-emerald-700">
                   + R${" "}
@@ -2344,7 +2565,7 @@ export function AdminBookingsTab({
                 <Button
                   onClick={fetchBookings}
                   variant="outline"
-                  className="h-9 w-9 p-0 rounded-xl border-slate-200 text-slate-600"
+                  className="h-9 w-9 p-0 rounded-xl border-slate-200 text-slate-600 cursor-pointer"
                 >
                   {loading ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
@@ -2485,11 +2706,11 @@ export function AdminBookingsTab({
                 placeholder={
                   activeDashboardView === "subscribers"
                     ? "Buscar assinante por nome ou e-mail..."
-                    : "Buscar clínica ou especialista..."
+                    : "Buscar clínica, especialista ou observação..."
                 }
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="h-9 pl-8 rounded-xl border-slate-200 bg-white text-xs min-w-[200px]"
+                className="h-9 pl-8 rounded-xl border-slate-200 bg-white text-xs min-w-[220px]"
               />
             </div>
           </div>
@@ -2498,14 +2719,14 @@ export function AdminBookingsTab({
             <Button
               onClick={handleExportExcel}
               variant="outline"
-              className="flex-1 lg:flex-none border-slate-200 text-slate-700 font-semibold h-9 text-xs rounded-xl"
+              className="flex-1 lg:flex-none border-slate-200 text-slate-700 font-semibold h-9 text-xs rounded-xl cursor-pointer"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 mr-1.5" /> Exportar CSV
             </Button>
             {activeDashboardView === "bookings" && (
               <Button
                 onClick={handleExportFinances}
-                className="flex-1 lg:flex-none bg-slate-900 hover:bg-slate-800 text-white font-semibold h-9 text-xs rounded-xl"
+                className="flex-1 lg:flex-none bg-slate-900 hover:bg-slate-800 text-white font-semibold h-9 text-xs rounded-xl cursor-pointer"
               >
                 <DownloadCloud className="w-3.5 h-3.5 mr-1.5" /> Exportar
                 Finanças
@@ -2826,7 +3047,7 @@ export function AdminBookingsTab({
         </div>
       ) : (
         /* ================================================================== */
-        /* VISÃO A: TABELA DE AGENDAMENTOS (BOOKINGS)                         */
+        /* VISÃO A: TABELA DE AGENDAMENTOS (COM ÍCONE "i" E EDIÇÃO DE VALOR)  */
         /* ================================================================== */
         <div className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden flex flex-col relative">
           {loading && (
@@ -2841,11 +3062,11 @@ export function AdminBookingsTab({
                 <tr>
                   <th className="px-6 py-3.5">Clínica & Sala</th>
                   <th className="px-6 py-3.5">Canal / Modalidade</th>
-                  <th className="px-6 py-3.5">Especialista</th>
+                  <th className="px-6 py-3.5">Especialista & Observações</th>
                   <th className="px-6 py-3.5">Entrada / Saída</th>
                   <th className="px-6 py-3.5 text-center">Status</th>
                   <th className="px-6 py-3.5 text-right">
-                    Valor Bruto & Receita Fusion
+                    Valor Bruto, Gateway (4%) & Split
                   </th>
                   <th className="px-6 py-3.5 text-center">Ações</th>
                 </tr>
@@ -2861,114 +3082,188 @@ export function AdminBookingsTab({
                     </td>
                   </tr>
                 ) : (
-                  filteredBookings.map((booking) => (
-                    <tr
-                      key={booking.id}
-                      className="hover:bg-slate-50/80 transition-colors group"
-                    >
-                      <td className="px-6 py-3.5">
-                        <p className="font-bold text-slate-900">
-                          {booking.clinic_name}
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          {booking.room_name} • Sala{" "}
-                          {formatTierLabel(booking.room_tier)}
-                        </p>
-                      </td>
+                  filteredBookings.map((booking) => {
+                    const hasNotes = Boolean(
+                      booking.notes && booking.notes.trim().length > 0,
+                    );
+                    const hasEditedPrice =
+                      booking.agreed_value_brl !== null &&
+                      booking.agreed_value_brl !== undefined;
 
-                      <td className="px-6 py-3.5">
-                        <div className="flex flex-col items-start gap-1">
-                          {getSubgroupBadge(booking)}
-                          <span className="text-[11px] text-slate-500">
-                            {booking.pricing_label}
-                          </span>
-                          {booking.is_downgrade && (
-                            <span className="text-[10px] font-semibold text-emerald-700 flex items-center gap-0.5">
-                              <ArrowDownRight className="w-3 h-3" />+ R${" "}
-                              {formatBRL(booking.downgrade_spread_profit_brl)}{" "}
-                              downgrade
+                    return (
+                      <tr
+                        key={booking.id}
+                        className="hover:bg-slate-50/80 transition-colors group"
+                      >
+                        <td className="px-6 py-3.5">
+                          <p className="font-bold text-slate-900">
+                            {booking.clinic_name}
+                          </p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {booking.room_name} • Sala{" "}
+                            {formatTierLabel(booking.room_tier)}
+                          </p>
+                        </td>
+
+                        <td className="px-6 py-3.5">
+                          <div className="flex flex-col items-start gap-1">
+                            {getSubgroupBadge(booking)}
+                            <span className="text-[11px] text-slate-500">
+                              {booking.pricing_label}
                             </span>
-                          )}
-                        </div>
-                      </td>
+                            {booking.is_downgrade && (
+                              <span className="text-[10px] font-semibold text-emerald-700 flex items-center gap-0.5">
+                                <ArrowDownRight className="w-3 h-3" />+ R${" "}
+                                {formatBRL(booking.downgrade_spread_profit_brl)}{" "}
+                                downgrade
+                              </span>
+                            )}
+                          </div>
+                        </td>
 
-                      <td className="px-6 py-3.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleOpenSpecialistProfile(booking.user_id)
-                          }
-                          className="font-semibold text-slate-900 hover:text-[#BF4B24] hover:underline flex items-center gap-1.5 text-left"
-                        >
-                          <span>{booking.specialist_name}</span>
-                          <ExternalLink className="w-3 h-3 text-slate-400" />
-                        </button>
-                        {booking.cohost_name &&
-                          (!booking.is_contract || booking.is_subcontract) && (
-                            <p className="text-[10px] text-slate-500 mt-0.5">
-                              Co-Host: {booking.cohost_name} (
-                              {booking.cohost_split_pct}%)
+                        {/* COLUNA DO ESPECIALISTA COM O ÍCONE "i" DE OBSERVAÇÃO AO LADO DO NOME */}
+                        <td className="px-6 py-3.5">
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleOpenSpecialistProfile(booking.user_id)
+                              }
+                              className="font-semibold text-slate-900 hover:text-[#BF4B24] hover:underline flex items-center gap-1 text-left cursor-pointer"
+                            >
+                              <span>{booking.specialist_name}</span>
+                              <ExternalLink className="w-3 h-3 text-slate-400" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditBookingMeta(booking)}
+                              title={
+                                hasNotes
+                                  ? `Observação: ${booking.notes} (Clique para editar)`
+                                  : "Adicionar observação para esta reserva (reflete para o anfitrião)"
+                              }
+                              className={`w-5 h-5 rounded-full inline-flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                                hasNotes
+                                  ? "bg-blue-600 text-white shadow-2xs ring-2 ring-blue-100"
+                                  : "bg-slate-100 text-slate-400 hover:bg-blue-50 hover:text-blue-600"
+                              }`}
+                            >
+                              <Info className="w-3 h-3" />
+                            </button>
+                          </div>
+
+                          {hasNotes && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditBookingMeta(booking)}
+                              className="mt-1 max-w-[230px] truncate text-[10px] font-semibold text-blue-800 bg-blue-50 border border-blue-200/80 px-2 py-0.5 rounded-md block text-left hover:bg-blue-100/70 cursor-pointer"
+                            >
+                              Obs: {booking.notes}
+                            </button>
+                          )}
+
+                          {booking.cohost_name &&
+                            (!booking.is_contract ||
+                              booking.is_subcontract) && (
+                              <p className="text-[10px] text-slate-500 mt-0.5">
+                                Co-Host: {booking.cohost_name} (
+                                {booking.cohost_split_pct}%)
+                              </p>
+                            )}
+                        </td>
+
+                        <td className="px-6 py-3.5">
+                          <p className="font-semibold text-slate-800">
+                            {format(parseISO(booking.start_time), "dd/MM/yyyy")}
+                          </p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {format(parseISO(booking.start_time), "HH:mm")} às{" "}
+                            {format(parseISO(booking.end_time), "HH:mm")}
+                          </p>
+                        </td>
+
+                        <td className="px-6 py-3.5 text-center">
+                          {getStatusBadge(booking.status)}
+                        </td>
+
+                        {/* COLUNA DE VALOR BRUTO COM BOTÃO DE EDITAR VALOR + GATEWAY 4% */}
+                        <td className="px-6 py-3.5 text-right">
+                          <div className="inline-flex items-center justify-end gap-1.5">
+                            {hasEditedPrice && (
+                              <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                                Editado
+                              </span>
+                            )}
+                            <p className="font-bold text-slate-900 text-sm">
+                              R$ {formatBRL(booking.gross_value_brl)}
                             </p>
-                          )}
-                      </td>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditBookingMeta(booking)}
+                              title="Editar valor da reserva ou adicionar observação"
+                              className="p-1 rounded-md text-slate-400 hover:text-[#BF4B24] hover:bg-orange-50 transition-colors cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            Gateway (4%): -R${" "}
+                            {formatBRL(booking.gateway_fee_brl)} • Base: R${" "}
+                            {formatBRL(booking.net_after_gateway_brl)}
+                          </p>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Fusion (20%):{" "}
+                            <strong className="text-emerald-700">
+                              R$ {formatBRL(booking.platform_fee_brl)}
+                            </strong>{" "}
+                            • Clínica (80%): R${" "}
+                            {formatBRL(
+                              booking.host_payout_brl +
+                                booking.cohost_payout_brl,
+                            )}
+                          </p>
+                        </td>
 
-                      <td className="px-6 py-3.5">
-                        <p className="font-semibold text-slate-800">
-                          {format(parseISO(booking.start_time), "dd/MM/yyyy")}
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          {format(parseISO(booking.start_time), "HH:mm")} às{" "}
-                          {format(parseISO(booking.end_time), "HH:mm")}
-                        </p>
-                      </td>
-
-                      <td className="px-6 py-3.5 text-center">
-                        {getStatusBadge(booking.status)}
-                      </td>
-
-                      <td className="px-6 py-3.5 text-right">
-                        <p className="font-bold text-slate-900">
-                          R$ {formatBRL(booking.gross_value_brl)}
-                        </p>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          Fusion:{" "}
-                          <strong className="text-emerald-700">
-                            R$ {formatBRL(booking.platform_fee_brl)}
-                          </strong>{" "}
-                          • Clínica: R${" "}
-                          {formatBRL(
-                            booking.host_payout_brl + booking.cohost_payout_brl,
-                          )}
-                        </p>
-                      </td>
-
-                      <td className="px-6 py-3.5 text-center flex items-center justify-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleOpenReschedule(booking)}
-                          disabled={actionLoading}
-                          className="h-8 font-semibold text-xs border-slate-200 text-slate-700 hover:bg-slate-50"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
-                          Reagendar
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setSelectedBooking(booking);
-                            setSendCancelEmail(true);
-                            setShouldRefundCredits(!booking.is_contract);
-                            setIsViewOpen(true);
-                          }}
-                          className="h-8 font-semibold text-xs border-slate-200 text-slate-600 hover:bg-slate-50"
-                        >
-                          <Eye className="w-3.5 h-3.5 mr-1.5" /> Detalhes
-                        </Button>
-                      </td>
-                    </tr>
-                  ))
+                        <td className="px-6 py-3.5 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleOpenEditBookingMeta(booking)}
+                              className="h-8 font-semibold text-xs border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5 mr-1 text-[#BF4B24]" />
+                              Valor / Obs
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleOpenReschedule(booking)}
+                              disabled={actionLoading}
+                              className="h-8 font-semibold text-xs border-slate-200 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5 mr-1" />
+                              Reagendar
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setSelectedBooking(booking);
+                                setSendCancelEmail(true);
+                                setShouldRefundCredits(!booking.is_contract);
+                                setIsViewOpen(true);
+                              }}
+                              className="h-8 font-semibold text-xs border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5 mr-1" /> Detalhes
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -2978,6 +3273,13 @@ export function AdminBookingsTab({
             <p className="text-xs font-semibold text-slate-500">
               Registros:{" "}
               <span className="text-slate-900">{filteredBookings.length}</span>
+            </p>
+            <div className="h-4 w-px bg-slate-200 hidden md:block"></div>
+            <p className="text-xs font-semibold text-slate-500">
+              Taxas Gateway (4%):{" "}
+              <span className="text-xs font-bold text-red-600">
+                - R$ {formatBRL(totalGatewayFeeFiltered)}
+              </span>
             </p>
             <div className="h-4 w-px bg-slate-200 hidden md:block"></div>
             <p className="text-xs font-semibold text-slate-500">
@@ -2996,6 +3298,124 @@ export function AdminBookingsTab({
           </div>
         </div>
       )}
+
+      {/* ==================================================================== */}
+      {/* MODAL RÁPIDO: EDITAR VALOR DA RESERVA & OBSERVAÇÃO (ÍCONE "i")       */}
+      {/* ==================================================================== */}
+      <Dialog
+        open={isEditBookingMetaOpen}
+        onOpenChange={setIsEditBookingMetaOpen}
+      >
+        <DialogContent className="sm:max-w-md bg-white border border-slate-200 rounded-2xl shadow-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Info className="w-4 h-4 text-[#BF4B24]" />
+              Editar Valor & Observação da Reserva
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              {editingMetaBooking
+                ? `${editingMetaBooking.specialist_name} • ${editingMetaBooking.room_name} (${format(parseISO(editingMetaBooking.start_time), "dd/MM/yyyy HH:mm")})`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+
+          {editingMetaBooking && (
+            <div className="space-y-4 py-2">
+              <div className="space-y-1.5">
+                <Label className="text-xs font-bold text-slate-700">
+                  Valor Bruto da Reserva (R$)
+                </Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={editValueInput}
+                  onChange={(e) => setEditValueInput(e.target.value)}
+                  placeholder="Ex: 30.00"
+                  className="h-11 font-bold text-base bg-slate-50 border-slate-200 rounded-xl tabular-nums"
+                />
+                <p className="text-[11px] text-slate-500">
+                  Ao alterar este valor (ex: por desconto ou ressarcimento
+                  parcial), o painel recalcula automaticamente os repasses.
+                </p>
+              </div>
+
+              {/* Simulador ao vivo da regra de 4% Gateway + 80/20 */}
+              <div className="p-3.5 rounded-xl bg-slate-900 text-white space-y-1.5 text-xs tabular-nums">
+                <div className="flex justify-between text-slate-300">
+                  <span>Valor Bruto Informado:</span>
+                  <span className="font-bold text-white">
+                    R$ {formatBRL(liveEditedGross)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-red-300">
+                  <span>(-) Taxa de Gateway (4%):</span>
+                  <span className="font-semibold">
+                    - R$ {formatBRL(liveEditedGatewayFee)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-200 border-t border-slate-800 pt-1">
+                  <span>(=) Base Líquida p/ Divisão:</span>
+                  <span className="font-bold">
+                    R$ {formatBRL(liveEditedNetAfterGateway)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-emerald-400 pt-1">
+                  <span>• Receita Plataforma (20%):</span>
+                  <span className="font-bold">
+                    R$ {formatBRL(liveEditedFusionShare)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-amber-300">
+                  <span>• Repasse Anfitrião / Co-Host (80%):</span>
+                  <span className="font-bold">
+                    R$ {formatBRL(liveEditedHostShare)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                  <span>Observação Operacional (Visível p/ Anfitrião)</span>
+                  <span className="text-[10px] font-semibold text-blue-600">
+                    Aparece no ícone (i)
+                  </span>
+                </Label>
+                <Textarea
+                  value={editNotesInput}
+                  onChange={(e) => setEditNotesInput(e.target.value)}
+                  placeholder="Ex: Profissional precisa de maca montada / Avisou que vai atrasar 10 minutos..."
+                  className="min-h-[95px] bg-slate-50 border-slate-200 rounded-xl text-xs"
+                />
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setIsEditBookingMetaOpen(false)}
+              className="text-xs font-semibold"
+            >
+              Cancelar
+            </Button>
+            <Button
+              type="button"
+              onClick={handleSaveBookingMeta}
+              disabled={savingMeta}
+              className="bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-bold text-xs rounded-xl cursor-pointer"
+            >
+              {savingMeta ? (
+                <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+              ) : (
+                <Save className="w-4 h-4 mr-1.5" />
+              )}
+              Salvar Alterações
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* MODAL 0: FICHA DE PERFIL DO PROFISSIONAL */}
       <Sheet open={isProfileOpen} onOpenChange={setIsProfileOpen}>
@@ -3291,7 +3711,8 @@ export function AdminBookingsTab({
               Detalhes da Reserva
             </SheetTitle>
             <SheetDescription>
-              Informações operacionais e divisão de repasses.
+              Informações operacionais, taxa de gateway (4%) e divisão de
+              repasses.
             </SheetDescription>
           </SheetHeader>
 
@@ -3306,8 +3727,35 @@ export function AdminBookingsTab({
                     {selectedBooking.id}
                   </p>
                 </div>
-                {getSubgroupBadge(selectedBooking)}
+                <div className="flex items-center gap-2">
+                  {getSubgroupBadge(selectedBooking)}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setIsViewOpen(false);
+                      handleOpenEditBookingMeta(selectedBooking);
+                    }}
+                    className="h-7 px-2.5 text-[11px] font-bold border-slate-300 cursor-pointer"
+                  >
+                    <Pencil className="w-3 h-3 mr-1 text-[#BF4B24]" />
+                    Editar Valor / Obs
+                  </Button>
+                </div>
               </div>
+
+              {selectedBooking.notes && (
+                <div className="p-3.5 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-950 space-y-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-blue-700 flex items-center gap-1">
+                    <Info className="w-3.5 h-3.5" /> Observação da Reserva
+                    (Visível p/ Anfitrião)
+                  </span>
+                  <p className="font-medium leading-relaxed">
+                    {selectedBooking.notes}
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-4 tabular-nums">
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
@@ -3333,33 +3781,33 @@ export function AdminBookingsTab({
 
               <div className="bg-slate-900 text-white p-4 rounded-xl space-y-2 tabular-nums">
                 <p className="text-[11px] font-medium text-slate-400">
-                  Distribuição Financeira (Split)
+                  Distribuição Financeira (Gateway 4% + Split 80/20)
                 </p>
 
+                <div className="flex justify-between text-xs text-slate-300">
+                  <span>Valor Bruto da Reserva:</span>
+                  <span className="font-semibold text-white">
+                    R$ {formatBRL(selectedBooking.gross_value_brl)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between text-xs text-red-300">
+                  <span>(-) Taxa de Pagamento / Gateway (4%):</span>
+                  <span className="font-semibold">
+                    - R$ {formatBRL(selectedBooking.gateway_fee_brl)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between text-xs text-slate-200 pb-1.5 border-b border-slate-800">
+                  <span>(=) Base Líquida Pós-Gateway:</span>
+                  <span className="font-bold">
+                    R$ {formatBRL(selectedBooking.net_after_gateway_brl)}
+                  </span>
+                </div>
+
                 {selectedBooking.is_downgrade && (
-                  <div className="bg-slate-800 p-2.5 rounded-lg mb-2 space-y-1 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-slate-300">
-                        Valor do Crédito{" "}
-                        {formatTierLabel(
-                          selectedBooking.credit_tier_normalized,
-                        )}
-                        :
-                      </span>
-                      <span className="font-semibold text-white">
-                        R$ {formatBRL(selectedBooking.gross_value_brl)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-300">
-                        Base da Sala{" "}
-                        {formatTierLabel(selectedBooking.room_tier)}:
-                      </span>
-                      <span className="text-slate-300">
-                        R$ {formatBRL(selectedBooking.room_base_value_brl)}
-                      </span>
-                    </div>
-                    <div className="flex justify-between text-emerald-400 pt-1 border-t border-slate-700">
+                  <div className="bg-slate-800 p-2.5 rounded-lg my-2 space-y-1 text-xs">
+                    <div className="flex justify-between text-emerald-400">
                       <span>Ganho Extra Downgrade (100% Fusion):</span>
                       <span className="font-bold">
                         + R${" "}
@@ -3371,7 +3819,7 @@ export function AdminBookingsTab({
 
                 <div className="flex justify-between text-xs">
                   <span className="text-slate-300">
-                    Taxa Base Plataforma (20%):
+                    Taxa Base Plataforma (20% pós-gateway):
                   </span>
                   <span className="text-slate-200">
                     R$ {formatBRL(selectedBooking.standard_platform_fee_brl)}
@@ -3400,7 +3848,7 @@ export function AdminBookingsTab({
 
                 <div className="flex justify-between text-xs pt-1 border-t border-slate-800">
                   <span className="text-slate-300">
-                    Repasse Clínica ({selectedBooking.clinic_name}):
+                    Repasse Clínica (80% pós-gateway):
                   </span>
                   <span className="font-bold text-white">
                     R$ {formatBRL(selectedBooking.host_payout_brl)}
@@ -3471,7 +3919,6 @@ export function AdminBookingsTab({
 
               {selectedBooking.status !== "cancelled" && (
                 <div className="pt-6 mt-6 border-t border-slate-200 space-y-3">
-                  {/* CAIXA 1: ESTORNAR OU NÃO OS CRÉDITOS NA CARTEIRA */}
                   {!selectedBooking.is_contract && (
                     <label className="flex items-start gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer hover:bg-slate-100/80 transition-colors select-none">
                       <input
@@ -3499,7 +3946,6 @@ export function AdminBookingsTab({
                     </label>
                   )}
 
-                  {/* CAIXA 2: ENVIAR OU NÃO O E-MAIL DE CANCELAMENTO */}
                   <label className="flex items-start gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer hover:bg-slate-100/80 transition-colors select-none">
                     <input
                       type="checkbox"
@@ -3713,7 +4159,7 @@ export function AdminBookingsTab({
           </DialogHeader>
 
           <div className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 bg-white p-4 rounded-xl border border-slate-100">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-white p-4 rounded-xl border border-slate-100">
               <div>
                 <Label className="text-[11px] font-semibold text-slate-500">
                   Especialista
@@ -3758,6 +4204,18 @@ export function AdminBookingsTab({
                   value={newBookingAgreedBrl}
                   onChange={(e) => setNewBookingAgreedBrl(e.target.value)}
                   className="mt-1 h-10 bg-white text-xs font-semibold"
+                />
+              </div>
+
+              <div>
+                <Label className="text-[11px] font-semibold text-slate-500">
+                  Observação p/ Anfitrião (Opcional)
+                </Label>
+                <Input
+                  placeholder="Ex: Precisa de maca / Atraso de 10min..."
+                  value={newBookingNotes}
+                  onChange={(e) => setNewBookingNotes(e.target.value)}
+                  className="mt-1 h-10 bg-white text-xs"
                 />
               </div>
             </div>
