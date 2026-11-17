@@ -618,7 +618,7 @@ export function FusionPassPromoPopup({
 
   const isBlackCampaignBanner = Boolean(activeCampaign) && step === "banner";
   const bannerPhotoUrl =
-    isBlackCampaignBanner && !blackImgError ? "/black.png" : imageSrc;
+    isBlackCampaignBanner && !blackImgError ? "/black.jpeg" : imageSrc;
 
   const tierPackages = packages.filter(
     (p) => normalizeTier(p.tier) === selectedTier,
