@@ -1,7 +1,7 @@
 // app/page.tsx
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
@@ -22,15 +22,11 @@ import {
   Tag,
   Percent,
   Flame,
+  MapPin,
+  Users,
+  X,
+  Sparkles,
 } from "lucide-react";
-
-/**
- * Chave rápida manual:
- * Mude para `true` se quiser forçar o visual Black Friday imediatamente para testes,
- * mesmo sem ter uma campanha ativa no painel Admin.
- * Deixe `false` para que o tema Black Friday ligue/desligue sozinho pelo painel Admin (Campanhas).
- */
-const FORCE_BLACK_FRIDAY_THEME = false;
 
 const navItems = [
   { id: "buscar" as const, label: "Buscar", icon: Search },
@@ -49,7 +45,18 @@ export interface ActiveBlackCampaignInfo {
   discountType: "percentage" | "fixed" | string;
   discountValue: number;
   validUntil: string | null;
+  validRoomIds: string[] | null;
 }
+
+const WEEKDAY_SHORT_NAMES: Record<string, string> = {
+  "1": "Seg",
+  "2": "Ter",
+  "3": "Qua",
+  "4": "Qui",
+  "5": "Sex",
+  "6": "Sáb",
+  "0": "Dom",
+};
 
 export default function AppPage() {
   const router = useRouter();
@@ -59,10 +66,17 @@ export default function AppPage() {
   const [activeTab, setActiveTab] = useState<TabId>("buscar");
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [logoError, setLogoError] = useState(false);
-  const [blackHeroImgError, setBlackHeroImgError] = useState(false);
 
+  // Estado que controla as campanhas de horário ativas e as salas participantes
   const [activeBlackCampaign, setActiveBlackCampaign] =
     useState<ActiveBlackCampaignInfo | null>(null);
+  const [campaignRooms, setCampaignRooms] = useState<any[]>([]);
+  const [showOnlyCampaignRooms, setShowOnlyCampaignRooms] = useState(false);
+  const [campaignSearchQuery, setCampaignSearchQuery] = useState("");
+  const [campaignSpecialtyFilter, setCampaignSpecialtyFilter] =
+    useState("Todas");
+
+  const campaignSectionRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -119,37 +133,31 @@ export default function AppPage() {
     };
   }, [router, supabase]);
 
+  // Busca campanhas de horário ativas e carrega as salas vinculadas a elas
   useEffect(() => {
     let isMounted = true;
 
-    async function checkActiveBlackFridayCampaign() {
-      if (FORCE_BLACK_FRIDAY_THEME) {
-        if (isMounted) {
-          setActiveBlackCampaign({
-            id: "forced-black-friday",
-            campaignName: "BLACK FUSION",
-            code: "BLACKFUSION",
-            discountType: "percentage",
-            discountValue: 50,
-            validUntil: null,
-          });
-        }
-        return;
-      }
-
+    async function fetchCampaignsAndParticipatingRooms() {
       try {
-        const { data } = await supabase
-          .from("coupons")
-          .select("*")
-          .eq("is_active", true)
-          .order("created_at", { ascending: false });
+        const [{ data: couponsData }, { data: roomsData }] = await Promise.all([
+          supabase
+            .from("coupons")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("rooms")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false }),
+        ]);
 
-        if (!isMounted || !data) return;
+        if (!isMounted || !couponsData) return;
 
         const now = new Date();
         const todayIso = now.toISOString().slice(0, 10);
 
-        const validCampaign = data.find((c: any) => {
+        const validCampaigns = couponsData.filter((c: any) => {
           if (c.valid_until && new Date(c.valid_until) < now) return false;
           if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses)) {
             return false;
@@ -182,8 +190,9 @@ export default function AppPage() {
           return isCampaign && showOnCal;
         });
 
-        if (validCampaign) {
-          let parsedRules = validCampaign.schedule_rules;
+        if (validCampaigns.length > 0) {
+          const primaryCamp = validCampaigns[0];
+          let parsedRules = primaryCamp.schedule_rules;
           if (typeof parsedRules === "string") {
             try {
               parsedRules = JSON.parse(parsedRules);
@@ -193,30 +202,123 @@ export default function AppPage() {
           }
 
           setActiveBlackCampaign({
-            id: validCampaign.id,
+            id: primaryCamp.id,
             campaignName:
-              validCampaign.campaign_name ||
+              primaryCamp.campaign_name ||
               parsedRules?.campaign_name ||
               "BLACK FUSION",
-            code: validCampaign.code || "BLACK",
-            discountType: validCampaign.type || "percentage",
-            discountValue: Number(validCampaign.discount_value || 41),
-            validUntil: validCampaign.valid_until || null,
+            code: primaryCamp.code || "BLACK",
+            discountType: primaryCamp.type || "percentage",
+            discountValue: Number(primaryCamp.discount_value || 50),
+            validUntil: primaryCamp.valid_until || null,
+            validRoomIds: Array.isArray(primaryCamp.valid_room_ids)
+              ? primaryCamp.valid_room_ids
+              : null,
           });
+
+          // Filtra apenas as salas ativas (e não pausadas) que pertencem a alguma campanha ativa
+          const allActiveRooms = (roomsData || []).filter(
+            (r: any) => !r.is_paused,
+          );
+
+          const matchedRooms = allActiveRooms
+            .map((room: any) => {
+              const matchingCamp = validCampaigns.find((camp: any) => {
+                if (
+                  Array.isArray(camp.valid_room_ids) &&
+                  camp.valid_room_ids.length > 0
+                ) {
+                  return camp.valid_room_ids.includes(room.id);
+                }
+                return true; // Campanha válida para todas as salas
+              });
+
+              if (!matchingCamp) return null;
+
+              let cRules = matchingCamp.schedule_rules;
+              if (typeof cRules === "string") {
+                try {
+                  cRules = JSON.parse(cRules);
+                } catch {
+                  cRules = null;
+                }
+              }
+
+              const dayHoursObj = cRules?.day_hours || {};
+              const activeDaysLabels: string[] = [];
+              Object.entries(dayHoursObj).forEach(([dKey, hrs]) => {
+                if (Array.isArray(hrs) && hrs.length > 0) {
+                  const dayLabel = WEEKDAY_SHORT_NAMES[dKey] || "";
+                  if (dayLabel) activeDaysLabels.push(dayLabel);
+                }
+              });
+
+              return {
+                ...room,
+                campaignInfo: {
+                  name:
+                    matchingCamp.campaign_name ||
+                    cRules?.campaign_name ||
+                    matchingCamp.code,
+                  type: matchingCamp.type || "percentage",
+                  discountValue: Number(matchingCamp.discount_value || 50),
+                  daysLabel:
+                    activeDaysLabels.length > 0
+                      ? activeDaysLabels.join(", ")
+                      : "Horários selecionados",
+                },
+              };
+            })
+            .filter(Boolean);
+
+          setCampaignRooms(matchedRooms);
         } else {
           setActiveBlackCampaign(null);
+          setCampaignRooms([]);
+          setShowOnlyCampaignRooms(false);
         }
       } catch {
-        if (isMounted) setActiveBlackCampaign(null);
+        if (isMounted) {
+          setActiveBlackCampaign(null);
+          setCampaignRooms([]);
+        }
       }
     }
 
-    checkActiveBlackFridayCampaign();
+    fetchCampaignsAndParticipatingRooms();
 
     return () => {
       isMounted = false;
     };
   }, [supabase]);
+
+  // Escuta o clique no Pop-up da Black Friday para ativar a pesquisa das salas participantes
+  const handleActivateCampaignRoomsSearch = useCallback(() => {
+    setSelectedRoom(null);
+    setActiveTab("buscar");
+    setShowOnlyCampaignRooms(true);
+    setTimeout(() => {
+      if (campaignSectionRef.current) {
+        campaignSectionRef.current.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }
+    }, 100);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener(
+      "open-campaign-rooms-search",
+      handleActivateCampaignRoomsSearch,
+    );
+    return () => {
+      window.removeEventListener(
+        "open-campaign-rooms-search",
+        handleActivateCampaignRoomsSearch,
+      );
+    };
+  }, [handleActivateCampaignRoomsSearch]);
 
   useEffect(() => {
     if (isCheckingAuth) return;
@@ -265,7 +367,7 @@ export default function AppPage() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [activeTab, isCheckingAuth]);
 
-  const handleOpenRoom = useCallback((room: Room) => {
+  const handleOpenRoom = useCallback((room: Room | any) => {
     setSelectedRoom(room);
     window.history.pushState(
       null,
@@ -298,12 +400,55 @@ export default function AppPage() {
     if (id !== "buscar") {
       router.push("/login");
     } else {
+      setShowOnlyCampaignRooms(false);
       if (activeTab === "buscar" && !selectedRoom) return;
       setActiveTab("buscar");
       setSelectedRoom(null);
       window.history.pushState(null, "", window.location.pathname + "#buscar");
     }
   };
+
+  const filteredCampaignRooms = useMemo(() => {
+    const q = campaignSearchQuery.toLowerCase().trim();
+    return campaignRooms.filter((room) => {
+      let addr = room.address_details || {};
+      if (typeof addr === "string") {
+        try {
+          addr = JSON.parse(addr);
+        } catch {
+          addr = {};
+        }
+      }
+
+      if (campaignSpecialtyFilter !== "Todas") {
+        const mainSpec = String(room.specialty || "").toLowerCase();
+        const secSpecs = Array.isArray(addr.secondary_specialties)
+          ? addr.secondary_specialties.map((s: string) => s.toLowerCase())
+          : [];
+        const filterLower = campaignSpecialtyFilter.toLowerCase();
+        const matchSpec =
+          mainSpec.includes(filterLower) ||
+          secSpecs.some((s: string) => s.includes(filterLower));
+        if (!matchSpec) return false;
+      }
+
+      if (!q) return true;
+      const matchName = String(room.name || "")
+        .toLowerCase()
+        .includes(q);
+      const matchNeighborhood = String(addr.neighborhood || "")
+        .toLowerCase()
+        .includes(q);
+      const matchCity = String(addr.city || "")
+        .toLowerCase()
+        .includes(q);
+      const matchSpecialty = String(room.specialty || "")
+        .toLowerCase()
+        .includes(q);
+
+      return matchName || matchNeighborhood || matchCity || matchSpecialty;
+    });
+  }, [campaignRooms, campaignSearchQuery, campaignSpecialtyFilter]);
 
   if (isCheckingAuth) {
     return (
@@ -314,18 +459,14 @@ export default function AppPage() {
   }
 
   const isBlackFridayActive = Boolean(activeBlackCampaign);
-  const displayHeadlineDiscountPct =
-    isBlackFridayActive &&
-    activeBlackCampaign?.discountType === "percentage" &&
-    activeBlackCampaign.discountValue > 41
-      ? activeBlackCampaign.discountValue
-      : 41;
-
-  const heroImageSource =
-    isBlackFridayActive && !blackHeroImgError ? "/black.jpeg" : "/hero.png";
+  const campaignDiscountLabel =
+    activeBlackCampaign?.discountType === "fixed"
+      ? `R$ ${activeBlackCampaign.discountValue} OFF`
+      : `${activeBlackCampaign?.discountValue || 50}% OFF`;
 
   return (
     <div className="flex min-h-svh flex-col bg-[#FAF7F4] font-sans">
+      {/* Ponte de alinhamento exclusiva para o Desktop (lg:) */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -351,13 +492,11 @@ export default function AppPage() {
         }}
       />
 
-      {/* Usa a prop nativa `imageSrc` para alternar entre /black.png e /fusion-pass-popup.png */}
-      <FusionPassPromoPopup
-        imageSrc={isBlackFridayActive ? "/black.png" : "/fusion-pass-popup.png"}
-      />
+      {/* Pop-up Inteligente: usa /black.png quando há campanha ativa e abre a pesquisa de salas participantes */}
+      <FusionPassPromoPopup />
 
       {/* ==================================================================== */}
-      {/* 1. TOP PROMO BAR PRETA (RESPONSIVA NO MOBILE E INTACTA NO DESKTOP)   */}
+      {/* 1. TOP PROMO BAR PRETA (FOCADA NOS HORÁRIOS DA CAMPANHA QUANDO ATIVA)*/}
       {/* ==================================================================== */}
       {!selectedRoom && (
         <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/5">
@@ -379,27 +518,42 @@ export default function AppPage() {
                 </span>
               </span>
               <p className="text-[11px] lg:text-xs font-bold text-[#FBBF24] truncate">
-                <span className="sm:hidden">
-                  Horas com até {displayHeadlineDiscountPct}% de desconto
-                </span>
-                <span className="hidden sm:inline">
-                  {isBlackFridayActive
-                    ? `Especial ${activeBlackCampaign?.campaignName}: horários e pacotes com até ${displayHeadlineDiscountPct}% de desconto`
-                    : "Compre suas horas com até 41% de desconto"}
-                </span>
-                <span className="hidden md:inline">
-                  {" "}
-                  • Sem fidelidade • Use em qualquer unidade ou transfira horas
-                </span>
+                {isBlackFridayActive ? (
+                  <>
+                    <span className="sm:hidden">
+                      Horários avulsos com {campaignDiscountLabel}
+                    </span>
+                    <span className="hidden sm:inline">
+                      Horários selecionados com {campaignDiscountLabel} nas
+                      salas participantes da campanha
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="sm:hidden">
+                      Horas com até 41% de desconto
+                    </span>
+                    <span className="hidden sm:inline">
+                      Compre suas horas com até 41% de desconto • Sem fidelidade
+                      • Use em qualquer unidade
+                    </span>
+                  </>
+                )}
               </p>
             </div>
 
             <button
               type="button"
-              onClick={handleOpenFusionPassShowcase}
+              onClick={
+                isBlackFridayActive
+                  ? handleActivateCampaignRoomsSearch
+                  : handleOpenFusionPassShowcase
+              }
               className="px-3 lg:px-4 py-1 rounded-full border border-amber-400/80 hover:border-amber-300 hover:bg-amber-400/15 text-[#FBBF24] font-bold text-[11px] lg:text-xs shrink-0 flex items-center gap-0.5 lg:gap-1 transition-all active:scale-95 cursor-pointer"
             >
-              <span>Ver Planos</span>
+              <span>
+                {isBlackFridayActive ? "Ver Salas em Oferta" : "Ver Planos"}
+              </span>
               <ChevronRight className="w-3 h-3 lg:w-3.5 lg:h-3.5" />
             </button>
           </div>
@@ -407,7 +561,7 @@ export default function AppPage() {
       )}
 
       {/* ==================================================================== */}
-      {/* 2. HEADER DESKTOP BRANCO (100% INTACTO)                              */}
+      {/* 2. HEADER DESKTOP BRANCO (PLANOS PASS+ SEMPRE COM ATÉ -41%)          */}
       {/* ==================================================================== */}
       {!selectedRoom && (
         <header className="hidden lg:block sticky top-0 z-40 bg-white border-b border-stone-200/70">
@@ -437,13 +591,13 @@ export default function AppPage() {
                 onClick={() => handleTabClick("buscar")}
                 className={cn(
                   "relative py-2.5 text-[15px] font-semibold whitespace-nowrap transition-colors cursor-pointer",
-                  activeTab === "buscar"
+                  activeTab === "buscar" && !showOnlyCampaignRooms
                     ? "text-stone-900"
                     : "text-stone-500 hover:text-stone-900",
                 )}
               >
                 Explorar Salas
-                {activeTab === "buscar" && (
+                {activeTab === "buscar" && !showOnlyCampaignRooms && (
                   <span
                     className={cn(
                       "absolute bottom-0 inset-x-0 h-[3px] rounded-full",
@@ -453,22 +607,38 @@ export default function AppPage() {
                 )}
               </button>
 
+              {isBlackFridayActive && (
+                <button
+                  type="button"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className={cn(
+                    "relative py-2.5 text-[15px] font-bold whitespace-nowrap flex items-center gap-2 transition-colors cursor-pointer",
+                    showOnlyCampaignRooms
+                      ? "text-stone-950"
+                      : "text-stone-700 hover:text-stone-950",
+                  )}
+                >
+                  <span>Salas na Black</span>
+                  <span className="text-[11px] font-black text-[#FBBF24] bg-stone-950 border border-amber-400/40 px-2.5 py-0.5 rounded-full shadow-2xs flex items-center gap-1">
+                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />-
+                    {activeBlackCampaign?.discountValue}%
+                  </span>
+                  {showOnlyCampaignRooms && (
+                    <span className="absolute bottom-0 inset-x-0 h-[3px] bg-stone-950 rounded-full" />
+                  )}
+                </button>
+              )}
+
+              {/* Planos Pass+ permanece intacto em -41% (não entra na Black) */}
               <button
                 type="button"
                 onClick={handleOpenFusionPassShowcase}
                 className="py-2.5 text-[15px] font-medium text-stone-700 hover:text-stone-900 whitespace-nowrap flex items-center gap-2 transition-colors cursor-pointer"
               >
                 <span>Planos Pass+</span>
-                {isBlackFridayActive ? (
-                  <span className="text-[11px] font-black text-[#FBBF24] bg-stone-950 border border-amber-400/40 px-2.5 py-0.5 rounded-full shadow-2xs flex items-center gap-1">
-                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
-                    Até -{displayHeadlineDiscountPct}%
-                  </span>
-                ) : (
-                  <span className="text-[11px] font-bold text-white bg-gradient-to-r from-[#EA580C] to-[#F59E0B] px-2.5 py-0.5 rounded-full shadow-2xs">
-                    Até -41%
-                  </span>
-                )}
+                <span className="text-[11px] font-bold text-white bg-gradient-to-r from-[#EA580C] to-[#F59E0B] px-2.5 py-0.5 rounded-full shadow-2xs">
+                  Até -41%
+                </span>
               </button>
 
               <button
@@ -515,7 +685,7 @@ export default function AppPage() {
       )}
 
       {/* ==================================================================== */}
-      {/* 3. HERO BANNER DESKTOP (USA /black.png NA BLACK E /hero.png NORMAL)  */}
+      {/* 3. HERO BANNER DESKTOP (SEMPRE COM A FOTO DO CONSULTÓRIO /hero.png)  */}
       {/* ==================================================================== */}
       {!selectedRoom && activeTab === "buscar" && (
         <section
@@ -526,18 +696,15 @@ export default function AppPage() {
         >
           <div className="absolute inset-y-0 right-0 w-[65%] z-0">
             <img
-              src={heroImageSource}
+              src="/hero.png"
               alt="Consultório Fusion Clinic"
-              onError={() => {
-                if (isBlackFridayActive) setBlackHeroImgError(true);
-              }}
               className="w-full h-full object-cover object-[center_70%] transition-all duration-500"
             />
             <div
               className="absolute inset-0"
               style={{
                 background: isBlackFridayActive
-                  ? "linear-gradient(90deg, #09090B 0%, #09090B 15%, rgba(9,9,11,0.92) 32%, rgba(9,9,11,0.40) 56%, rgba(9,9,11,0.08) 78%)"
+                  ? "linear-gradient(90deg, #09090B 0%, #09090B 15%, rgba(9,9,11,0.92) 32%, rgba(9,9,11,0.38) 56%, rgba(9,9,11,0.05) 78%)"
                   : "linear-gradient(90deg, #B83B10 0%, #B83B10 12%, rgba(184,59,16,0.90) 28%, rgba(184,59,16,0.22) 52%, rgba(184,59,16,0) 72%)",
               }}
             />
@@ -555,13 +722,17 @@ export default function AppPage() {
           <div className="relative z-20 max-w-[1360px] mx-auto px-10 pt-16 pb-32 flex items-end justify-between gap-8">
             <div className="max-w-[610px] space-y-4 text-white">
               {isBlackFridayActive && (
-                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/15 border border-amber-400/40 backdrop-blur-xs">
+                <button
+                  type="button"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 backdrop-blur-xs transition-colors cursor-pointer"
+                >
                   <Flame className="w-3.5 h-3.5 text-[#FBBF24] fill-[#FBBF24]" />
                   <span className="text-[11px] font-black uppercase tracking-widest text-[#FBBF24]">
-                    {activeBlackCampaign?.campaignName} • Horários e Planos em
+                    {activeBlackCampaign?.campaignName} • Horários das Salas em
                     Oferta
                   </span>
-                </div>
+                </button>
               )}
 
               <h1 className="text-[44px] xl:text-[52px] font-extrabold tracking-tight text-white leading-[1.1]">
@@ -585,10 +756,11 @@ export default function AppPage() {
 
             <div className="shrink-0">
               {isBlackFridayActive ? (
+                /* CARD FLUTUANTE DA BLACK FRIDAY: FOCADO APENAS NOS HORÁRIOS DAS SALAS PARTICIPANTES */
                 <button
                   type="button"
-                  onClick={handleOpenFusionPassShowcase}
-                  className="group relative w-[225px] rounded-[22px] bg-stone-950/95 hover:bg-stone-900 backdrop-blur-md border border-amber-400/40 p-4 text-left shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className="group relative w-[235px] rounded-[22px] bg-stone-950/95 hover:bg-stone-900 backdrop-blur-md border border-amber-400/40 p-4 text-left shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
                 >
                   <div className="flex items-center justify-between mb-2">
                     <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-[#FBBF24]">
@@ -602,29 +774,29 @@ export default function AppPage() {
 
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-2xl font-black tracking-tight text-white leading-none">
-                      Até {displayHeadlineDiscountPct}%
-                    </span>
-                    <span className="text-xs font-extrabold uppercase text-[#FBBF24]">
-                      OFF
+                      {campaignDiscountLabel}
                     </span>
                   </div>
                   <p className="text-[11px] font-medium text-stone-400 mt-0.5">
-                    no valor da hora clínica
+                    nos horários das salas em campanha
                   </p>
 
                   <div className="mt-2.5 px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between text-[11px]">
-                    <span className="text-stone-400 line-through">R$ 45/h</span>
-                    <span className="font-bold text-white">
-                      por <strong className="text-[#FBBF24]">R$ 26/h</strong>
+                    <span className="text-stone-300 font-medium">
+                      {campaignRooms.length}{" "}
+                      {campaignRooms.length === 1
+                        ? "sala participante"
+                        : "salas participantes"}
                     </span>
                   </div>
 
                   <span className="mt-2.5 inline-flex items-center gap-1 text-xs font-bold text-[#FBBF24] group-hover:translate-x-0.5 transition-transform">
-                    <span>Garantir desconto</span>
+                    <span>Ver salas da campanha</span>
                     <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
                   </span>
                 </button>
               ) : (
+                /* CARD FLUTUANTE ORIGINAL DO FUSION PASS+ */
                 <button
                   type="button"
                   onClick={handleOpenFusionPassShowcase}
@@ -671,7 +843,7 @@ export default function AppPage() {
       )}
 
       {/* ==================================================================== */}
-      {/* 4. CONTEÚDO PRINCIPAL                                                */}
+      {/* 4. CONTEÚDO PRINCIPAL (PESQUISA DE SALAS DA BLACK OU GERAL)          */}
       {/* ==================================================================== */}
       <main
         className={cn("flex-1 w-full", selectedRoom ? "" : "pb-6 lg:pb-16")}
@@ -687,8 +859,226 @@ export default function AppPage() {
         ) : (
           <>
             {activeTab === "buscar" && (
-              <div className="w-full fusion-desktop-hero-bridge">
-                <SearchTab onOpenRoom={handleOpenRoom} />
+              <div ref={campaignSectionRef}>
+                {showOnlyCampaignRooms && isBlackFridayActive ? (
+                  /* PESQUISA EXCLUSIVA DAS SALAS PARTICIPANTES DA CAMPANHA BLACK FRIDAY */
+                  <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-10 pt-6 pb-12 animate-in fade-in duration-300">
+                    <div className="bg-[#09090B] text-white rounded-3xl p-5 sm:p-7 border border-amber-400/30 shadow-xl mb-8">
+                      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-white/10">
+                        <div className="space-y-1.5">
+                          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-400/15 border border-amber-400/40 text-[#FBBF24] text-[10px] font-black uppercase tracking-wider">
+                            <Flame className="w-3.5 h-3.5 fill-[#FBBF24]" />
+                            {activeBlackCampaign?.campaignName} • Horários em
+                            Oferta
+                          </div>
+                          <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+                            Salas participantes com {campaignDiscountLabel} nos
+                            horários selecionados
+                          </h2>
+                          <p className="text-xs sm:text-sm text-stone-400">
+                            Escolha uma das salas abaixo e toque nos dias em
+                            preto no calendário para reservar seu horário com
+                            desconto.
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowOnlyCampaignRooms(false)}
+                          className="self-start lg:self-center px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+                        >
+                          <X className="w-4 h-4" />
+                          Ver todas as salas da plataforma
+                        </button>
+                      </div>
+
+                      {/* Barra de Pesquisa e Filtro de Especialidade dentro das Salas da Campanha */}
+                      <div className="mt-5 flex flex-col md:flex-row items-stretch md:items-center gap-3">
+                        <div className="relative flex-1">
+                          <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            value={campaignSearchQuery}
+                            onChange={(e) =>
+                              setCampaignSearchQuery(e.target.value)
+                            }
+                            placeholder="Pesquisar sala participante por nome, bairro ou especialidade..."
+                            className="w-full h-11 pl-10 pr-4 rounded-xl bg-white text-stone-900 placeholder:text-stone-400 text-xs sm:text-sm font-semibold outline-none"
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 md:pb-0">
+                          {[
+                            "Todas",
+                            "Psicologia",
+                            "Nutrição",
+                            "Odontologia",
+                            "Estética",
+                            "Multiuso",
+                          ].map((spec) => (
+                            <button
+                              key={spec}
+                              type="button"
+                              onClick={() => setCampaignSpecialtyFilter(spec)}
+                              className={`px-3.5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                                campaignSpecialtyFilter === spec
+                                  ? "bg-[#FBBF24] text-stone-950"
+                                  : "bg-white/10 text-stone-300 hover:bg-white/15"
+                              }`}
+                            >
+                              {spec}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {filteredCampaignRooms.length === 0 ? (
+                      <div className="bg-white rounded-3xl border border-stone-200 p-12 text-center space-y-3">
+                        <p className="text-base font-bold text-stone-800">
+                          Nenhuma sala participante encontrada para esta busca.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCampaignSearchQuery("");
+                            setCampaignSpecialtyFilter("Todas");
+                          }}
+                          className="px-4 py-2 rounded-xl bg-stone-900 text-white text-xs font-bold cursor-pointer"
+                        >
+                          Limpar filtros da campanha
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                        {filteredCampaignRooms.map((room: any) => {
+                          let addr = room.address_details || {};
+                          if (typeof addr === "string") {
+                            try {
+                              addr = JSON.parse(addr);
+                            } catch {
+                              addr = {};
+                            }
+                          }
+                          const baseHourly = Number(
+                            addr?.pricing?.hourly || 45,
+                          );
+                          const cInfo = room.campaignInfo;
+                          const finalHourly =
+                            cInfo?.type === "percentage"
+                              ? Math.max(
+                                  0,
+                                  baseHourly * (1 - cInfo.discountValue / 100),
+                                )
+                              : Math.max(0, baseHourly - cInfo.discountValue);
+
+                          const badgeLabel =
+                            cInfo?.type === "percentage"
+                              ? `-${cInfo.discountValue}% OFF`
+                              : `-R$ ${cInfo?.discountValue} OFF`;
+
+                          return (
+                            <div
+                              key={room.id}
+                              onClick={() => handleOpenRoom(room)}
+                              className="group bg-white rounded-3xl border-2 border-stone-900/90 hover:border-[#BF4B24] overflow-hidden shadow-md hover:shadow-xl transition-all duration-300 flex flex-col cursor-pointer"
+                            >
+                              <div className="relative h-52 w-full bg-stone-100 overflow-hidden">
+                                <img
+                                  src={room.image_url || "/placeholder.jpg"}
+                                  alt={room.name}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                                />
+                                <div className="absolute top-3 left-3 bg-[#09090B] text-[#FBBF24] border border-amber-400/50 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider flex items-center gap-1 shadow-lg">
+                                  <Flame className="w-3.5 h-3.5 fill-[#FBBF24]" />
+                                  {badgeLabel}
+                                </div>
+                              </div>
+
+                              <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
+                                <div>
+                                  <div className="flex items-center justify-between gap-2 text-xs text-stone-500 mb-1">
+                                    <span className="font-semibold flex items-center gap-1 truncate">
+                                      <MapPin className="w-3.5 h-3.5 text-[#BF4B24] shrink-0" />
+                                      {addr.neighborhood ||
+                                        addr.city ||
+                                        "Natal"}
+                                    </span>
+                                    <span className="flex items-center gap-1 shrink-0">
+                                      <Users className="w-3.5 h-3.5 text-stone-400" />
+                                      Até {addr.capacity || 4}
+                                    </span>
+                                  </div>
+
+                                  <h3 className="text-base font-black text-stone-900 group-hover:text-[#BF4B24] transition-colors line-clamp-1">
+                                    {room.name}
+                                  </h3>
+
+                                  <div className="mt-2 px-2.5 py-1.5 rounded-xl bg-stone-950 text-white text-[11px] font-medium flex items-center gap-1.5">
+                                    <Clock className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                                    <span className="truncate">
+                                      Oferta: {cInfo?.daysLabel}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="pt-3 border-t border-stone-100 flex items-center justify-between">
+                                  <div>
+                                    <span className="text-[11px] text-stone-400 line-through block">
+                                      De R${" "}
+                                      {baseHourly.toFixed(2).replace(".", ",")}
+                                      /h
+                                    </span>
+                                    <span className="text-lg font-black text-stone-900">
+                                      R${" "}
+                                      {finalHourly.toFixed(2).replace(".", ",")}
+                                      <span className="text-xs font-semibold text-stone-500">
+                                        /hora
+                                      </span>
+                                    </span>
+                                  </div>
+
+                                  <span className="px-3.5 py-2 rounded-xl bg-[#BF4B24] group-hover:bg-[#9A3C1D] text-white text-xs font-bold flex items-center gap-1 transition-colors">
+                                    Ver horários
+                                    <ChevronRight className="w-3.5 h-3.5" />
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="w-full fusion-desktop-hero-bridge">
+                    {isBlackFridayActive && campaignRooms.length > 0 && (
+                      <div className="lg:hidden px-4 pt-3 pb-1">
+                        <button
+                          type="button"
+                          onClick={handleActivateCampaignRoomsSearch}
+                          className="w-full p-3 rounded-2xl bg-[#09090B] text-white border border-amber-400/40 flex items-center justify-between gap-2 shadow-md"
+                        >
+                          <div className="flex items-center gap-2 text-left">
+                            <Flame className="w-4 h-4 text-[#FBBF24] fill-[#FBBF24] shrink-0" />
+                            <div>
+                              <span className="text-xs font-black text-[#FBBF24] block">
+                                {activeBlackCampaign?.campaignName} (
+                                {campaignDiscountLabel})
+                              </span>
+                              <span className="text-[11px] text-stone-300">
+                                Toque para filtrar as {campaignRooms.length}{" "}
+                                salas participantes
+                              </span>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-[#FBBF24] shrink-0" />
+                        </button>
+                      </div>
+                    )}
+                    <SearchTab onOpenRoom={handleOpenRoom} />
+                  </div>
+                )}
               </div>
             )}
           </>

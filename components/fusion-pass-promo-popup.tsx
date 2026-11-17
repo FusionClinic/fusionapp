@@ -20,6 +20,8 @@ import {
   Unlock,
   HelpCircle,
   Flame,
+  Clock,
+  Building2,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,8 +30,6 @@ import { useToast } from "@/hooks/use-toast";
 export interface FusionPassPromoPopupProps {
   onSelectPlan?: (pkg?: any) => void;
   imageSrc?: string;
-  blackFridayImageSrc?: string;
-  forceBlackFriday?: boolean;
   suspendAutoOpen?: boolean;
   isSubscriber?: boolean;
   currentTier?: string | null;
@@ -43,8 +43,8 @@ const REFERENCE_AVULSO_RATES: Record<TierKey, number> = {
   master: 80,
 };
 
-const VISITOR_SEEN_KEY = "fusion_promo_seen_visitor_v5";
-const AUTH_SEEN_PREFIX = "fusion_promo_seen_auth_v5_";
+const VISITOR_SEEN_KEY = "fusion_promo_seen_visitor_v6";
+const AUTH_SEEN_PREFIX = "fusion_promo_seen_auth_v6_";
 
 function normalizeTier(raw?: string | null): TierKey {
   const t = String(raw || "start")
@@ -79,8 +79,6 @@ function isReviewModalCurrentlyActive(): boolean {
 export function FusionPassPromoPopup({
   onSelectPlan,
   imageSrc = "/fusion-pass-popup.png",
-  blackFridayImageSrc = "/black.jpeg",
-  forceBlackFriday = false,
   suspendAutoOpen = false,
 }: FusionPassPromoPopupProps) {
   const router = useRouter();
@@ -92,11 +90,14 @@ export function FusionPassPromoPopup({
   const [step, setStep] = useState<"banner" | "plans" | "checkout">("banner");
   const [showRulesDetails, setShowRulesDetails] = useState(false);
 
-  const [isBlackFridayActive, setIsBlackFridayActive] = useState<boolean>(
-    forceBlackFriday || imageSrc === "/black.jpeg",
-  );
-  const [campaignTitle, setCampaignTitle] = useState<string>("BLACK FUSION");
-  const [bannerImgError, setBannerImgError] = useState<boolean>(false);
+  // Estado da campanha de horários (Black Friday)
+  const [activeCampaign, setActiveCampaign] = useState<{
+    id: string;
+    name: string;
+    discountValue: number;
+    discountType: string;
+  } | null>(null);
+  const [blackImgError, setBlackImgError] = useState(false);
 
   const [packages, setPackages] = useState<any[]>([]);
   const [loadingPkgs, setLoadingPkgs] = useState(false);
@@ -136,9 +137,15 @@ export function FusionPassPromoPopup({
     }
   }, [suspendAutoOpen, isOpen, step]);
 
-  const getActiveStorageKey = useCallback((uid?: string | null) => {
-    return uid ? `${AUTH_SEEN_PREFIX}${uid}` : VISITOR_SEEN_KEY;
-  }, []);
+  const getActiveStorageKey = useCallback(
+    (uid?: string | null, campId?: string | null) => {
+      const suffix = campId ? `_camp_${campId}` : "";
+      return uid
+        ? `${AUTH_SEEN_PREFIX}${uid}${suffix}`
+        : `${VISITOR_SEEN_KEY}${suffix}`;
+    },
+    [],
+  );
 
   const openModal = useCallback(
     (initialStep: "banner" | "plans" = "banner", forceManual = false) => {
@@ -169,7 +176,10 @@ export function FusionPassPromoPopup({
 
   const handleClose = useCallback(() => {
     try {
-      const storageKey = getActiveStorageKey(currentUserId);
+      const storageKey = getActiveStorageKey(
+        currentUserId,
+        activeCampaign?.id || null,
+      );
       sessionStorage.setItem(storageKey, "true");
     } catch {}
 
@@ -187,8 +197,32 @@ export function FusionPassPromoPopup({
         }
       }, 8000);
     }, 200);
-  }, [currentUserId, getActiveStorageKey]);
+  }, [currentUserId, activeCampaign?.id, getActiveStorageKey]);
 
+  // Ao clicar no Pop-up da Black Friday: fecha o pop-up e aciona a pesquisa de salas da campanha
+  const handleExploreCampaignRooms = useCallback(() => {
+    try {
+      const storageKey = getActiveStorageKey(
+        currentUserId,
+        activeCampaign?.id || null,
+      );
+      sessionStorage.setItem(storageKey, "true");
+    } catch {}
+
+    setIsClosing(true);
+    setTimeout(() => {
+      setIsOpen(false);
+      setIsClosing(false);
+      if (typeof document !== "undefined") {
+        document.documentElement.removeAttribute("data-fusion-promo-active");
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("open-campaign-rooms-search"));
+      }
+    }, 180);
+  }, [currentUserId, activeCampaign?.id, getActiveStorageKey]);
+
+  // 1. Carrega sessão, pacotes e verifica se há campanha de horários ativa
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -222,14 +256,11 @@ export function FusionPassPromoPopup({
 
         if (!isMounted) return;
 
-        if (forceBlackFriday || imageSrc === "/black.jpeg") {
-          setIsBlackFridayActive(true);
-          setCampaignTitle("BLACK FUSION");
-        } else if (couponsData && couponsData.length > 0) {
+        if (couponsData && couponsData.length > 0) {
           const now = new Date();
           const todayIso = now.toISOString().slice(0, 10);
 
-          const activeCamp = couponsData.find((c: any) => {
+          const validCamp = couponsData.find((c: any) => {
             if (c.valid_until && new Date(c.valid_until) < now) return false;
             if (
               c.max_uses &&
@@ -267,8 +298,8 @@ export function FusionPassPromoPopup({
             return isCampaign && showOnCal;
           });
 
-          if (activeCamp) {
-            let parsedRules = activeCamp.schedule_rules;
+          if (validCamp) {
+            let parsedRules = validCamp.schedule_rules;
             if (typeof parsedRules === "string") {
               try {
                 parsedRules = JSON.parse(parsedRules);
@@ -276,17 +307,20 @@ export function FusionPassPromoPopup({
                 parsedRules = null;
               }
             }
-            setIsBlackFridayActive(true);
-            setCampaignTitle(
-              activeCamp.campaign_name ||
+            setActiveCampaign({
+              id: validCamp.id,
+              name:
+                validCamp.campaign_name ||
                 parsedRules?.campaign_name ||
                 "BLACK FUSION",
-            );
+              discountValue: Number(validCamp.discount_value || 50),
+              discountType: validCamp.type || "percentage",
+            });
           } else {
-            setIsBlackFridayActive(false);
+            setActiveCampaign(null);
           }
         } else {
-          setIsBlackFridayActive(false);
+          setActiveCampaign(null);
         }
 
         const sessionUser = sessionData?.session?.user || null;
@@ -378,8 +412,9 @@ export function FusionPassPromoPopup({
       window.removeEventListener("open-fusion-pass", handleCustomOpen);
       authListener.subscription.unsubscribe();
     };
-  }, [supabase, openModal, forceBlackFriday, imageSrc]);
+  }, [supabase, openModal]);
 
+  // 2. Agenda a abertura automática do Pop-up (1.5s quando há campanha Black ativa)
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -396,19 +431,23 @@ export function FusionPassPromoPopup({
       return;
     }
 
-    const storageKey = getActiveStorageKey(currentUserId);
+    const storageKey = getActiveStorageKey(
+      currentUserId,
+      activeCampaign?.id || null,
+    );
     const alreadyDismissed = sessionStorage.getItem(storageKey);
 
     if (alreadyDismissed) return;
+
+    const delayMs = activeCampaign ? 1500 : 3500;
 
     timerRef.current = setTimeout(() => {
       if (suspendRef.current || isReviewModalCurrentlyActive()) return;
       const checkAgain = sessionStorage.getItem(storageKey);
       if (!checkAgain) {
-        sessionStorage.setItem(storageKey, "true");
         openModal("banner", false);
       }
-    }, 4000);
+    }, delayMs);
 
     return () => {
       if (timerRef.current) {
@@ -416,8 +455,15 @@ export function FusionPassPromoPopup({
         timerRef.current = null;
       }
     };
-  }, [suspendAutoOpen, currentUserId, getActiveStorageKey, openModal]);
+  }, [
+    suspendAutoOpen,
+    currentUserId,
+    activeCampaign,
+    getActiveStorageKey,
+    openModal,
+  ]);
 
+  // Polling automático quando o QR Code PIX da assinatura estiver aberto
   useEffect(() => {
     if (!isOpen || step !== "checkout" || !paymentId || !selectedPkg) return;
 
@@ -570,6 +616,10 @@ export function FusionPassPromoPopup({
 
   if (!isOpen) return null;
 
+  const isBlackCampaignBanner = Boolean(activeCampaign) && step === "banner";
+  const bannerPhotoUrl =
+    isBlackCampaignBanner && !blackImgError ? "/black.png" : imageSrc;
+
   const tierPackages = packages.filter(
     (p) => normalizeTier(p.tier) === selectedTier,
   );
@@ -583,14 +633,6 @@ export function FusionPassPromoPopup({
       ? checkoutRawPrice * checkoutHours
       : checkoutRawPrice;
   const checkoutHourlyRate = checkoutTotalPrice / checkoutHours;
-
-  const resolvedBannerImage = bannerImgError
-    ? "/fusion-pass-popup.png"
-    : isBlackFridayActive
-      ? imageSrc !== "/fusion-pass-popup.png"
-        ? imageSrc
-        : blackFridayImageSrc
-      : imageSrc;
 
   return (
     <>
@@ -613,113 +655,147 @@ export function FusionPassPromoPopup({
       >
         <div
           aria-hidden="true"
-          className="fixed inset-0 bg-black/65 backdrop-blur-[2px] transition-opacity"
+          onClick={(e) => {
+            e.stopPropagation();
+            handleClose();
+          }}
+          className="fixed inset-0 bg-black/70 backdrop-blur-[2px] transition-opacity"
         />
 
         <div
+          onClick={(e) => e.stopPropagation()}
           className={`relative z-10 w-full ${
             step === "banner"
               ? "max-w-[355px] sm:max-w-[395px]"
               : "max-w-[390px] sm:max-w-[460px]"
           } ${
-            step === "banner" && isBlackFridayActive
+            isBlackCampaignBanner
               ? "bg-[#09090B] border border-amber-400/35"
               : "bg-white"
           } rounded-3xl shadow-2xl overflow-hidden transition-all duration-200 ${
             isClosing ? "scale-95 opacity-0" : "scale-100 opacity-100"
           }`}
         >
+          {/* BOTÃO DE FECHAR COM ALTO CONTRASTE E ISOLAMENTO DE TOQUE NO MOBILE */}
           <button
             type="button"
-            onClick={handleClose}
-            aria-label="Fechar"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handleClose();
+            }}
+            aria-label="Fechar anúncio"
             title="Fechar"
-            className="absolute top-3 right-3 z-30 w-8 h-8 rounded-full bg-black/60 hover:bg-black/85 text-white flex items-center justify-center backdrop-blur-xs shadow-md transition-transform active:scale-95 cursor-pointer"
+            className="absolute top-3 right-3 z-50 h-9 px-3 sm:w-9 sm:px-0 rounded-full bg-white hover:bg-stone-100 text-stone-950 font-extrabold text-xs flex items-center justify-center gap-1 shadow-[0_4px_20px_rgba(0,0,0,0.6)] border border-stone-200 transition-transform active:scale-90 cursor-pointer select-none"
           >
-            <X className="w-4 h-4 stroke-[2.5]" />
+            <X className="w-4 h-4 stroke-[2.8] text-stone-950 shrink-0" />
+            <span className="sm:hidden">Fechar</span>
           </button>
 
           {step === "banner" && (
             <div className="flex flex-col">
+              {/* Quando há campanha ativa, usa /black.png e ao clicar abre a pesquisa de salas da campanha */}
               <div
-                onClick={() => setStep("plans")}
+                onClick={() => {
+                  if (activeCampaign) {
+                    handleExploreCampaignRooms();
+                  } else {
+                    setStep("plans");
+                  }
+                }}
                 className={`relative w-full aspect-square cursor-pointer overflow-hidden group ${
-                  isBlackFridayActive ? "bg-[#09090B]" : "bg-[#9A3C1D]"
+                  isBlackCampaignBanner ? "bg-[#09090B]" : "bg-[#9A3C1D]"
                 }`}
               >
                 <img
-                  src={resolvedBannerImage}
-                  alt="Fusion Pass+ com até 41% de desconto"
-                  onError={() => setBannerImgError(true)}
+                  src={bannerPhotoUrl}
+                  alt={
+                    activeCampaign
+                      ? `${activeCampaign.name} - Horários em oferta`
+                      : "Fusion Pass+ com até 41% de desconto"
+                  }
+                  onError={() => {
+                    if (activeCampaign) setBlackImgError(true);
+                  }}
                   className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
                 />
+              </div>
 
-                {isBlackFridayActive && (
-                  <div className="absolute top-3 left-3 z-20 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-stone-950/90 border border-amber-400/50 text-[#FBBF24] text-[10px] font-black uppercase tracking-wider shadow-lg">
-                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
-                    {campaignTitle}
+              {activeCampaign ? (
+                /* RODAPÉ EXCLUSIVO DO POP-UP BLACK FRIDAY (APENAS HORÁRIOS E SALAS DA CAMPANHA) */
+                <div className="p-4 sm:p-5 bg-[#09090B] text-white space-y-3 border-t border-white/10">
+                  <div className="flex items-center justify-center gap-3 text-[11px] font-semibold text-stone-300">
+                    <span className="flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                      Horários avulsos com{" "}
+                      {activeCampaign.discountType === "percentage"
+                        ? `${activeCampaign.discountValue}% OFF`
+                        : `R$ ${activeCampaign.discountValue} OFF`}
+                    </span>
+                    <span className="text-stone-700">•</span>
+                    <span className="flex items-center gap-1">
+                      <Building2 className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                      Salas selecionadas
+                    </span>
                   </div>
-                )}
-              </div>
 
-              <div
-                className={`p-4 sm:p-5 space-y-3 ${
-                  isBlackFridayActive
-                    ? "bg-[#09090B] text-white border-t border-white/10"
-                    : "bg-white"
-                }`}
-              >
-                <div
-                  className={`flex items-center justify-center gap-3 text-[11px] font-semibold ${
-                    isBlackFridayActive ? "text-stone-300" : "text-stone-600"
-                  }`}
-                >
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    Cancele quando quiser
-                  </span>
-                  <span
-                    className={
-                      isBlackFridayActive ? "text-stone-700" : "text-stone-300"
-                    }
+                  <button
+                    type="button"
+                    onClick={handleExploreCampaignRooms}
+                    className="w-full h-11 sm:h-12 rounded-xl bg-[#FBBF24] hover:bg-amber-400 text-stone-950 font-black text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-[0.99] cursor-pointer"
                   >
-                    •
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    Use, doe ou negocie
-                  </span>
+                    <Flame className="w-4 h-4 fill-stone-950" />
+                    <span>Ver salas participantes da Black</span>
+                    <ChevronRight className="w-4 h-4 stroke-[2.5]" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleClose();
+                    }}
+                    className="w-full py-1.5 text-xs font-semibold text-stone-400 hover:text-white transition-colors cursor-pointer"
+                  >
+                    Continuar navegando
+                  </button>
                 </div>
+              ) : (
+                /* RODAPÉ PADRÃO DO FUSION PASS+ (QUANDO NÃO HÁ CAMPANHA BLACK ATIVA) */
+                <div className="p-4 sm:p-5 bg-white space-y-3">
+                  <div className="flex items-center justify-center gap-3 text-[11px] font-semibold text-stone-600">
+                    <span className="flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      Cancele quando quiser
+                    </span>
+                    <span className="text-stone-300">•</span>
+                    <span className="flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      Use, doe ou negocie
+                    </span>
+                  </div>
 
-                <button
-                  type="button"
-                  onClick={() => setStep("plans")}
-                  className={`w-full h-11 sm:h-12 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-[0.99] cursor-pointer ${
-                    isBlackFridayActive
-                      ? "bg-[#FBBF24] hover:bg-amber-400 text-stone-950 font-black"
-                      : "bg-[#BF4B24] hover:bg-[#a63f1d] text-white"
-                  }`}
-                >
-                  <span>
-                    {isBlackFridayActive
-                      ? "Aproveitar Oferta Black"
-                      : "Conhecer os planos"}
-                  </span>
-                  <ChevronRight className="w-4 h-4 stroke-[2.5]" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setStep("plans")}
+                    className="w-full h-11 sm:h-12 rounded-xl bg-[#BF4B24] hover:bg-[#a63f1d] text-white font-bold text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-[0.99] cursor-pointer"
+                  >
+                    <span>Conhecer os planos</span>
+                    <ChevronRight className="w-4 h-4 stroke-[2.5]" />
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  className={`w-full py-1 text-xs font-semibold transition-colors cursor-pointer ${
-                    isBlackFridayActive
-                      ? "text-stone-400 hover:text-white"
-                      : "text-stone-400 hover:text-stone-600"
-                  }`}
-                >
-                  Continuar navegando
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleClose();
+                    }}
+                    className="w-full py-1.5 text-xs font-semibold text-stone-400 hover:text-stone-600 transition-colors cursor-pointer"
+                  >
+                    Continuar navegando
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -735,17 +811,9 @@ export function FusionPassPromoPopup({
                   Voltar
                 </button>
 
-                <div className="flex items-center gap-2">
-                  <h3 className="text-base sm:text-lg font-bold text-stone-900">
-                    Planos Fusion Pass+
-                  </h3>
-                  {isBlackFridayActive && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-950 text-[#FBBF24] text-[10px] font-black uppercase">
-                      <Flame className="w-2.5 h-2.5 fill-[#FBBF24]" />
-                      {campaignTitle}
-                    </span>
-                  )}
-                </div>
+                <h3 className="text-base sm:text-lg font-bold text-stone-900">
+                  Planos Fusion Pass+
+                </h3>
                 <p className="text-xs text-stone-500">
                   Escolha a categoria de sala e o pacote de horas:
                 </p>
