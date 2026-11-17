@@ -21,7 +21,16 @@ import {
   Building2,
   Tag,
   Percent,
+  Flame,
 } from "lucide-react";
+
+/**
+ * Chave rápida manual:
+ * Mude para `true` se quiser forçar o visual Black Friday imediatamente para testes,
+ * mesmo sem ter uma campanha ativa no painel Admin.
+ * Deixe `false` para que o tema Black Friday ligue/desligue sozinho pelo painel Admin (Campanhas).
+ */
+const FORCE_BLACK_FRIDAY_THEME = false;
 
 const navItems = [
   { id: "buscar" as const, label: "Buscar", icon: Search },
@@ -33,6 +42,15 @@ const navItems = [
 
 type TabId = (typeof navItems)[number]["id"];
 
+export interface ActiveBlackCampaignInfo {
+  id: string;
+  campaignName: string;
+  code: string;
+  discountType: "percentage" | "fixed" | string;
+  discountValue: number;
+  validUntil: string | null;
+}
+
 export default function AppPage() {
   const router = useRouter();
   const [supabase] = useState(() => createClient());
@@ -41,6 +59,10 @@ export default function AppPage() {
   const [activeTab, setActiveTab] = useState<TabId>("buscar");
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [logoError, setLogoError] = useState(false);
+  const [blackHeroImgError, setBlackHeroImgError] = useState(false);
+
+  const [activeBlackCampaign, setActiveBlackCampaign] =
+    useState<ActiveBlackCampaignInfo | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -96,6 +118,105 @@ export default function AppPage() {
       isMounted = false;
     };
   }, [router, supabase]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function checkActiveBlackFridayCampaign() {
+      if (FORCE_BLACK_FRIDAY_THEME) {
+        if (isMounted) {
+          setActiveBlackCampaign({
+            id: "forced-black-friday",
+            campaignName: "BLACK FUSION",
+            code: "BLACKFUSION",
+            discountType: "percentage",
+            discountValue: 50,
+            validUntil: null,
+          });
+        }
+        return;
+      }
+
+      try {
+        const { data } = await supabase
+          .from("coupons")
+          .select("*")
+          .eq("is_active", true)
+          .order("created_at", { ascending: false });
+
+        if (!isMounted || !data) return;
+
+        const now = new Date();
+        const todayIso = now.toISOString().slice(0, 10);
+
+        const validCampaign = data.find((c: any) => {
+          if (c.valid_until && new Date(c.valid_until) < now) return false;
+          if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses)) {
+            return false;
+          }
+
+          let rules = c.schedule_rules;
+          if (typeof rules === "string") {
+            try {
+              rules = JSON.parse(rules);
+            } catch {
+              rules = null;
+            }
+          }
+
+          if (
+            rules?.start_date &&
+            todayIso < String(rules.start_date).slice(0, 10)
+          ) {
+            return false;
+          }
+
+          const showOnCal =
+            typeof c.show_on_calendar === "boolean"
+              ? c.show_on_calendar
+              : Boolean(rules?.show_on_calendar);
+
+          const isCampaign =
+            Boolean(rules?.is_campaign) || Boolean(rules?.enabled) || showOnCal;
+
+          return isCampaign && showOnCal;
+        });
+
+        if (validCampaign) {
+          let parsedRules = validCampaign.schedule_rules;
+          if (typeof parsedRules === "string") {
+            try {
+              parsedRules = JSON.parse(parsedRules);
+            } catch {
+              parsedRules = null;
+            }
+          }
+
+          setActiveBlackCampaign({
+            id: validCampaign.id,
+            campaignName:
+              validCampaign.campaign_name ||
+              parsedRules?.campaign_name ||
+              "BLACK FUSION",
+            code: validCampaign.code || "BLACK",
+            discountType: validCampaign.type || "percentage",
+            discountValue: Number(validCampaign.discount_value || 41),
+            validUntil: validCampaign.valid_until || null,
+          });
+        } else {
+          setActiveBlackCampaign(null);
+        }
+      } catch {
+        if (isMounted) setActiveBlackCampaign(null);
+      }
+    }
+
+    checkActiveBlackFridayCampaign();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase]);
 
   useEffect(() => {
     if (isCheckingAuth) return;
@@ -192,9 +313,19 @@ export default function AppPage() {
     );
   }
 
+  const isBlackFridayActive = Boolean(activeBlackCampaign);
+  const displayHeadlineDiscountPct =
+    isBlackFridayActive &&
+    activeBlackCampaign?.discountType === "percentage" &&
+    activeBlackCampaign.discountValue > 41
+      ? activeBlackCampaign.discountValue
+      : 41;
+
+  const heroImageSource =
+    isBlackFridayActive && !blackHeroImgError ? "/black.jpeg" : "/hero.png";
+
   return (
     <div className="flex min-h-svh flex-col bg-[#FAF7F4] font-sans">
-      {/* Ponte de alinhamento exclusiva para o Desktop (lg:) */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -220,25 +351,41 @@ export default function AppPage() {
         }}
       />
 
-      {/* Pop-up do Fusion Pass+ (4s após carregar as salas, 1x por sessão) */}
-      <FusionPassPromoPopup />
+      {/* Usa a prop nativa `imageSrc` para alternar entre /black.png e /fusion-pass-popup.png */}
+      <FusionPassPromoPopup
+        imageSrc={isBlackFridayActive ? "/black.png" : "/fusion-pass-popup.png"}
+      />
 
       {/* ==================================================================== */}
       {/* 1. TOP PROMO BAR PRETA (RESPONSIVA NO MOBILE E INTACTA NO DESKTOP)   */}
       {/* ==================================================================== */}
       {!selectedRoom && (
-        <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50">
+        <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/5">
           <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-2.5 lg:gap-4">
             <div className="flex items-center gap-2 lg:gap-3 min-w-0">
               <span className="inline-flex items-center gap-1 lg:gap-1.5 bg-[#EAB308] text-stone-950 text-[9px] lg:text-[10px] font-extrabold uppercase tracking-wider px-2 lg:px-2.5 py-0.5 rounded-full shrink-0 shadow-2xs">
-                <Tag className="w-2.5 h-2.5 lg:w-3 lg:h-3 stroke-[2.5]" />
-                <span className="hidden sm:inline">FUSION PASS+</span>
-                <span className="sm:hidden">PASS+</span>
+                {isBlackFridayActive ? (
+                  <Flame className="w-2.5 h-2.5 lg:w-3 lg:h-3 fill-stone-950 stroke-[2.5]" />
+                ) : (
+                  <Tag className="w-2.5 h-2.5 lg:w-3 lg:h-3 stroke-[2.5]" />
+                )}
+                <span className="hidden sm:inline">
+                  {isBlackFridayActive
+                    ? activeBlackCampaign?.campaignName
+                    : "FUSION PASS+"}
+                </span>
+                <span className="sm:hidden">
+                  {isBlackFridayActive ? "BLACK" : "PASS+"}
+                </span>
               </span>
               <p className="text-[11px] lg:text-xs font-bold text-[#FBBF24] truncate">
-                <span className="sm:hidden">Horas com até 41% de desconto</span>
+                <span className="sm:hidden">
+                  Horas com até {displayHeadlineDiscountPct}% de desconto
+                </span>
                 <span className="hidden sm:inline">
-                  Compre suas horas com até 41% de desconto
+                  {isBlackFridayActive
+                    ? `Especial ${activeBlackCampaign?.campaignName}: horários e pacotes com até ${displayHeadlineDiscountPct}% de desconto`
+                    : "Compre suas horas com até 41% de desconto"}
                 </span>
                 <span className="hidden md:inline">
                   {" "}
@@ -297,7 +444,12 @@ export default function AppPage() {
               >
                 Explorar Salas
                 {activeTab === "buscar" && (
-                  <span className="absolute bottom-0 inset-x-0 h-[3px] bg-[#C84B20] rounded-full" />
+                  <span
+                    className={cn(
+                      "absolute bottom-0 inset-x-0 h-[3px] rounded-full",
+                      isBlackFridayActive ? "bg-stone-950" : "bg-[#C84B20]",
+                    )}
+                  />
                 )}
               </button>
 
@@ -307,9 +459,16 @@ export default function AppPage() {
                 className="py-2.5 text-[15px] font-medium text-stone-700 hover:text-stone-900 whitespace-nowrap flex items-center gap-2 transition-colors cursor-pointer"
               >
                 <span>Planos Pass+</span>
-                <span className="text-[11px] font-bold text-white bg-gradient-to-r from-[#EA580C] to-[#F59E0B] px-2.5 py-0.5 rounded-full shadow-2xs">
-                  Até -41%
-                </span>
+                {isBlackFridayActive ? (
+                  <span className="text-[11px] font-black text-[#FBBF24] bg-stone-950 border border-amber-400/40 px-2.5 py-0.5 rounded-full shadow-2xs flex items-center gap-1">
+                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
+                    Até -{displayHeadlineDiscountPct}%
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-bold text-white bg-gradient-to-r from-[#EA580C] to-[#F59E0B] px-2.5 py-0.5 rounded-full shadow-2xs">
+                    Até -41%
+                  </span>
+                )}
               </button>
 
               <button
@@ -341,7 +500,12 @@ export default function AppPage() {
               <button
                 type="button"
                 onClick={() => router.push("/login")}
-                className="px-6 py-2.5 rounded-full bg-gradient-to-r from-[#C24116] to-[#DE5D2E] hover:from-[#A83812] hover:to-[#C84B20] text-white text-[15px] font-semibold whitespace-nowrap shadow-[0_6px_20px_rgba(191,75,36,0.3)] transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer"
+                className={cn(
+                  "px-6 py-2.5 rounded-full text-white text-[15px] font-semibold whitespace-nowrap transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer",
+                  isBlackFridayActive
+                    ? "bg-stone-950 hover:bg-stone-800 shadow-[0_6px_20px_rgba(12,10,9,0.28)]"
+                    : "bg-gradient-to-r from-[#C24116] to-[#DE5D2E] hover:from-[#A83812] hover:to-[#C84B20] shadow-[0_6px_20px_rgba(191,75,36,0.3)]",
+                )}
               >
                 Criar conta
               </button>
@@ -351,21 +515,30 @@ export default function AppPage() {
       )}
 
       {/* ==================================================================== */}
-      {/* 3. HERO BANNER DESKTOP (100% INTACTO)                                */}
+      {/* 3. HERO BANNER DESKTOP (USA /black.png NA BLACK E /hero.png NORMAL)  */}
       {/* ==================================================================== */}
       {!selectedRoom && activeTab === "buscar" && (
-        <section className="hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden bg-[#B83B10]">
+        <section
+          className={cn(
+            "hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden transition-colors duration-500",
+            isBlackFridayActive ? "bg-[#09090B]" : "bg-[#B83B10]",
+          )}
+        >
           <div className="absolute inset-y-0 right-0 w-[65%] z-0">
             <img
-              src="/hero.png"
+              src={heroImageSource}
               alt="Consultório Fusion Clinic"
-              className="w-full h-full object-cover object-[center_70%]"
+              onError={() => {
+                if (isBlackFridayActive) setBlackHeroImgError(true);
+              }}
+              className="w-full h-full object-cover object-[center_70%] transition-all duration-500"
             />
             <div
               className="absolute inset-0"
               style={{
-                background:
-                  "linear-gradient(90deg, #B83B10 0%, #B83B10 12%, rgba(184,59,16,0.90) 28%, rgba(184,59,16,0.22) 52%, rgba(184,59,16,0) 72%)",
+                background: isBlackFridayActive
+                  ? "linear-gradient(90deg, #09090B 0%, #09090B 15%, rgba(9,9,11,0.92) 32%, rgba(9,9,11,0.40) 56%, rgba(9,9,11,0.08) 78%)"
+                  : "linear-gradient(90deg, #B83B10 0%, #B83B10 12%, rgba(184,59,16,0.90) 28%, rgba(184,59,16,0.22) 52%, rgba(184,59,16,0) 72%)",
               }}
             />
           </div>
@@ -373,16 +546,32 @@ export default function AppPage() {
           <div
             className="absolute inset-x-0 bottom-0 h-28 z-10 pointer-events-none"
             style={{
-              background:
-                "linear-gradient(180deg, rgba(184,59,16,0) 0%, rgba(250,247,244,0.65) 65%, #FAF7F4 100%)",
+              background: isBlackFridayActive
+                ? "linear-gradient(180deg, rgba(9,9,11,0) 0%, rgba(250,247,244,0.72) 68%, #FAF7F4 100%)"
+                : "linear-gradient(180deg, rgba(184,59,16,0) 0%, rgba(250,247,244,0.65) 65%, #FAF7F4 100%)",
             }}
           />
 
           <div className="relative z-20 max-w-[1360px] mx-auto px-10 pt-16 pb-32 flex items-end justify-between gap-8">
-            <div className="max-w-[590px] space-y-4 text-white">
+            <div className="max-w-[610px] space-y-4 text-white">
+              {isBlackFridayActive && (
+                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/15 border border-amber-400/40 backdrop-blur-xs">
+                  <Flame className="w-3.5 h-3.5 text-[#FBBF24] fill-[#FBBF24]" />
+                  <span className="text-[11px] font-black uppercase tracking-widest text-[#FBBF24]">
+                    {activeBlackCampaign?.campaignName} • Horários e Planos em
+                    Oferta
+                  </span>
+                </div>
+              )}
+
               <h1 className="text-[44px] xl:text-[52px] font-extrabold tracking-tight text-white leading-[1.1]">
                 Consultórios prontos,{" "}
-                <span className="font-serif italic font-normal text-white">
+                <span
+                  className={cn(
+                    "font-serif italic font-normal",
+                    isBlackFridayActive ? "text-[#FBBF24]" : "text-white",
+                  )}
+                >
                   esperando por você.
                 </span>
               </h1>
@@ -395,45 +584,87 @@ export default function AppPage() {
             </div>
 
             <div className="shrink-0">
-              <button
-                type="button"
-                onClick={handleOpenFusionPassShowcase}
-                className="group relative w-[215px] rounded-[22px] bg-[#FAF7F4]/92 hover:bg-white backdrop-blur-md border border-white/85 p-4 text-left shadow-[0_14px_34px_rgba(28,25,23,0.14)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-[#BF4B24]">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[#BF4B24] animate-pulse" />
-                    Fusion Pass+
-                  </span>
-                  <span className="w-6 h-6 rounded-full bg-[#BF4B24]/12 text-[#BF4B24] flex items-center justify-center">
-                    <Percent className="w-3 h-3 stroke-[2.5]" />
-                  </span>
-                </div>
+              {isBlackFridayActive ? (
+                <button
+                  type="button"
+                  onClick={handleOpenFusionPassShowcase}
+                  className="group relative w-[225px] rounded-[22px] bg-stone-950/95 hover:bg-stone-900 backdrop-blur-md border border-amber-400/40 p-4 text-left shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-[#FBBF24]">
+                      <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
+                      {activeBlackCampaign?.campaignName || "BLACK FUSION"}
+                    </span>
+                    <span className="w-6 h-6 rounded-full bg-amber-400/15 text-[#FBBF24] flex items-center justify-center">
+                      <Percent className="w-3 h-3 stroke-[2.5]" />
+                    </span>
+                  </div>
 
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-2xl font-black tracking-tight text-stone-900 leading-none">
-                    Até 41%
-                  </span>
-                  <span className="text-xs font-extrabold uppercase text-[#BF4B24]">
-                    OFF
-                  </span>
-                </div>
-                <p className="text-[11px] font-medium text-stone-500 mt-0.5">
-                  no valor da hora clínica
-                </p>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black tracking-tight text-white leading-none">
+                      Até {displayHeadlineDiscountPct}%
+                    </span>
+                    <span className="text-xs font-extrabold uppercase text-[#FBBF24]">
+                      OFF
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-medium text-stone-400 mt-0.5">
+                    no valor da hora clínica
+                  </p>
 
-                <div className="mt-2.5 px-2.5 py-1.5 rounded-xl bg-white border border-stone-200/80 flex items-center justify-between text-[11px]">
-                  <span className="text-stone-400 line-through">R$ 45/h</span>
-                  <span className="font-bold text-stone-800">
-                    por <strong className="text-[#BF4B24]">R$ 26/h</strong>
-                  </span>
-                </div>
+                  <div className="mt-2.5 px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between text-[11px]">
+                    <span className="text-stone-400 line-through">R$ 45/h</span>
+                    <span className="font-bold text-white">
+                      por <strong className="text-[#FBBF24]">R$ 26/h</strong>
+                    </span>
+                  </div>
 
-                <span className="mt-2.5 inline-flex items-center gap-1 text-xs font-bold text-[#BF4B24] group-hover:translate-x-0.5 transition-transform">
-                  <span>Simular desconto</span>
-                  <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
-                </span>
-              </button>
+                  <span className="mt-2.5 inline-flex items-center gap-1 text-xs font-bold text-[#FBBF24] group-hover:translate-x-0.5 transition-transform">
+                    <span>Garantir desconto</span>
+                    <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
+                  </span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleOpenFusionPassShowcase}
+                  className="group relative w-[215px] rounded-[22px] bg-[#FAF7F4]/92 hover:bg-white backdrop-blur-md border border-white/85 p-4 text-left shadow-[0_14px_34px_rgba(28,25,23,0.14)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-[#BF4B24]">
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#BF4B24] animate-pulse" />
+                      Fusion Pass+
+                    </span>
+                    <span className="w-6 h-6 rounded-full bg-[#BF4B24]/12 text-[#BF4B24] flex items-center justify-center">
+                      <Percent className="w-3 h-3 stroke-[2.5]" />
+                    </span>
+                  </div>
+
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black tracking-tight text-stone-900 leading-none">
+                      Até 41%
+                    </span>
+                    <span className="text-xs font-extrabold uppercase text-[#BF4B24]">
+                      OFF
+                    </span>
+                  </div>
+                  <p className="text-[11px] font-medium text-stone-500 mt-0.5">
+                    no valor da hora clínica
+                  </p>
+
+                  <div className="mt-2.5 px-2.5 py-1.5 rounded-xl bg-white border border-stone-200/80 flex items-center justify-between text-[11px]">
+                    <span className="text-stone-400 line-through">R$ 45/h</span>
+                    <span className="font-bold text-stone-800">
+                      por <strong className="text-[#BF4B24]">R$ 26/h</strong>
+                    </span>
+                  </div>
+
+                  <span className="mt-2.5 inline-flex items-center gap-1 text-xs font-bold text-[#BF4B24] group-hover:translate-x-0.5 transition-transform">
+                    <span>Simular desconto</span>
+                    <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
+                  </span>
+                </button>
+              )}
             </div>
           </div>
         </section>
@@ -465,12 +696,11 @@ export default function AppPage() {
       </main>
 
       {/* ==================================================================== */}
-      {/* 5. RODAPÉ INSTITUCIONAL E JURÍDICO (RESPONSIVO + GOOGLE OAUTH READY) */}
+      {/* 5. RODAPÉ INSTITUCIONAL E JURÍDICO                                   */}
       {/* ==================================================================== */}
       {!selectedRoom && (
         <footer className="bg-white border-t border-stone-200/80 pb-24 lg:pb-0">
           <div className="max-w-[1360px] mx-auto px-5 lg:px-10 py-8 lg:py-10">
-            {/* Destaques operacionais (exibidos no Desktop) */}
             <div className="hidden lg:grid grid-cols-4 gap-8 pb-8 border-b border-stone-100">
               <div className="space-y-1.5">
                 <div className="flex items-center gap-2 text-stone-900 font-bold text-sm">
@@ -517,7 +747,6 @@ export default function AppPage() {
               </div>
             </div>
 
-            {/* Barra inferior com Copyright, CNPJ e Links Legais */}
             <div className="lg:pt-6 flex flex-col lg:flex-row items-center justify-between gap-4 text-xs text-stone-400">
               <div className="text-center lg:text-left space-y-0.5">
                 <p>
@@ -576,7 +805,7 @@ export default function AppPage() {
       )}
 
       {/* ==================================================================== */}
-      {/* 6. BARRA INFERIOR MOBILE ESTILO AIRBNB / BOOKING                     */}
+      {/* 6. BARRA INFERIOR MOBILE                                             */}
       {/* ==================================================================== */}
       {!selectedRoom && (
         <nav className="fixed inset-x-0 bottom-0 z-50 flex lg:hidden items-stretch justify-around border-t border-stone-200/90 bg-white/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_25px_rgba(28,25,23,0.06)]">
@@ -622,7 +851,9 @@ export default function AppPage() {
                           ? "font-bold text-[#BF4B24]"
                           : "font-medium text-stone-500",
                     )}
-                  />
+                  >
+                    {item.label}
+                  </span>
                 </button>
               );
             })}

@@ -19,14 +19,17 @@ import {
   ArrowLeftRight,
   Unlock,
   HelpCircle,
+  Flame,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
-interface FusionPassPromoPopupProps {
+export interface FusionPassPromoPopupProps {
   onSelectPlan?: (pkg?: any) => void;
   imageSrc?: string;
+  blackFridayImageSrc?: string;
+  forceBlackFriday?: boolean;
   suspendAutoOpen?: boolean;
   isSubscriber?: boolean;
   currentTier?: string | null;
@@ -76,6 +79,8 @@ function isReviewModalCurrentlyActive(): boolean {
 export function FusionPassPromoPopup({
   onSelectPlan,
   imageSrc = "/fusion-pass-popup.png",
+  blackFridayImageSrc = "/black.jpeg",
+  forceBlackFriday = false,
   suspendAutoOpen = false,
 }: FusionPassPromoPopupProps) {
   const router = useRouter();
@@ -86,6 +91,12 @@ export function FusionPassPromoPopup({
   const [isClosing, setIsClosing] = useState(false);
   const [step, setStep] = useState<"banner" | "plans" | "checkout">("banner");
   const [showRulesDetails, setShowRulesDetails] = useState(false);
+
+  const [isBlackFridayActive, setIsBlackFridayActive] = useState<boolean>(
+    forceBlackFriday || imageSrc === "/black.jpeg",
+  );
+  const [campaignTitle, setCampaignTitle] = useState<string>("BLACK FUSION");
+  const [bannerImgError, setBannerImgError] = useState<boolean>(false);
 
   const [packages, setPackages] = useState<any[]>([]);
   const [loadingPkgs, setLoadingPkgs] = useState(false);
@@ -116,7 +127,6 @@ export function FusionPassPromoPopup({
 
   useEffect(() => {
     suspendRef.current = suspendAutoOpen;
-    // Se uma avaliação pendente abriu na tela, fecha ou cancela imediatamente o timer do banner promocional
     if (suspendAutoOpen && timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -132,7 +142,6 @@ export function FusionPassPromoPopup({
 
   const openModal = useCallback(
     (initialStep: "banner" | "plans" = "banner", forceManual = false) => {
-      // Nunca abre automaticamente por cima do modal de avaliação
       if (
         !forceManual &&
         (suspendRef.current || isReviewModalCurrentlyActive())
@@ -180,7 +189,6 @@ export function FusionPassPromoPopup({
     }, 200);
   }, [currentUserId, getActiveStorageKey]);
 
-  // 1. Carrega sessão e pacotes disponíveis
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -194,16 +202,92 @@ export function FusionPassPromoPopup({
     async function initPopupData() {
       setLoadingPkgs(true);
       try {
-        const [{ data: sessionData }, { data: pkgsData }] = await Promise.all([
+        const [
+          { data: sessionData },
+          { data: pkgsData },
+          { data: couponsData },
+        ] = await Promise.all([
           supabase.auth.getSession(),
           supabase
             .from("packages")
             .select("id, tier, hours, price, active")
             .eq("active", true)
             .order("hours", { ascending: true }),
+          supabase
+            .from("coupons")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false }),
         ]);
 
         if (!isMounted) return;
+
+        if (forceBlackFriday || imageSrc === "/black.jpeg") {
+          setIsBlackFridayActive(true);
+          setCampaignTitle("BLACK FUSION");
+        } else if (couponsData && couponsData.length > 0) {
+          const now = new Date();
+          const todayIso = now.toISOString().slice(0, 10);
+
+          const activeCamp = couponsData.find((c: any) => {
+            if (c.valid_until && new Date(c.valid_until) < now) return false;
+            if (
+              c.max_uses &&
+              Number(c.current_uses || 0) >= Number(c.max_uses)
+            ) {
+              return false;
+            }
+
+            let rules = c.schedule_rules;
+            if (typeof rules === "string") {
+              try {
+                rules = JSON.parse(rules);
+              } catch {
+                rules = null;
+              }
+            }
+
+            if (
+              rules?.start_date &&
+              todayIso < String(rules.start_date).slice(0, 10)
+            ) {
+              return false;
+            }
+
+            const showOnCal =
+              typeof c.show_on_calendar === "boolean"
+                ? c.show_on_calendar
+                : Boolean(rules?.show_on_calendar);
+
+            const isCampaign =
+              Boolean(rules?.is_campaign) ||
+              Boolean(rules?.enabled) ||
+              showOnCal;
+
+            return isCampaign && showOnCal;
+          });
+
+          if (activeCamp) {
+            let parsedRules = activeCamp.schedule_rules;
+            if (typeof parsedRules === "string") {
+              try {
+                parsedRules = JSON.parse(parsedRules);
+              } catch {
+                parsedRules = null;
+              }
+            }
+            setIsBlackFridayActive(true);
+            setCampaignTitle(
+              activeCamp.campaign_name ||
+                parsedRules?.campaign_name ||
+                "BLACK FUSION",
+            );
+          } else {
+            setIsBlackFridayActive(false);
+          }
+        } else {
+          setIsBlackFridayActive(false);
+        }
 
         const sessionUser = sessionData?.session?.user || null;
         const uid = sessionUser?.id || null;
@@ -294,9 +378,8 @@ export function FusionPassPromoPopup({
       window.removeEventListener("open-fusion-pass", handleCustomOpen);
       authListener.subscription.unsubscribe();
     };
-  }, [supabase, openModal]);
+  }, [supabase, openModal, forceBlackFriday, imageSrc]);
 
-  // 2. Agenda a abertura automática SOMENTE quando não houver modal de avaliação ativo
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -335,7 +418,6 @@ export function FusionPassPromoPopup({
     };
   }, [suspendAutoOpen, currentUserId, getActiveStorageKey, openModal]);
 
-  // Polling automático quando o QR Code PIX da assinatura estiver aberto
   useEffect(() => {
     if (!isOpen || step !== "checkout" || !paymentId || !selectedPkg) return;
 
@@ -502,6 +584,14 @@ export function FusionPassPromoPopup({
       : checkoutRawPrice;
   const checkoutHourlyRate = checkoutTotalPrice / checkoutHours;
 
+  const resolvedBannerImage = bannerImgError
+    ? "/fusion-pass-popup.png"
+    : isBlackFridayActive
+      ? imageSrc !== "/fusion-pass-popup.png"
+        ? imageSrc
+        : blackFridayImageSrc
+      : imageSrc;
+
   return (
     <>
       <style jsx global>{`
@@ -531,7 +621,11 @@ export function FusionPassPromoPopup({
             step === "banner"
               ? "max-w-[355px] sm:max-w-[395px]"
               : "max-w-[390px] sm:max-w-[460px]"
-          } bg-white rounded-3xl shadow-2xl overflow-hidden transition-all duration-200 ${
+          } ${
+            step === "banner" && isBlackFridayActive
+              ? "bg-[#09090B] border border-amber-400/35"
+              : "bg-white"
+          } rounded-3xl shadow-2xl overflow-hidden transition-all duration-200 ${
             isClosing ? "scale-95 opacity-0" : "scale-100 opacity-100"
           }`}
         >
@@ -549,24 +643,50 @@ export function FusionPassPromoPopup({
             <div className="flex flex-col">
               <div
                 onClick={() => setStep("plans")}
-                className="relative w-full aspect-square bg-[#9A3C1D] cursor-pointer overflow-hidden group"
+                className={`relative w-full aspect-square cursor-pointer overflow-hidden group ${
+                  isBlackFridayActive ? "bg-[#09090B]" : "bg-[#9A3C1D]"
+                }`}
               >
                 <img
-                  src={imageSrc}
+                  src={resolvedBannerImage}
                   alt="Fusion Pass+ com até 41% de desconto"
+                  onError={() => setBannerImgError(true)}
                   className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.02]"
                 />
+
+                {isBlackFridayActive && (
+                  <div className="absolute top-3 left-3 z-20 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-stone-950/90 border border-amber-400/50 text-[#FBBF24] text-[10px] font-black uppercase tracking-wider shadow-lg">
+                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
+                    {campaignTitle}
+                  </div>
+                )}
               </div>
 
-              <div className="p-4 sm:p-5 bg-white space-y-3">
-                <div className="flex items-center justify-center gap-3 text-[11px] font-semibold text-stone-600">
+              <div
+                className={`p-4 sm:p-5 space-y-3 ${
+                  isBlackFridayActive
+                    ? "bg-[#09090B] text-white border-t border-white/10"
+                    : "bg-white"
+                }`}
+              >
+                <div
+                  className={`flex items-center justify-center gap-3 text-[11px] font-semibold ${
+                    isBlackFridayActive ? "text-stone-300" : "text-stone-600"
+                  }`}
+                >
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     Cancele quando quiser
                   </span>
-                  <span className="text-stone-300">•</span>
+                  <span
+                    className={
+                      isBlackFridayActive ? "text-stone-700" : "text-stone-300"
+                    }
+                  >
+                    •
+                  </span>
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     Use, doe ou negocie
                   </span>
                 </div>
@@ -574,16 +694,28 @@ export function FusionPassPromoPopup({
                 <button
                   type="button"
                   onClick={() => setStep("plans")}
-                  className="w-full h-11 sm:h-12 rounded-xl bg-[#BF4B24] hover:bg-[#a63f1d] text-white font-bold text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-[0.99] cursor-pointer"
+                  className={`w-full h-11 sm:h-12 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 shadow-sm transition-all active:scale-[0.99] cursor-pointer ${
+                    isBlackFridayActive
+                      ? "bg-[#FBBF24] hover:bg-amber-400 text-stone-950 font-black"
+                      : "bg-[#BF4B24] hover:bg-[#a63f1d] text-white"
+                  }`}
                 >
-                  <span>Conhecer os planos</span>
+                  <span>
+                    {isBlackFridayActive
+                      ? "Aproveitar Oferta Black"
+                      : "Conhecer os planos"}
+                  </span>
                   <ChevronRight className="w-4 h-4 stroke-[2.5]" />
                 </button>
 
                 <button
                   type="button"
                   onClick={handleClose}
-                  className="w-full py-1 text-xs font-semibold text-stone-400 hover:text-stone-600 transition-colors cursor-pointer"
+                  className={`w-full py-1 text-xs font-semibold transition-colors cursor-pointer ${
+                    isBlackFridayActive
+                      ? "text-stone-400 hover:text-white"
+                      : "text-stone-400 hover:text-stone-600"
+                  }`}
                 >
                   Continuar navegando
                 </button>
@@ -603,9 +735,17 @@ export function FusionPassPromoPopup({
                   Voltar
                 </button>
 
-                <h3 className="text-base sm:text-lg font-bold text-stone-900">
-                  Planos Fusion Pass+
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-base sm:text-lg font-bold text-stone-900">
+                    Planos Fusion Pass+
+                  </h3>
+                  {isBlackFridayActive && (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-stone-950 text-[#FBBF24] text-[10px] font-black uppercase">
+                      <Flame className="w-2.5 h-2.5 fill-[#FBBF24]" />
+                      {campaignTitle}
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-stone-500">
                   Escolha a categoria de sala e o pacote de horas:
                 </p>
