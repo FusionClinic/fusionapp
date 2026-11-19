@@ -207,7 +207,6 @@ export function FusionPassPromoPopup({
     }, 200);
   }, [currentUserId, activeCampaign?.id, getActiveStorageKey]);
 
-  // Ao clicar no Pop-up da Black Friday: fecha o pop-up e aciona a pesquisa de salas da campanha
   const handleExploreCampaignRooms = useCallback(() => {
     try {
       const storageKey = getActiveStorageKey(
@@ -231,7 +230,6 @@ export function FusionPassPromoPopup({
     }, 180);
   }, [currentUserId, activeCampaign?.id, getActiveStorageKey]);
 
-  // 1. Carrega sessão, pacotes e verifica se há campanha de horários ativa
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -424,7 +422,6 @@ export function FusionPassPromoPopup({
     };
   }, [supabase, openModal]);
 
-  // 2. Agenda a abertura automática do Pop-up (1.5s quando há campanha Black ativa)
   useEffect(() => {
     if (
       typeof window !== "undefined" &&
@@ -473,7 +470,6 @@ export function FusionPassPromoPopup({
     openModal,
   ]);
 
-  // Polling automático quando o QR Code PIX da assinatura estiver aberto
   useEffect(() => {
     if (!isOpen || step !== "checkout" || !paymentId || !selectedPkg) return;
 
@@ -662,7 +658,6 @@ export function FusionPassPromoPopup({
         }
       `}</style>
 
-      {/* Modal de Regulamento da Campanha */}
       <CampaignRulesModal
         isOpen={isCampaignRulesOpen}
         onClose={() => setIsCampaignRulesOpen(false)}
@@ -719,7 +714,6 @@ export function FusionPassPromoPopup({
 
           {step === "banner" && (
             <div className="flex flex-col">
-              {/* Quando há campanha ativa, usa /black.jpeg e ao clicar abre a pesquisa de salas da campanha */}
               <div
                 onClick={() => {
                   if (activeCampaign) {
@@ -747,7 +741,6 @@ export function FusionPassPromoPopup({
               </div>
 
               {activeCampaign ? (
-                /* RODAPÉ EXCLUSIVO DO POP-UP BLACK FRIDAY (APENAS HORÁRIOS E SALAS DA CAMPANHA) */
                 <div className="p-4 sm:p-5 bg-[#09090B] text-white space-y-3 border-t border-white/10">
                   <div className="flex items-center justify-center gap-3 text-[11px] font-semibold text-stone-300">
                     <span className="flex items-center gap-1">
@@ -806,7 +799,6 @@ export function FusionPassPromoPopup({
                   </div>
                 </div>
               ) : (
-                /* RODAPÉ PADRÃO DO FUSION PASS+ (QUANDO NÃO HÁ CAMPANHA BLACK ATIVA) */
                 <div className="p-4 sm:p-5 bg-white space-y-3">
                   <div className="flex items-center justify-center gap-3 text-[11px] font-semibold text-stone-600">
                     <span className="flex items-center gap-1">

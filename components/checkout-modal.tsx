@@ -152,7 +152,6 @@ export function CheckoutModal({
   const [copied, setCopied] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
-  // Estados de confirmação obrigatória do regulamento da campanha
   const [acceptedCampaignRules, setAcceptedCampaignRules] = useState(false);
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
 
@@ -189,7 +188,6 @@ export function CheckoutModal({
     setCardData((prev) => ({ ...prev, isThirdParty: !isMyCard }));
   }, [isMyCard]);
 
-  // Recupera o cartão guardado ao abrir o modal
   useEffect(() => {
     if (isOpen) {
       const fetchSavedCard = async () => {
@@ -212,7 +210,6 @@ export function CheckoutModal({
     }
   }, [isOpen, supabase]);
 
-  // Reseta os estados quando o modal abre
   useEffect(() => {
     if (isOpen) {
       setStep("confirm");
@@ -248,7 +245,6 @@ export function CheckoutModal({
     }
   }, [pixQrCode, pixCopyPaste, activeBookingId]);
 
-  // MOTOR DE BUSCA ATIVA E RECONCILIAÇÃO
   useEffect(() => {
     if (step !== "pix" || !activeBookingId) return;
     let isChecking = false;
@@ -409,7 +405,6 @@ export function CheckoutModal({
 
   const isMoneyMode = paymentMethod === "pix" || paymentMethod === "card";
 
-  // Verifica se há regulamento da campanha (automática ou cupom manual) exigindo aceite
   const appliedCouponRulesText = appliedCoupon
     ? extractCampaignRulesText(appliedCoupon)
     : null;
@@ -549,7 +544,6 @@ export function CheckoutModal({
 
   return (
     <>
-      {/* Modal de leitura do regulamento da campanha */}
       <CampaignRulesModal
         isOpen={isRulesModalOpen}
         onClose={() => setIsRulesModalOpen(false)}

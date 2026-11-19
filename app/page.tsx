@@ -482,7 +482,6 @@ export default function AppPage() {
           : "bg-[#FAF7F4] text-stone-900",
       )}
     >
-      {/* Modal de Regulamento da Campanha */}
       <CampaignRulesModal
         isOpen={isCampaignRulesOpen}
         onClose={() => setIsCampaignRulesOpen(false)}
@@ -491,7 +490,6 @@ export default function AppPage() {
         badgeText={campaignDiscountLabel}
       />
 
-      {/* Ponte de alinhamento exclusiva para o Desktop (lg:) */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -517,7 +515,6 @@ export default function AppPage() {
         }}
       />
 
-      {/* Pop-up Inteligente */}
       <FusionPassPromoPopup />
 
       {/* 1. TOP PROMO BAR PRETA */}

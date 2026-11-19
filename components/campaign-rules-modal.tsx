@@ -101,7 +101,6 @@ export function CampaignRulesModal({
               return <div key={idx} className="h-1" />;
             }
 
-            // Detecta itens numerados: "1. Oferta: texto..."
             const numberedMatch = line.match(/^(\d+)\.\s*(.*)$/);
             if (numberedMatch) {
               const itemNumber = numberedMatch[1];
@@ -133,7 +132,6 @@ export function CampaignRulesModal({
               );
             }
 
-            // Detecta subtítulos curtos (ex: "BLACK FUSION 2026" ou "Regulamento da Campanha")
             const isShortHeading =
               line.length <= 48 && !line.endsWith(".") && !line.includes(":");
             if (isShortHeading) {
@@ -147,7 +145,6 @@ export function CampaignRulesModal({
               );
             }
 
-            // Parágrafos gerais (ex: cláusula final de ciência)
             return (
               <p
                 key={idx}

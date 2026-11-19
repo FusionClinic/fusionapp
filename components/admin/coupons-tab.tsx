@@ -958,9 +958,6 @@ export function AdminCouponsTab() {
       </div>
     );
 
-  // ==========================================================================
-  // FORMULÁRIO: CRIAR / EDITAR CUPOM DE CÓDIGO
-  // ==========================================================================
   if (view === "create_coupon") {
     return (
       <div className="p-6 lg:p-8 max-w-4xl mx-auto animate-in fade-in pb-32">
@@ -1266,9 +1263,6 @@ export function AdminCouponsTab() {
     );
   }
 
-  // ==========================================================================
-  // FORMULÁRIO: CRIAR / EDITAR CAMPANHA DE HORÁRIOS (COM REGULAMENTO)
-  // ==========================================================================
   if (view === "create_campaign") {
     const previewBadge = formData.discount_value
       ? formData.type === "percentage"
@@ -1720,8 +1714,8 @@ export function AdminCouponsTab() {
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Cole as regras numeradas (1., 2., 3...). Elas aparecerão no
-                    botão “Ver regulamento” do pop-up, da vitrine, da sala e
-                    exigirão confirmação obrigatória no checkout.
+                    botão &ldquo;Ver regulamento&rdquo; do pop-up, da vitrine,
+                    da sala e exigirão confirmação obrigatória no checkout.
                   </p>
                 </div>
 
@@ -1769,9 +1763,6 @@ export function AdminCouponsTab() {
     );
   }
 
-  // ==========================================================================
-  // VISÃO DETALHADA DO RAIO-X (CUPOM OU CAMPANHA COMPLETA COM SALAS E REGRAS)
-  // ==========================================================================
   if (view === "details" && selectedRecord) {
     const rules = extractCouponRules(selectedRecord);
     const creationDate = selectedRecord.created_at
@@ -1898,7 +1889,6 @@ export function AdminCouponsTab() {
           </div>
         </div>
 
-        {/* BLOCO DO REGULAMENTO CADASTRADO NA CAMPANHA */}
         {rules.is_campaign && rules.rules_text && (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 mb-6">
             <div className="flex items-center justify-between gap-3 mb-3">
@@ -2054,9 +2044,6 @@ export function AdminCouponsTab() {
     );
   }
 
-  // ==========================================================================
-  // VISÃO PRINCIPAL: SEPARAÇÃO ENTRE CUPONS E CAMPANHAS DE HORÁRIO
-  // ==========================================================================
   return (
     <div className="p-6 lg:p-8 max-w-7xl mx-auto animate-in fade-in pb-32 font-sans">
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 mb-6">

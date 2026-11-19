@@ -155,7 +155,6 @@ function DashboardContent() {
   const [isCohost, setIsCohost] = useState(false);
   const [logoError, setLogoError] = useState(false);
 
-  // Estados da Campanha Black Friday (para o profissional logado)
   const [activeBlackCampaign, setActiveBlackCampaign] =
     useState<ActiveBlackCampaignInfo | null>(null);
   const [campaignRooms, setCampaignRooms] = useState<any[]>([]);
@@ -192,7 +191,6 @@ function DashboardContent() {
     masterCredits: 0,
   });
 
-  // Busca campanhas de horário ativas e as salas participantes
   useEffect(() => {
     let isMounted = true;
 
@@ -351,7 +349,6 @@ function DashboardContent() {
     };
   }, [supabase]);
 
-  // Escuta o clique no Pop-up da Black Friday (ou no botão mobile) para abrir a tela preta de salas participantes
   const handleActivateCampaignRoomsSearch = useCallback(() => {
     setSelectedRoom(null);
     setActiveTab("search");
@@ -796,7 +793,6 @@ function DashboardContent() {
         return (
           <div ref={campaignSectionRef}>
             {showOnlyCampaignRooms && isBlackFridayActive ? (
-              /* PÁGINA 100% PRETA DAS SALAS DA CAMPANHA (PARA PROFISSIONAL LOGADO) */
               <div className="w-full min-h-[80vh] bg-[#050507] text-white">
                 <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-10 pt-5 sm:pt-8 pb-12 animate-in fade-in duration-300">
                   <div className="bg-[#0D0D11] text-white rounded-3xl p-5 sm:p-7 border border-amber-400/35 shadow-[0_20px_50px_rgba(0,0,0,0.85)] mb-7">
@@ -1051,7 +1047,6 @@ function DashboardContent() {
           : "bg-[#FAF7F4] text-stone-900"
       }`}
     >
-      {/* Modal de Regulamento da Campanha */}
       <CampaignRulesModal
         isOpen={isCampaignRulesOpen}
         onClose={() => setIsCampaignRulesOpen(false)}
@@ -1104,7 +1099,7 @@ function DashboardContent() {
         </>
       )}
 
-      {/* 1. TOP BAR DINÂMICA (PRIORIZA A CAMPANHA BLACK QUANDO ATIVA) */}
+      {/* 1. TOP BAR DINÂMICA */}
       {!selectedRoom && !isDoorScanSession && (
         <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/10">
           <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-2.5 lg:gap-4">
@@ -1388,7 +1383,7 @@ function DashboardContent() {
         </header>
       )}
 
-      {/* 3. HERO BANNER DESKTOP (FICA PRETO NA BLACK COM A FOTO DO CONSULTÓRIO /hero.png) */}
+      {/* 3. HERO BANNER DESKTOP */}
       {!selectedRoom && activeTab === "search" && !showOnlyCampaignRooms && (
         <section
           className={`hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden transition-colors duration-500 ${
