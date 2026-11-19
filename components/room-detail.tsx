@@ -1,3438 +1,3828 @@
-// components/room-detail.tsx
+// components/search-tab.tsx
 "use client";
 
-import { useEffect, useState, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import Image from "next/image";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
-import {
-  sendBookingNotificationEmails,
-  sendPaymentNotificationEmails,
-} from "@/app/actions/send-email";
-import {
-  computeWalletBalancesFIFO,
-  selectCreditTierForBooking,
-  resolveCreditHourlyValueBRL,
-  normalizeCreditTier,
-} from "@/utils/wallet-ledger";
-import {
-  CampaignRulesModal,
-  extractCampaignRulesText,
-} from "@/components/campaign-rules-modal";
+import { useToast } from "@/hooks/use-toast";
+import { useMobileBack } from "@/hooks/use-mobile-back";
+import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import {
-  format,
-  addMonths,
-  isSameDay,
-  startOfToday,
-  startOfMonth,
-  endOfMonth,
-  startOfWeek,
-  endOfWeek,
-  eachDayOfInterval,
-  isBefore,
-  isSameMonth,
-  parseISO,
-} from "date-fns";
-import {
-  ArrowLeft,
-  Heart,
-  MapPin,
-  Users,
+  Search,
   Star,
-  Wifi,
-  Monitor,
-  Coffee,
-  Wind,
-  Car,
-  ShieldCheck,
-  Calendar as CalendarIcon,
-  AlertCircle,
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  Printer,
+  MapPin,
+  Heart,
   Loader2,
-  Grid,
-  Share,
-  Shield,
-  MessageSquare,
-  Lock,
-  Unlock,
-  User,
-  Check,
-  BadgeCheck,
-  Clock,
-  Building2,
-  ArrowRight,
-  TrendingDown,
-  Tag,
-  CalendarClock,
-  ArrowLeftRight,
   Sparkles,
+  Navigation,
+  Shield,
+  Crown,
+  CheckCircle2,
+  ArrowLeft,
+  ArrowRight,
+  ChevronRight,
+  Building2,
+  Stethoscope,
+  Wallet,
+  Compass,
+  BriefcaseMedical,
+  Sofa,
+  Activity,
+  X,
+  Clock,
+  RefreshCw,
+  XCircle,
+  History,
+  TrendingUp,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Calendar as CalendarIcon,
+  BadgeCheck,
+  Tag,
+  SlidersHorizontal,
+  Mic,
+  MicOff,
+  SendHorizontal,
+  MessageSquareText,
+  UserCheck,
+  AlertCircle,
   Flame,
-  ScrollText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useToast } from "@/hooks/use-toast";
+import { Badge } from "@/components/ui/badge";
 import {
-  CheckoutModal,
-  CheckoutSummary,
-  CardData,
-  CampaignCheckoutInfo,
-} from "@/components/checkout-modal";
-import { useMobileBack } from "@/hooks/use-mobile-back";
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import {
+  FusionPassModal,
+  BASE_HOURLY_RATES,
+  PassTier,
+  normalizePassTier,
+} from "@/components/fusion-pass-modal";
+import { computeWalletBalancesFIFO } from "@/utils/wallet-ledger";
 
-const AMENITIES_LIST = [
-  { id: "wifi", label: "Wi-Fi de alta velocidade", icon: Wifi },
-  { id: "tv", label: 'Smart TV 65" com HDMI', icon: Monitor },
-  { id: "coffee", label: "Café e água cortesia", icon: Coffee },
-  { id: "ac", label: "Ambiente climatizado", icon: Wind },
-  { id: "printer", label: "Impressora disponível", icon: Printer },
-  { id: "parking", label: "Estacionamento no local", icon: Car },
-  { id: "security", label: "Portaria e segurança", icon: ShieldCheck },
+export type RentalType = "hora" | "turno" | "fixo";
+
+export interface Room {
+  id: string;
+  name: string;
+  description?: string;
+  category: string;
+  tier: "start" | "vip" | "master";
+  priceLabel: string;
+  filterPrice: number;
+  hourlyPriceNumber: number;
+  shiftPriceNumber: number | null;
+  monthlyPriceNumber: number | null;
+  image: string;
+  rating: number;
+  reviews_count: number;
+  distance: string;
+  distanceKm?: number;
+  modalities: string[];
+  isPartner: boolean;
+  locationString: string;
+  rawAddress?: any;
+  host_id?: string;
+  specialty?: string;
+  selectedModality?: RentalType;
+  preselectedDate?: string;
+  preselectedSlot?: string;
+}
+
+interface ComparisonBlock {
+  title: string;
+  subtitle?: string;
+  bullets: string[];
+}
+
+interface RoomAvailabilityMatch {
+  roomId: string;
+  roomName?: string;
+  specialty?: string;
+  tier?: "start" | "vip" | "master";
+  neighborhood?: string;
+  city?: string;
+  hourlyPrice?: number;
+  passHourlyPrice?: number;
+  shiftPrice?: number | null;
+  monthlyPrice?: number | null;
+  score: number;
+  exactSlotAvailable: boolean;
+  consecutiveSlotsAvailable?: boolean;
+  requestedSlotLabel: string | null;
+  availableSlots: string[];
+  matchReason: string;
+  aiPitch?: string;
+}
+
+interface AIConversationExchange {
+  id: string;
+  userQuery: string;
+  intentType:
+    | "room_search"
+    | "comparison_question"
+    | "financial_simulation"
+    | "routine_diagnosis"
+    | "profile_guidance";
+  headline: string;
+  comparisonBlocks: ComparisonBlock[];
+  recommendationSummary: string;
+  closingQuestion: string;
+  followUpSuggestions: string[];
+  suggestedCta:
+    "none" | "open_pass_modal" | "switch_to_turno" | "complete_profile";
+  recommendedRooms: RoomAvailabilityMatch[];
+  targetDateISO: string | null;
+}
+
+function renderFormattedText(text?: string) {
+  if (!text) return null;
+  const parts = text.split(/(\*\*.*?\*\*)/g);
+  return parts.map((part, idx) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return (
+        <strong key={idx} className="font-extrabold text-[#BF4B24]">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    return <span key={idx}>{part}</span>;
+  });
+}
+
+const calculateDistance = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+) => {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+const CATEGORIES = [
+  {
+    id: "Todas as Salas",
+    shortLabel: "Todas",
+    icon: Building2,
+    desc: "Visualizar todas as modalidades",
+  },
+  {
+    id: "Psicologia",
+    shortLabel: "Psicologia",
+    icon: Sofa,
+    desc: "Divãs e poltronas confortáveis",
+  },
+  {
+    id: "Nutrição & Clínica",
+    shortLabel: "Nutrição & Clínica",
+    icon: Activity,
+    desc: "Mesa, balança e bioimpedância",
+  },
+  {
+    id: "Odontologia",
+    shortLabel: "Odontologia",
+    icon: Stethoscope,
+    desc: "Cadeira odontológica completa",
+  },
+  {
+    id: "Estética",
+    shortLabel: "Estética",
+    icon: Sparkles,
+    desc: "Maca e lavatório",
+  },
+  {
+    id: "Multiuso",
+    shortLabel: "Multiuso",
+    icon: BriefcaseMedical,
+    desc: "Consultório clínico padrão",
+  },
 ];
 
-export interface RoomDetailProps {
-  roomId?: string | any;
-  room?: any;
-  onBack: () => void;
+export function SearchTab({
+  onOpenRoom,
+  onNavigateToProfile,
+  isDashboard = false,
+}: {
+  onOpenRoom?: (room: Room) => void;
   onNavigateToProfile?: () => void;
-  initialModality?: "hora" | "turno" | "fixo";
-  onNavigateToChat?: () => void;
-  onOpenFusionPass?: (tier?: string, hours?: number | null) => void;
-}
-
-const normalizeSlotLabel = (h: string): string => {
-  if (!h || typeof h !== "string") return "";
-  const parts = h.split("-");
-  const rawStart = parts[0].trim().replace("h", ":");
-  const hourNumber = parseInt(rawStart.split(":")[0], 10);
-  if (isNaN(hourNumber)) return "";
-  const formattedHour = hourNumber.toString().padStart(2, "0");
-  return `${formattedHour}:00 - ${formattedHour}:50`;
-};
-
-const parseSlotDateHelper = (dateStr: string, timeStr: string): Date => {
-  const cleanTime = timeStr.trim().replace("h", ":");
-  const parts = cleanTime.split(":");
-  const hh = parseInt(parts[0], 10);
-  const mm = parts[1] ? parseInt(parts[1].substring(0, 2), 10) : 0;
-  const [year, month, day] = dateStr.split("-").map(Number);
-  const dateObj = new Date(year, month - 1, day, hh, mm, 0);
-  if (isNaN(dateObj.getTime())) {
-    throw new Error(`Data inválida gerada: ${timeStr} em ${dateStr}`);
-  }
-  return dateObj;
-};
-
-/**
- * Avalia se uma hora específica (ex: 8 para 08:00 - 08:50) em uma data (YYYY-MM-DD)
- * está bloqueada por algum contrato ativo/pendente da sala.
- */
-function isDateAndHourBlockedByContract(
-  dateStr: string,
-  dayOfWeek: number,
-  hourNum: number,
-  contracts: any[],
-): boolean {
-  if (!Array.isArray(contracts) || contracts.length === 0) return false;
-
-  for (const c of contracts) {
-    if (!c || c.status === "cancelled" || c.status === "expired") continue;
-
-    if (c.contract_type === "monthly_exclusive" && c.allow_sublease === true) {
-      continue;
-    }
-
-    const startIso = c.start_date ? String(c.start_date).slice(0, 10) : null;
-    const endIso = c.end_date ? String(c.end_date).slice(0, 10) : null;
-    if (startIso && dateStr < startIso) continue;
-    if (endIso && dateStr > endIso) continue;
-
-    if (c.contract_type === "monthly_exclusive" && !c.allow_sublease) {
-      return true;
-    }
-
-    let sched = c.schedule_config;
-    if (typeof sched === "string") {
-      try {
-        sched = JSON.parse(sched);
-      } catch {
-        sched = {};
-      }
-    }
-    if (!sched || typeof sched !== "object") continue;
-
-    if (Array.isArray(sched.scheduleRules) && sched.scheduleRules.length > 0) {
-      const matchedRule = sched.scheduleRules.some((rule: any) => {
-        if (Number(rule.dayOfWeek) !== dayOfWeek) return false;
-        const sH = Number(rule.startHour ?? 8);
-        const eH = Number(rule.endHour ?? 20);
-        return hourNum >= sH && hourNum < eH;
-      });
-      if (matchedRule) return true;
-      continue;
-    }
-
-    if (sched.day_hours && typeof sched.day_hours === "object") {
-      const dayArr = sched.day_hours[String(dayOfWeek)];
-      if (Array.isArray(dayArr) && dayArr.length > 0) {
-        if (dayArr.map(Number).includes(hourNum)) return true;
-        continue;
-      }
-    }
-
-    const legacyDays = Array.isArray(sched.daysOfWeek)
-      ? sched.daysOfWeek.map(Number)
-      : [];
-    if (legacyDays.includes(dayOfWeek)) {
-      const sH = Number(sched.startHour ?? 8);
-      const eH = Number(sched.endHour ?? 20);
-      if (hourNum >= sH && hourNum < eH) return true;
-    }
-  }
-
-  return false;
-}
-
-export function RoomDetail(props: RoomDetailProps) {
-  const {
-    onBack,
-    onNavigateToProfile,
-    initialModality = "hora",
-    onNavigateToChat,
-    onOpenFusionPass,
-  } = props;
-
-  const rawInput = props.roomId || props.room;
-  const targetRoomId: string | null =
-    typeof rawInput === "object" ? rawInput?.id || null : rawInput || null;
-  const preselectedDateStr: string | null =
-    typeof props.room?.preselectedDate === "string"
-      ? props.room.preselectedDate
-      : null;
-  const preselectedSlotStr: string | null =
-    typeof props.room?.preselectedSlot === "string"
-      ? props.room.preselectedSlot
-      : null;
-
+  isDashboard?: boolean;
+}) {
+  const pathname = usePathname();
   const router = useRouter();
   const [supabase] = useState(() => createClient());
   const { toast } = useToast();
+  const isPublic = pathname === "/" && !isDashboard;
+  const canUseAIConcierge = !isPublic;
 
-  const today = useMemo(() => startOfToday(), []);
-
-  const initialTargetDate = useMemo(() => {
-    if (preselectedDateStr) {
-      const parsed = new Date(`${preselectedDateStr}T12:00:00`);
-      if (
-        !isNaN(parsed.getTime()) &&
-        (!isBefore(parsed, today) || isSameDay(parsed, today))
-      ) {
-        return parsed;
-      }
-    }
-    return today;
-  }, [preselectedDateStr, today]);
-
+  const [isPortalReady, setIsPortalReady] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [roomData, setRoomData] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<"hora" | "turno" | "fixo">("hora");
+  const [logoError, setLogoError] = useState(false);
+  const [dbRooms, setDbRooms] = useState<Room[]>([]);
 
-  const [selectedDate, setSelectedDate] = useState<Date>(initialTargetDate);
-  const [selectedSlots, setSelectedSlots] = useState<string[]>([]);
-  const [currentMonthView, setCurrentMonthView] = useState<Date>(
-    startOfMonth(initialTargetDate),
-  );
-
-  const [roomCampaigns, setRoomCampaigns] = useState<any[]>([]);
-  const [rulesModalData, setRulesModalData] = useState<{
+  // Campanha Black Friday ativa (para deixar somente o header mobile preto e oferecer filtro ao usuário logado)
+  const [activeBlackCampaign, setActiveBlackCampaign] = useState<{
+    id: string;
     name: string;
-    rulesText: string;
-    badgeText?: string | null;
+    discountLabel: string;
+    roomsCount: number;
   } | null>(null);
 
-  const hasAppliedPreselectedSlotRef = useRef<boolean>(false);
-  const bookingConfirmedRef = useRef<boolean>(false);
-  const bookingSectionRef = useRef<HTMLDivElement>(null);
-  const fusionPassCardRef = useRef<HTMLDivElement>(null);
-  const checkoutSummaryRef = useRef<any>(null);
-  const lightboxRef = useRef<HTMLDivElement>(null);
+  const [profile, setProfile] = useState<{
+    name: string;
+    balance: number;
+    specialty: string | null;
+    isComplete: boolean;
+    completionPct: number;
+    missingFields: string[];
+  }>({
+    name: "",
+    balance: 0,
+    specialty: null,
+    isComplete: true,
+    completionPct: 100,
+    missingFields: [],
+  });
 
-  const [roomBookings, setRoomBookings] = useState<any[]>([]);
-  const [roomContracts, setRoomContracts] = useState<any[]>([]);
-  const [highlightSchedule, setHighlightSchedule] = useState(false);
-
-  const [selectedShift, setSelectedShift] = useState<
-    "morning" | "afternoon" | "night" | null
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+  const [pendingFilters, setPendingFilters] = useState({
+    city: "Qualquer lugar",
+    date: undefined as Date | undefined,
+    time: "",
+    modality: "hora" as RentalType,
+    category: "Todas as Salas",
+  });
+  const [appliedFilters, setAppliedFilters] = useState(pendingFilters);
+  const [activeTier, setActiveTier] = useState<
+    "all" | "start" | "vip" | "master"
+  >("all");
+  const [hasSearched, setHasSearched] = useState(false);
+  const [activeSearchTab, setActiveSearchTab] = useState<
+    "onde" | "quando" | "oque" | null
   >(null);
-  const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+  const [activeMobileTab, setActiveMobileTab] = useState<
+    "onde" | "quando" | "como" | "oque"
+  >("onde");
+  const [usingLocation, setUsingLocation] = useState(false);
+  const [userLocation, setUserLocation] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
 
-  const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
-  const [checkoutSummary, setCheckoutSummary] =
-    useState<CheckoutSummary | null>(null);
-  const [pixQrCode, setPixQrCode] = useState<string | null>(null);
-  const [pixCopyPaste, setPixCopyPaste] = useState<string | null>(null);
-  const [activeBookingId, setActiveBookingId] = useState<string | null>(null);
-
-  const [isFavorited, setIsFavorited] = useState(false);
-  const [isFavoriteLoading, setIsFavoriteLoading] = useState(false);
-  const [isSharing, setIsSharing] = useState(false);
-  const [isAllPhotosOpen, setIsAllPhotosOpen] = useState(false);
-  const [isLightboxOpen, setIsLightboxOpen] = useState(false);
-  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
-
-  const [reviews, setReviews] = useState<any[]>([]);
-  const [loadingReviews, setLoadingReviews] = useState(true);
-  const [reviewFilter, setReviewFilter] = useState<number>(0);
-
-  const [packages, setPackages] = useState<any[]>([]);
-  const [selectedPkgHours, setSelectedPkgHours] = useState<number | null>(null);
-  const [isPassDetailsExpanded, setIsPassDetailsExpanded] = useState(false);
-  const [showProfileModal, setShowProfileModal] = useState(false);
-  const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
-
-  const fetchRoomBookings = useCallback(async () => {
-    if (!roomData?.id) return;
-    try {
-      const res = await fetch(
-        `/api/bookings/calculate?roomId=${roomData.id}&_t=${Date.now()}`,
-        { cache: "no-store" },
-      );
-      if (res.ok) {
-        const json = await res.json();
-        if (Array.isArray(json.bookings)) {
-          setRoomBookings(json.bookings);
-        }
-        if (Array.isArray(json.contracts)) {
-          setRoomContracts(json.contracts);
-          return;
-        }
-      }
-    } catch (e) {
-      console.error("Fallback para busca direta de reservas:", e);
-    }
-
-    const [bookingsRes, contractsRes] = await Promise.all([
-      supabase
-        .from("bookings")
-        .select(
-          "id, start_time, end_time, status, created_at, asaas_payment_id, user_id, contract_id, booking_origin",
-        )
-        .eq("room_id", roomData.id)
-        .neq("status", "cancelled"),
-      supabase
-        .from("room_contracts")
-        .select(
-          "id, room_id, specialist_id, specialist_name, contract_type, status, start_date, end_date, allow_sublease, schedule_config",
-        )
-        .eq("room_id", roomData.id)
-        .in("status", ["active", "pending_signature"]),
-    ]);
-    if (!bookingsRes.error && bookingsRes.data) {
-      setRoomBookings(bookingsRes.data);
-    }
-    if (!contractsRes.error && contractsRes.data) {
-      setRoomContracts(contractsRes.data);
-    }
-  }, [roomData?.id, supabase]);
-
-  const handleCheckoutClose = useCallback(async () => {
-    setIsCheckoutOpen(false);
-    if (bookingConfirmedRef.current) {
-      setCheckoutSummary(null);
-      setSelectedSlots([]);
-      setPixQrCode(null);
-      setPixCopyPaste(null);
-      setActiveBookingId(null);
-      await fetchRoomBookings();
-      return;
-    }
-
-    const summary = checkoutSummaryRef.current;
-    if (summary && summary.lockIds) {
-      const lockIds = summary.lockIds;
-      const supabaseClient = createClient();
-      const { data: checkBookings } = await supabaseClient
-        .from("bookings")
-        .select("id, status, asaas_payment_id")
-        .in("id", lockIds);
-
-      const pendingIds =
-        checkBookings
-          ?.filter(
-            (b: any) => b.status === "pending_payment" && !b.asaas_payment_id,
-          )
-          .map((b: any) => b.id) || [];
-
-      if (pendingIds.length > 0) {
-        setRoomBookings((prevBookings: any[]) =>
-          prevBookings.filter((b: any) => !pendingIds.includes(b.id)),
-        );
-        await supabaseClient.from("bookings").delete().in("id", pendingIds);
-      }
-    }
-    setCheckoutSummary(null);
-    await fetchRoomBookings();
-  }, [fetchRoomBookings]);
-
-  useMobileBack(isCheckoutOpen, handleCheckoutClose, "checkout-modal");
-  useMobileBack(
-    isAllPhotosOpen,
-    () => setIsAllPhotosOpen(false),
-    "galeria-fotos",
+  // Estados da Página Dedicada do Concierge IA
+  const [isAISearchExpanded, setIsAISearchExpanded] = useState(false);
+  const [aiQuery, setAiQuery] = useState("");
+  const [isListeningVoice, setIsListeningVoice] = useState(false);
+  const [isRunningAISearch, setIsRunningAISearch] = useState(false);
+  const [pendingUserQuestion, setPendingUserQuestion] = useState<string | null>(
+    null,
   );
-  useMobileBack(
-    isLightboxOpen,
-    () => setIsLightboxOpen(false),
-    "foto-ampliada",
-  );
-  useMobileBack(
-    showProfileModal,
-    () => setShowProfileModal(false),
-    "modal-perfil-incompleto",
-  );
+  const [aiExchanges, setAiExchanges] = useState<AIConversationExchange[]>([]);
+  const [aiMatchesMap, setAiMatchesMap] = useState<
+    Record<string, RoomAvailabilityMatch>
+  >({});
+  const [aiTargetDateISO, setAiTargetDateISO] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const aiInputRef = useRef<HTMLInputElement | null>(null);
+  const aiThreadEndRef = useRef<HTMLDivElement | null>(null);
+
+  const [isWalletOpen, setIsWalletOpen] = useState(false);
+  const [isPassModalOpen, setIsPassModalOpen] = useState(false);
+  const [passPreselect, setPassPreselect] = useState<{
+    tier: PassTier;
+    hours: number | null;
+  }>({ tier: "vip", hours: null });
+  const [walletBalances, setWalletBalances] = useState({
+    start: 0,
+    vip: 0,
+    master: 0,
+  });
+  const [activeSub, setActiveSub] = useState<any>(null);
+  const [cancellingSub, setCancellingSub] = useState(false);
+  const [txHistory, setTxHistory] = useState<any[]>([]);
+  const [totalSavings, setTotalSavings] = useState(0);
+  const [bestHourlyRates, setBestHourlyRates] = useState<
+    Record<string, number>
+  >({
+    start: 27.95,
+    vip: 34,
+    master: 50,
+  });
 
   useEffect(() => {
-    setSelectedDate(initialTargetDate);
-    setCurrentMonthView(startOfMonth(initialTargetDate));
-    hasAppliedPreselectedSlotRef.current = false;
-  }, [targetRoomId, initialTargetDate, preselectedSlotStr]);
-
-  useEffect(() => {
-    checkoutSummaryRef.current = checkoutSummary;
-  }, [checkoutSummary]);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTime(Date.now());
-    }, 15000);
-    return () => clearInterval(interval);
+    setIsPortalReady(true);
   }, []);
 
-  const fetchRoomCampaigns = useCallback(async () => {
-    if (!targetRoomId) return;
-    try {
-      const { data } = await supabase
-        .from("coupons")
-        .select("*")
-        .eq("is_active", true);
-      if (!data) return;
-
-      const now = new Date();
-      const validCampaigns = data.filter((c: any) => {
-        if (c.valid_until && new Date(c.valid_until) < now) return false;
-        if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses))
-          return false;
-        if (
-          Array.isArray(c.valid_room_ids) &&
-          c.valid_room_ids.length > 0 &&
-          !c.valid_room_ids.includes(targetRoomId)
-        ) {
-          return false;
-        }
-        let rules = c.schedule_rules;
-        if (typeof rules === "string") {
-          try {
-            rules = JSON.parse(rules);
-          } catch {
-            rules = null;
-          }
-        }
-        const showOnCal =
-          typeof c.show_on_calendar === "boolean"
-            ? c.show_on_calendar
-            : Boolean(rules?.show_on_calendar);
-        return showOnCal;
-      });
-      setRoomCampaigns(validCampaigns);
-    } catch (e) {
-      console.error("Erro ao buscar campanhas da sala:", e);
-    }
-  }, [targetRoomId, supabase]);
-
   useEffect(() => {
-    fetchRoomCampaigns();
-  }, [fetchRoomCampaigns]);
-
-  const getCampaignForDateAndHour = useCallback(
-    (dateObj: Date, hourNum?: number) => {
-      if (roomCampaigns.length === 0) return null;
-      const dateIso = format(dateObj, "yyyy-MM-dd");
-      const dow = dateObj.getDay();
-      const dowKey = String(dow);
-
-      for (const camp of roomCampaigns) {
-        if (
-          camp.valid_until &&
-          dateIso > String(camp.valid_until).slice(0, 10)
-        ) {
-          continue;
-        }
-        let rules = camp.schedule_rules;
-        if (typeof rules === "string") {
-          try {
-            rules = JSON.parse(rules);
-          } catch {
-            rules = null;
-          }
-        }
-        if (
-          rules?.start_date &&
-          dateIso < String(rules.start_date).slice(0, 10)
-        ) {
-          continue;
-        }
-
-        let eligibleHoursForDay: number[] = [];
-        if (rules?.enabled) {
-          if (rules.day_hours && typeof rules.day_hours === "object") {
-            const rawDayArr = rules.day_hours[dowKey];
-            eligibleHoursForDay = Array.isArray(rawDayArr)
-              ? rawDayArr.map(Number).filter((n: number) => !isNaN(n))
-              : [];
-            if (eligibleHoursForDay.length === 0) {
-              continue;
-            }
-            if (
-              hourNum !== undefined &&
-              !eligibleHoursForDay.includes(hourNum)
-            ) {
-              continue;
-            }
-          } else {
-            if (
-              Array.isArray(rules.days_of_week) &&
-              rules.days_of_week.length > 0 &&
-              !rules.days_of_week.map(Number).includes(dow)
-            ) {
-              continue;
-            }
-            if (
-              hourNum !== undefined &&
-              Array.isArray(rules.allowed_hours) &&
-              rules.allowed_hours.length > 0 &&
-              !rules.allowed_hours.map(Number).includes(hourNum)
-            ) {
-              continue;
-            }
-            eligibleHoursForDay = Array.isArray(rules.allowed_hours)
-              ? rules.allowed_hours.map(Number)
-              : [];
-          }
-        }
-
-        const discountVal = Number(camp.discount_value || 0);
-        const badgeText =
-          camp.type === "percentage"
-            ? `-${discountVal}%`
-            : camp.type === "fixed"
-              ? `-R$${discountVal}`
-              : "BOGO";
-
-        return {
-          coupon: camp,
-          campaignName:
-            camp.campaign_name || rules?.campaign_name || `Cupom ${camp.code}`,
-          code: camp.code,
-          type: camp.type,
-          discountValue: discountVal,
-          badgeText,
-          eligibleHoursForDay,
-          rulesText: extractCampaignRulesText(camp),
-          autoApply:
-            typeof camp.auto_apply === "boolean"
-              ? camp.auto_apply
-              : rules?.auto_apply !== false,
-        };
-      }
-      return null;
-    },
-    [roomCampaigns],
-  );
-
-  // Primeiro regulamento disponível dentre as campanhas ativas nesta sala
-  const firstRoomCampaignWithRules = useMemo(() => {
-    for (const camp of roomCampaigns) {
-      const rulesText = extractCampaignRulesText(camp);
-      if (rulesText) {
-        let parsed = camp.schedule_rules;
-        if (typeof parsed === "string") {
-          try {
-            parsed = JSON.parse(parsed);
-          } catch {
-            parsed = null;
-          }
-        }
-        const discountVal = Number(camp.discount_value || 0);
-        const badgeText =
-          camp.type === "percentage"
-            ? `-${discountVal}% OFF`
-            : camp.type === "fixed"
-              ? `-R$ ${discountVal} OFF`
-              : null;
-        return {
-          name:
-            camp.campaign_name || parsed?.campaign_name || `Cupom ${camp.code}`,
-          rulesText,
-          badgeText,
-        };
-      }
+    if (isAISearchExpanded) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
     }
-    return null;
-  }, [roomCampaigns]);
-
-  const isSlotBooked = useCallback(
-    (slotKey: string) => {
-      try {
-        const [dateStr, timeStr] = slotKey.split("|");
-        const parts = timeStr.split(" - ");
-        const startSlotStr = parts[0];
-        const endSlotStr = parts[1] || parts[0];
-        const slotStartObj = parseSlotDateHelper(dateStr, startSlotStr);
-        const slotStart = slotStartObj.getTime();
-        const rawSlotEnd = parseSlotDateHelper(dateStr, endSlotStr).getTime();
-        const slotEnd =
-          rawSlotEnd > slotStart ? rawSlotEnd : slotStart + 50 * 60 * 1000;
-        const slotHour = slotStartObj.getHours();
-        const slotDow = slotStartObj.getDay();
-
-        if (
-          isDateAndHourBlockedByContract(
-            dateStr,
-            slotDow,
-            slotHour,
-            roomContracts,
-          )
-        ) {
-          return true;
-        }
-
-        return roomBookings.some((b: any) => {
-          if (b.status === "cancelled" || b.status === "rejected") return false;
-          const isFromContract = Boolean(
-            b.contract_id ||
-            (b.booking_origin &&
-              String(b.booking_origin).startsWith("contract")),
-          );
-          if (
-            !isFromContract &&
-            (b.status === "pending_payment" || b.status === "pending") &&
-            b.created_at
-          ) {
-            const lockTime = new Date(b.created_at).getTime();
-            const now = currentTime;
-            if (!b.asaas_payment_id && now - lockTime > 6 * 60 * 1000) {
-              return false;
-            }
-            if (b.asaas_payment_id && now - lockTime > 30 * 60 * 1000) {
-              return false;
-            }
-          }
-          const bStart = new Date(b.start_time).getTime();
-          const rawBEnd = new Date(b.end_time).getTime();
-          const bEnd = rawBEnd > bStart ? rawBEnd : bStart + 50 * 60 * 1000;
-          return slotStart < bEnd && slotEnd > bStart;
-        });
-      } catch {
-        return false;
-      }
-    },
-    [roomBookings, roomContracts, currentTime],
-  );
-
-  const isSlotPast = useCallback(
-    (slotKey: string) => {
-      try {
-        const [dateStr, timeStr] = slotKey.split("|");
-        const startSlotStr = timeStr.split(" - ")[0];
-        const slotStart = parseSlotDateHelper(dateStr, startSlotStr).getTime();
-        return slotStart < currentTime;
-      } catch {
-        return true;
-      }
-    },
-    [currentTime],
-  );
-
-  const availableSlots = useMemo<string[]>(() => {
-    if (!roomData || activeTab !== "hora") return [];
-    const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
-    if (
-      Array.isArray(roomData.blocked_dates) &&
-      roomData.blocked_dates.includes(selectedDateStr)
-    ) {
-      return [];
-    }
-
-    let avail = roomData.availability;
-    if (typeof avail === "string") {
-      try {
-        avail = JSON.parse(avail);
-      } catch {
-        avail = null;
-      }
-    }
-
-    const dayOfWeek = selectedDate.getDay();
-    let baseSlots: string[] = [];
-    let partialBlockedSlots: string[] = [];
-
-    if (avail) {
-      const weekConfig = Array.isArray(avail.weekConfig)
-        ? avail.weekConfig
-        : [];
-      const exceptions = Array.isArray(avail.exceptions)
-        ? avail.exceptions
-        : [];
-
-      if (exceptions.length > 0) {
-        const exception = exceptions.find(
-          (e: any) => e?.date && isSameDay(new Date(e.date), selectedDate),
-        );
-        if (exception) {
-          if (exception.type === "block" && exception.isFullDay) return [];
-          if (exception.type === "block" && !exception.isFullDay) {
-            partialBlockedSlots = (
-              Array.isArray(exception.hours) ? exception.hours : []
-            )
-              .map((h: string) => normalizeSlotLabel(h))
-              .filter(Boolean);
-          }
-          if (exception.type === "extra") {
-            const extraHours: string[] = (
-              Array.isArray(exception.hours) ? exception.hours : []
-            )
-              .map((h: string) => normalizeSlotLabel(h))
-              .filter(Boolean);
-            return extraHours;
-          }
-        }
-      }
-
-      const configForDay = weekConfig.find((c: any) => c?.day === dayOfWeek);
-      if (configForDay && configForDay.enabled) {
-        if (configForDay.rentalType === "hourly") {
-          const hours: string[] = Array.isArray(configForDay.availableHours)
-            ? configForDay.availableHours
-            : [];
-          baseSlots = hours
-            .map((h: string) => normalizeSlotLabel(h))
-            .filter(Boolean);
-        } else {
-          const shifts: string[] = Array.isArray(configForDay.selectedShifts)
-            ? configForDay.selectedShifts
-            : [];
-          if (shifts.includes("morning"))
-            baseSlots.push(
-              "08:00 - 08:50",
-              "09:00 - 09:50",
-              "10:00 - 10:50",
-              "11:00 - 11:50",
-            );
-          if (shifts.includes("afternoon"))
-            baseSlots.push(
-              "13:00 - 13:50",
-              "14:00 - 14:50",
-              "15:00 - 15:50",
-              "16:00 - 16:50",
-              "17:00 - 17:50",
-            );
-          if (shifts.includes("night"))
-            baseSlots.push(
-              "18:00 - 18:50",
-              "19:00 - 19:50",
-              "20:00 - 20:50",
-              "21:00 - 21:50",
-            );
-        }
-      }
-    }
-
-    if (partialBlockedSlots.length > 0) {
-      baseSlots = baseSlots.filter(
-        (s: string) => !partialBlockedSlots.includes(s),
-      );
-    }
-
-    const slotSet = new Set<string>(baseSlots);
-    for (let h = 8; h <= 21; h++) {
-      if (
-        isDateAndHourBlockedByContract(
-          selectedDateStr,
-          dayOfWeek,
-          h,
-          roomContracts,
-        )
-      ) {
-        const hh = String(h).padStart(2, "0");
-        slotSet.add(`${hh}:00 - ${hh}:50`);
-      }
-    }
-
-    return Array.from(slotSet).sort();
-  }, [roomData, selectedDate, activeTab, roomContracts]);
-
-  const freeSlotsForSelectedDate = useMemo<string[]>(() => {
-    const datePrefix = format(selectedDate, "yyyy-MM-dd");
-    return availableSlots.filter((slotTime: string) => {
-      const slotKey = `${datePrefix}|${slotTime}`;
-      return !isSlotBooked(slotKey) && !isSlotPast(slotKey);
-    });
-  }, [availableSlots, selectedDate, isSlotBooked, isSlotPast]);
-
-  useEffect(() => {
-    let isMounted = true;
-    async function fetchRoomDetails() {
-      if (!targetRoomId) {
-        if (isMounted) setLoading(false);
-        return;
-      }
-      if (isMounted) setLoading(true);
-      try {
-        const { data, error } = await supabase
-          .from("rooms")
-          .select("*, profiles:host_id(full_name)")
-          .eq("id", targetRoomId)
-          .single();
-        if (error) throw error;
-        if (isMounted) {
-          setRoomData(data);
-          const mods = data.modalities || [];
-          if (preselectedSlotStr && mods.includes("hora")) {
-            setActiveTab("hora");
-          } else if (mods.includes(initialModality)) {
-            setActiveTab(initialModality);
-          } else if (mods.includes("hora")) {
-            setActiveTab("hora");
-          } else if (mods.length > 0) {
-            setActiveTab(mods[0]);
-          }
-
-          const normalizedRoomTier = normalizeCreditTier(data.tier || "start");
-          const { data: allActivePkgs } = await supabase
-            .from("packages")
-            .select("*")
-            .eq("active", true)
-            .order("hours", { ascending: true });
-          const matchingPkgs = (allActivePkgs || []).filter(
-            (p: any) => normalizeCreditTier(p.tier) === normalizedRoomTier,
-          );
-
-          if (matchingPkgs.length > 0) {
-            setPackages(matchingPkgs);
-            setSelectedPkgHours(
-              matchingPkgs[1]?.hours || matchingPkgs[0]?.hours,
-            );
-          } else {
-            const fallbackByTier =
-              normalizedRoomTier === "master"
-                ? [
-                    { id: "m8", tier: "master", hours: 8, price: 500 },
-                    { id: "m16", tier: "master", hours: 16, price: 848.96 },
-                  ]
-                : normalizedRoomTier === "vip"
-                  ? [
-                      { id: "v8", tier: "vip", hours: 8, price: 340 },
-                      { id: "v16", tier: "vip", hours: 16, price: 658.08 },
-                    ]
-                  : [
-                      { id: "b8", tier: "start", hours: 8, price: 280 },
-                      { id: "b16", tier: "start", hours: 16, price: 534.08 },
-                    ];
-            setPackages(fallbackByTier);
-            setSelectedPkgHours(fallbackByTier[1].hours);
-          }
-        }
-      } catch (err) {
-        console.error("Erro ao buscar sala:", err);
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    }
-    fetchRoomDetails();
     return () => {
-      isMounted = false;
+      document.body.style.overflow = "";
     };
-  }, [targetRoomId, preselectedSlotStr, initialModality, supabase]);
+  }, [isAISearchExpanded]);
 
-  useEffect(() => {
-    if (!roomData?.id) return;
-    fetchRoomBookings();
-    const pollInterval = setInterval(fetchRoomBookings, 8000);
-    const channel = supabase
-      .channel(`room_bookings_and_contracts_${roomData.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "bookings",
-          filter: `room_id=eq.${roomData.id}`,
-        },
-        () => {
-          fetchRoomBookings();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "room_contracts",
-          filter: `room_id=eq.${roomData.id}`,
-        },
-        () => {
-          fetchRoomBookings();
-        },
-      )
-      .subscribe();
-    return () => {
-      clearInterval(pollInterval);
-      supabase.removeChannel(channel);
-    };
-  }, [roomData?.id, supabase, fetchRoomBookings]);
-
-  useEffect(() => {
-    async function fetchReviews() {
-      if (!targetRoomId) return;
-      setLoadingReviews(true);
-      try {
-        const { data, error } = await supabase
-          .from("reviews")
-          .select("*, profiles:guest_id(full_name, avatar_url)")
-          .eq("room_id", targetRoomId)
-          .order("created_at", { ascending: false });
-        if (error) throw error;
-        setReviews(data || []);
-      } catch (error) {
-        console.error("Erro ao buscar avaliações:", error);
-      } finally {
-        setLoadingReviews(false);
-      }
-    }
-    fetchReviews();
-  }, [targetRoomId, supabase]);
-
-  useEffect(() => {
-    async function checkFavoriteStatus() {
-      if (!targetRoomId) return;
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) return;
-      const { data } = await supabase
-        .from("favorites")
-        .select("id")
-        .eq("user_id", user.id)
-        .eq("room_id", targetRoomId)
-        .maybeSingle();
-      if (data) setIsFavorited(true);
-    }
-    checkFavoriteStatus();
-  }, [targetRoomId, supabase]);
-
-  useEffect(() => {
-    if (
-      loading ||
-      hasAppliedPreselectedSlotRef.current ||
-      !roomData ||
-      !preselectedSlotStr
-    ) {
-      return;
-    }
-    hasAppliedPreselectedSlotRef.current = true;
-    const normalizedPreSlot = normalizeSlotLabel(preselectedSlotStr);
-    if (!normalizedPreSlot) return;
-    if (!availableSlots.includes(normalizedPreSlot)) return;
-
-    const dateStr = format(initialTargetDate, "yyyy-MM-dd");
-    const targetSlotKey = `${dateStr}|${normalizedPreSlot}`;
-    if (!isSlotBooked(targetSlotKey) && !isSlotPast(targetSlotKey)) {
-      setSelectedSlots([targetSlotKey]);
-      setHighlightSchedule(true);
-      setTimeout(() => setHighlightSchedule(false), 2000);
-      setTimeout(() => {
-        if (bookingSectionRef.current) {
-          bookingSectionRef.current.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      }, 200);
-    }
-  }, [
-    loading,
-    roomData,
-    preselectedSlotStr,
-    initialTargetDate,
-    availableSlots,
-    isSlotBooked,
-    isSlotPast,
-  ]);
-
-  // Cálculos de preço e campanha (memoizados para evitar re-renders desnecessários no CheckoutModal)
-  const parsedAddress = useMemo(() => {
-    let addr = roomData?.address_details || {};
-    if (typeof addr === "string") {
-      try {
-        addr = JSON.parse(addr);
-      } catch {
-        addr = {};
-      }
-    }
-    return addr;
-  }, [roomData?.address_details]);
-
-  const pricingData = parsedAddress.pricing || {};
-
-  const getBasePrice = useCallback(() => {
-    return Number(pricingData.hourly || 45);
-  }, [pricingData.hourly]);
-
-  const getSlotBasePrice = useCallback(
-    (slotKey: string) => {
-      const commercialRate = Number(pricingData.hourly || 45);
-      const afterHoursRate = pricingData.afterHours
-        ? Number(pricingData.afterHours)
-        : commercialRate;
-      const weekendRate = pricingData.weekend
-        ? Number(pricingData.weekend)
-        : commercialRate;
-      if (!slotKey.includes("|")) return commercialRate;
-      const [dateStr, slotTime] = slotKey.split("|");
-      const dateObj = new Date(`${dateStr}T12:00:00`);
-      const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
-      const startHour = parseInt(slotTime.substring(0, 2), 10);
-      const isAfterHours = startHour >= 18 || startHour < 8;
-      if (isWeekend) return weekendRate;
-      if (isAfterHours) return afterHoursRate;
-      return commercialRate;
-    },
-    [pricingData.hourly, pricingData.afterHours, pricingData.weekend],
+  useMobileBack(
+    isWalletOpen,
+    () => setIsWalletOpen(false),
+    "fusion-pass-wallet",
+  );
+  useMobileBack(
+    isMobileSearchOpen,
+    () => setIsMobileSearchOpen(false),
+    "mobile-search",
+  );
+  useMobileBack(
+    isAISearchExpanded,
+    () => setIsAISearchExpanded(false),
+    "concierge-ia-page",
   );
 
-  const getSlotPricingDetails = useCallback(
-    (slotKey: string) => {
-      const basePrice = getSlotBasePrice(slotKey);
-      if (!slotKey.includes("|")) {
-        return {
-          basePrice,
-          finalPrice: basePrice,
-          discountAmount: 0,
-          campaign: null,
-        };
-      }
-      const [dateStr, slotTime] = slotKey.split("|");
-      const dateObj = new Date(`${dateStr}T12:00:00`);
-      const startHour = parseInt(slotTime.substring(0, 2), 10);
-      const campaign = getCampaignForDateAndHour(dateObj, startHour);
-      if (!campaign) {
-        return {
-          basePrice,
-          finalPrice: basePrice,
-          discountAmount: 0,
-          campaign: null,
-        };
-      }
-      let finalPrice = basePrice;
-      if (campaign.type === "percentage") {
-        finalPrice = Math.max(
-          0,
-          basePrice * (1 - campaign.discountValue / 100),
-        );
-      } else if (campaign.type === "fixed") {
-        finalPrice = Math.max(0, basePrice - campaign.discountValue);
-      }
-      return {
-        basePrice,
-        finalPrice: Number(finalPrice.toFixed(2)),
-        discountAmount: Number((basePrice - finalPrice).toFixed(2)),
-        campaign,
-      };
-    },
-    [getSlotBasePrice, getCampaignForDateAndHour],
-  );
-
-  const selectedSlotsBreakdown = useMemo(
-    () => selectedSlots.map((slotKey) => getSlotPricingDetails(slotKey)),
-    [selectedSlots, getSlotPricingDetails],
-  );
-
-  const totalBaseHourlyCost = useMemo(
-    () => selectedSlotsBreakdown.reduce((acc, item) => acc + item.basePrice, 0),
-    [selectedSlotsBreakdown],
-  );
-
-  const totalHourlyCost = useMemo(
-    () =>
-      selectedSlotsBreakdown.reduce((acc, item) => acc + item.finalPrice, 0),
-    [selectedSlotsBreakdown],
-  );
-
-  const totalCampaignDiscountBRL = useMemo(
-    () =>
-      Math.max(0, Number((totalBaseHourlyCost - totalHourlyCost).toFixed(2))),
-    [totalBaseHourlyCost, totalHourlyCost],
-  );
-
-  const matchedAutoCampaign = useMemo(
-    () =>
-      selectedSlotsBreakdown.find((item) => item.campaign?.autoApply)
-        ?.campaign || null,
-    [selectedSlotsBreakdown],
-  );
-
-  const checkoutCampaignInfo = useMemo<CampaignCheckoutInfo | null>(() => {
-    if (!matchedAutoCampaign) return null;
-    return {
-      name: matchedAutoCampaign.campaignName,
-      rulesText: matchedAutoCampaign.rulesText,
-      badgeText: `${matchedAutoCampaign.badgeText} OFF`,
-      discountBRL: totalCampaignDiscountBRL,
-    };
-  }, [matchedAutoCampaign, totalCampaignDiscountBRL]);
-
-  if (loading) {
-    return (
-      <div className="fixed inset-0 z-[100] bg-white flex flex-col items-center justify-center p-6 text-center">
-        <Loader2 className="h-8 w-8 animate-spin text-[#BF4B24] mb-3" />
-        <h2 className="text-base font-bold text-slate-800">
-          Carregando detalhes do consultório...
-        </h2>
-      </div>
-    );
-  }
-
-  if (!roomData) {
-    return (
-      <div className="fixed inset-0 z-[100] bg-white flex flex-col items-center justify-center p-6 text-center">
-        <AlertCircle className="h-12 w-12 text-slate-300 mb-4" />
-        <h2 className="text-xl font-bold text-slate-900 mb-2">
-          Sala não encontrada
-        </h2>
-        <Button
-          onClick={onBack}
-          className="bg-slate-900 text-white font-bold h-12 px-8 rounded-xl mt-4"
-        >
-          Voltar
-        </Button>
-      </div>
-    );
-  }
-
-  const address = parsedAddress;
-
-  const scrollToBookingSection = () => {
-    if (bookingSectionRef.current) {
-      bookingSectionRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-      setHighlightSchedule(true);
-      setTimeout(() => setHighlightSchedule(false), 1800);
-    }
-  };
-
-  const handleExpandAndScrollToPass = () => {
-    setIsPassDetailsExpanded(true);
-    if (fusionPassCardRef.current) {
-      fusionPassCardRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
-    }
-  };
-
-  const handleGoToFusionPass = () => {
-    const rawTier = String(roomData?.tier || "start")
-      .toLowerCase()
-      .trim();
-    const targetTier =
-      rawTier.includes("master") || rawTier.includes("premium")
-        ? "master"
-        : rawTier.includes("vip")
-          ? "vip"
-          : "start";
-    const targetHours = selectedPkgHours ? Number(selectedPkgHours) : null;
-    try {
-      sessionStorage.setItem(
-        "fusion_preselect_pass",
-        JSON.stringify({
-          tier: targetTier,
-          hours: targetHours,
-          roomId: roomData?.id,
-        }),
-      );
-    } catch {}
-    if (onOpenFusionPass) {
-      onOpenFusionPass(targetTier, targetHours);
+  const handleGoToCompleteProfile = useCallback(() => {
+    setIsAISearchExpanded(false);
+    setIsMobileSearchOpen(false);
+    if (onNavigateToProfile) {
+      onNavigateToProfile();
       return;
     }
     if (typeof window !== "undefined") {
-      window.dispatchEvent(
-        new CustomEvent("open-fusion-pass", {
-          detail: { step: "plans", tier: targetTier, hours: targetHours },
-        }),
+      window.history.pushState(
+        null,
+        "",
+        window.location.pathname + window.location.search + "#profile",
       );
+      window.dispatchEvent(new PopStateEvent("popstate"));
     }
-  };
+  }, [onNavigateToProfile]);
 
-  const shiftPrice = selectedShift
-    ? Number(pricingData[selectedShift] || 0)
-    : 0;
-  const totalShiftCost = shiftPrice * selectedDays.length;
+  const dynamicStarterCards = useMemo(() => {
+    const specLabel = profile.specialty || "Psicologia";
+    return [
+      {
+        badge: "Descobrir meu Plano Ideal",
+        title: "Qual plano vale mais a pena para mim?",
+        desc: "A IA faz 2 perguntas rápidas e calcula sua melhor opção",
+        icon: TrendingUp,
+      },
+      {
+        badge: "Dúvida Frequente",
+        title: "É possível sublocar uma sala?",
+        desc: "Entenda como alugar horas ou ter sua sala fixa abatendo aluguel",
+        icon: Crown,
+      },
+      {
+        badge: "Turnos & Valores",
+        title: "Qual o valor em média do turno fixo?",
+        desc: "Compare Turno Fixo semanal com pacotes de horas",
+        icon: Clock,
+      },
+      {
+        badge: profile.specialty
+          ? `Salas • ${profile.specialty}`
+          : "Mobiliário & Agenda",
+        title: `Ver salas de ${specLabel} disponíveis amanhã`,
+        desc: "Mostra fotos, estrutura física (divã/poltronas) e horários livres",
+        icon: Sofa,
+      },
+    ];
+  }, [profile.specialty]);
 
-  const handleAction = async () => {
-    if (activeTab === "hora" && selectedSlots.length === 0) {
-      scrollToBookingSection();
-      return;
-    }
-    if (
-      activeTab === "turno" &&
-      (!selectedShift || selectedDays.length === 0)
-    ) {
-      scrollToBookingSection();
-      return toast({
-        title: "Selecione o turno e os dias",
-        description: "Escolha o turno e os dias da semana desejados abaixo.",
-      });
-    }
+  const availableCities = useMemo<string[]>(() => {
+    const cities = new Set<string>(
+      dbRooms
+        .map((r: Room) => r.rawAddress?.city)
+        .filter((city): city is string =>
+          Boolean(city && typeof city === "string"),
+        ),
+    );
+    return Array.from(cities);
+  }, [dbRooms]);
 
-    setActionLoading(true);
-    try {
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-      if (authError || !user) {
-        toast({
-          title: "Acesso restrito",
-          description: "Você precisa entrar na sua conta para continuar.",
-        });
-        router.push("/login");
-        return;
-      }
-
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("full_name, cpf, birth_date, address_street, address_number")
-        .eq("id", user.id)
-        .maybeSingle();
-
-      const isProfileComplete = Boolean(
-        profile?.full_name &&
-        profile?.cpf &&
-        profile?.birth_date &&
-        profile?.address_street &&
-        profile?.address_number,
-      );
-      if (!isProfileComplete) {
-        setShowProfileModal(true);
-        setActionLoading(false);
-        return;
-      }
-
-      if (activeTab === "hora") {
-        if (!selectedDate || isNaN(selectedDate.getTime())) {
-          throw new Error("A data base selecionada é inválida.");
-        }
-
-        await fetchRoomBookings();
-        const sortedSlots = [...selectedSlots].sort();
-        for (const slotKey of sortedSlots) {
-          if (isSlotBooked(slotKey)) {
-            setSelectedSlots([]);
-            throw new Error(
-              "Um dos horários selecionados faz parte de um contrato fixo ou acabou de ser reservado. Escolha outro horário.",
-            );
-          }
-        }
-
-        const bookingPayloads = sortedSlots.map((slotKey: string) => {
-          const [dateStr, slotTime] = slotKey.split("|");
-          const startSlotStr = slotTime.split(" - ")[0];
-          const endSlotStr = slotTime.split(" - ")[1];
-          const startTime = parseSlotDateHelper(dateStr, startSlotStr);
-          const endTime = parseSlotDateHelper(dateStr, endSlotStr);
-          const slotPricing = getSlotPricingDetails(slotKey);
-          return {
-            user_id: user.id,
-            room_id: roomData.id,
-            start_time: startTime.toISOString(),
-            end_time: endTime.toISOString(),
-            total_cost: slotPricing.finalPrice,
-            agreed_value_brl: slotPricing.finalPrice,
-            status: "pending_payment",
-          };
-        });
-
-        bookingConfirmedRef.current = false;
-        const { data: lockedData, error: lockError } = await supabase
-          .from("bookings")
-          .insert(bookingPayloads)
-          .select("id");
-
-        if (lockError || !lockedData) {
-          await fetchRoomBookings();
-          setSelectedSlots([]);
-          throw new Error(
-            "Este horário acabou de ser reservado por outro profissional. Escolha outro horário.",
-          );
-        }
-
-        const createdLockIds = lockedData.map((d: any) => d.id);
-        await fetchRoomBookings();
-
-        const firstSlot = sortedSlots[0];
-        const [startDateStr, startTimeStr] = firstSlot.split("|");
-        const startSlotStr = startTimeStr.split(" - ")[0];
-        const startDate = parseSlotDateHelper(startDateStr, startSlotStr);
-        const totalHours = selectedSlots.length;
-        const endDateForApi = new Date(
-          startDate.getTime() + totalHours * 60 * 60 * 1000,
-        );
-
-        const response = await fetch("/api/bookings/calculate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            roomId: roomData.id,
-            startTime: startDate.toISOString(),
-            endTime: endDateForApi.toISOString(),
-            slots: bookingPayloads.map((b) => ({
-              startTime: b.start_time,
-              endTime: b.end_time,
-            })),
-            lockIds: createdLockIds,
-          }),
-        });
-
-        const contentType = response.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-          await supabase.from("bookings").delete().in("id", createdLockIds);
-          await fetchRoomBookings();
-          throw new Error("Erro de rota: A API de cálculo não foi encontrada.");
-        }
-
-        const summaryData = await response.json();
-        if (!response.ok) {
-          await supabase.from("bookings").delete().in("id", createdLockIds);
-          await fetchRoomBookings();
-          throw new Error(summaryData.error || "Erro ao calcular valores.");
-        }
-
-        const { data: txs } = await supabase
-          .from("wallet_transactions")
-          .select("amount, tier, description, created_at, expires_at")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: true });
-
-        const fifoBalances = computeWalletBalancesFIFO(txs || []);
-        const required = Number(
-          summaryData.creditsRequired || selectedSlots.length,
-        );
-        const tierSelection = selectCreditTierForBooking(
-          roomData.tier,
-          required,
-          fifoBalances,
-        );
-
-        setCheckoutSummary({
-          ...summaryData,
-          usedTier: tierSelection.usedTier,
-          currentBalance: tierSelection.availableInChosenTier,
-          hasEnoughCredits: tierSelection.hasEnoughCredits,
-          upgradeFeeBRL: tierSelection.hasEnoughCredits
-            ? 0
-            : summaryData.upgradeFeeBRL,
-          lockIds: createdLockIds,
-        });
-        setIsCheckoutOpen(true);
-      } else {
-        toast({
-          title: "Iniciando negociação...",
-          description: "Criando canal seguro com a clínica e a Fusion...",
-        });
-        const { data: existingChat } = await supabase
-          .from("chats")
-          .select("id")
-          .eq("room_id", roomData.id)
-          .eq("guest_id", user.id)
-          .eq("type", "negotiation")
-          .maybeSingle();
-
-        if (!existingChat) {
-          const { error: insertError } = await supabase.from("chats").insert({
-            type: "negotiation",
-            status: "open",
-            room_id: roomData.id,
-            guest_id: user.id,
-            host_id: roomData.host_id,
-          });
-          if (insertError) throw insertError;
-        }
-        toast({
-          title: "Canal aberto!",
-          description: "Redirecionando para as mensagens...",
-        });
-        if (onNavigateToChat) {
-          onNavigateToChat();
-        } else {
-          onBack();
-        }
-      }
-    } catch (err: any) {
-      console.error("Erro no handleAction:", err);
-      toast({
-        variant: "destructive",
-        title: "Erro na operação",
-        description: err.message,
-      });
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleConfirmCheckout = async (
-    method: "wallet" | "pix" | "card",
-    appliedCoupon?: any,
-    cardData?: CardData,
-  ) => {
-    if (!checkoutSummary) return;
-    setActionLoading(true);
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) throw new Error("Usuário não autenticado.");
-
-      const lockIds: string[] = (checkoutSummary as any).lockIds || [];
-      let finalCreditsRequired = checkoutSummary.creditsRequired;
-      let finalHourlyCost = totalHourlyCost;
-
-      if (appliedCoupon && totalCampaignDiscountBRL === 0) {
-        if (appliedCoupon.type === "percentage") {
-          finalCreditsRequired -=
-            finalCreditsRequired * (appliedCoupon.discount_value / 100);
-          finalHourlyCost -=
-            finalHourlyCost * (appliedCoupon.discount_value / 100);
-        } else if (appliedCoupon.type === "fixed") {
-          finalCreditsRequired -= appliedCoupon.discount_value;
-          finalHourlyCost -=
-            (appliedCoupon.discount_value / checkoutSummary.creditsRequired) *
-            finalHourlyCost;
-        } else if (appliedCoupon.type === "bogo") {
-          finalCreditsRequired -= 1;
-          finalHourlyCost -= finalHourlyCost / checkoutSummary.creditsRequired;
-        }
-        finalCreditsRequired = Math.max(0, finalCreditsRequired);
-        finalHourlyCost = Math.max(0, finalHourlyCost);
-      }
-
-      const effectiveCouponRecord =
-        appliedCoupon || matchedAutoCampaign?.coupon || null;
-
-      if (method === "wallet") {
-        const creditCostPerHour = finalCreditsRequired / selectedSlots.length;
-        const usedTier = normalizeCreditTier(
-          checkoutSummary.usedTier || roomData.tier || "start",
-        );
-
-        const [userTxsRes, allPkgsRes, userSubsRes] = await Promise.all([
-          supabase
-            .from("wallet_transactions")
-            .select("amount, tier, description, created_at, expires_at")
-            .eq("user_id", user.id)
-            .order("created_at", { ascending: true }),
-          supabase.from("packages").select("id, tier, hours, price, active"),
-          supabase
-            .from("subscriptions")
-            .select("id, tier, hours, status")
-            .eq("user_id", user.id),
-        ]);
-
-        const { hourlyRateBrl } = resolveCreditHourlyValueBRL({
-          usedTier,
-          userTransactions: userTxsRes.data || [],
-          userSubscriptions: userSubsRes.data || [],
-          packages: allPkgsRes.data || [],
-        });
-
-        const unitBookingValueBrl = Number(
-          (hourlyRateBrl * creditCostPerHour).toFixed(2),
-        );
-
-        const { error: updateError } = await supabase
-          .from("bookings")
-          .update({
-            total_cost: creditCostPerHour,
-            status: "confirmed",
-            booking_origin: `wallet_${usedTier}`,
-            agreed_value_brl: unitBookingValueBrl,
-          })
-          .in("id", lockIds);
-
-        if (updateError) {
-          throw new Error(
-            "Este horário acabou de ser reservado por outro profissional.",
-          );
-        }
-
-        bookingConfirmedRef.current = true;
-        const { error: walletError } = await supabase
-          .from("wallet_transactions")
-          .insert({
-            user_id: user.id,
-            amount: -finalCreditsRequired,
-            type: "usage",
-            tier: usedTier,
-            description: `Reserva em Créditos (${usedTier.toUpperCase()} - R$ ${hourlyRateBrl.toFixed(2)}/h): ${roomData.name}`,
-          });
-        if (walletError) throw walletError;
-
-        if (effectiveCouponRecord && appliedCoupon) {
-          await supabase
-            .from("coupons")
-            .update({
-              current_uses: Number(effectiveCouponRecord.current_uses || 0) + 1,
-            })
-            .eq("id", effectiveCouponRecord.id);
-          await supabase.from("coupon_uses").insert({
-            coupon_id: effectiveCouponRecord.id,
-            user_id: user.id,
-            booking_id: lockIds[0],
-            discount_applied:
-              checkoutSummary.creditsRequired - finalCreditsRequired,
-          });
-        }
-
-        if (lockIds && lockIds[0]) {
-          sendBookingNotificationEmails(lockIds[0]).catch((e) =>
-            console.error("Erro ao enviar e-mail de reserva:", e),
-          );
-        }
-
-        await fetchRoomBookings();
-        toast({
-          title: "Reserva Confirmada!",
-          description: "A sala foi agendada e os créditos consumidos.",
-        });
-        setIsCheckoutOpen(false);
-        setCheckoutSummary(null);
-        setSelectedSlots([]);
-        onBack();
-      } else {
-        toast({
-          title: "Processando pagamento...",
-          description: "Por favor, aguarde um instante.",
-        });
-
-        const paymentRef = lockIds[0];
-        const { error: updateError } = await supabase
-          .from("bookings")
-          .update({
-            status: "pending_payment",
-          })
-          .in("id", lockIds);
-        if (updateError) throw updateError;
-
-        if (effectiveCouponRecord) {
-          const appliedDiscountValue =
-            totalCampaignDiscountBRL > 0
-              ? totalCampaignDiscountBRL
-              : Math.max(0, totalBaseHourlyCost - finalHourlyCost);
-          if (appliedDiscountValue > 0) {
-            await supabase
-              .from("coupons")
-              .update({
-                current_uses:
-                  Number(effectiveCouponRecord.current_uses || 0) + 1,
-              })
-              .eq("id", effectiveCouponRecord.id);
-            await supabase.from("coupon_uses").insert({
-              coupon_id: effectiveCouponRecord.id,
-              user_id: user.id,
-              booking_id: lockIds[0],
-              discount_applied: appliedDiscountValue,
-            });
-          }
-        }
-
-        let formattedCard = undefined;
-        let holderInfo = undefined;
-        if (method === "card" && cardData) {
-          const [expMonth, expYear] = cardData.expiry.split("/");
-          const yearFormatted =
-            expYear?.length === 2 ? `20${expYear}` : expYear;
-          formattedCard = {
-            holderName: cardData.name.toUpperCase(),
-            number: cardData.number.replace(/\D/g, ""),
-            expiryMonth: expMonth?.trim(),
-            expiryYear: yearFormatted?.trim(),
-            ccv: cardData.cvv,
-          };
-          const { data: userProfile } = await supabase
-            .from("profiles")
-            .select("*")
-            .eq("id", user.id)
-            .single();
-          holderInfo = {
-            name: cardData.name.toUpperCase(),
-            email: user.email || "medico@fusionclinic.com.br",
-            cpfCnpj: cardData.cpf.replace(/\D/g, ""),
-            postalCode: userProfile?.cep?.replace(/\D/g, "") || "01310100",
-            addressNumber: userProfile?.address_number || "1000",
-            phone: userProfile?.phone?.replace(/\D/g, "") || "11999999999",
-          };
-        }
-
-        const response = await fetch("/api/checkout", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            checkoutType: "booking",
-            price: finalHourlyCost,
-            paymentRef: paymentRef,
-            bookingIds: lockIds,
-            billingType: method === "card" ? "CREDIT_CARD" : "PIX",
-            creditCard: formattedCard,
-            creditCardHolderInfo: holderInfo,
-            cardData: cardData,
-          }),
-        });
-
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error);
-
-        await fetchRoomBookings();
-
-        if (method === "pix" && data.pixQrCode) {
-          setPixQrCode(data.pixQrCode);
-          setPixCopyPaste(data.pixCopyPaste);
-          setActiveBookingId(lockIds[0]);
-          setActionLoading(false);
-          return;
-        }
-
-        bookingConfirmedRef.current = true;
-        if (lockIds && lockIds[0]) {
-          await Promise.allSettled([
-            sendBookingNotificationEmails(lockIds[0]),
-            sendPaymentNotificationEmails({
-              userId: user.id,
-              amountBrl: finalHourlyCost,
-              paymentMethod: "Cartão de Crédito",
-              description: `Reserva Avulsa: ${roomData.name}`,
-              hostId: roomData.host_id,
-            }),
-          ]);
-        }
-
-        await fetchRoomBookings();
-        toast({
-          title: "Pagamento Aprovado!",
-          description: "Sua reserva foi confirmada com sucesso.",
-        });
-        setIsCheckoutOpen(false);
-        setCheckoutSummary(null);
-        setSelectedSlots([]);
-        window.location.reload();
-      }
-    } catch (err: any) {
-      console.error(err);
-      toast({
-        variant: "destructive",
-        title: "Erro na confirmação",
-        description: err.message,
-      });
-      throw err;
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleFavoriteToggle = async () => {
-    if (isFavoriteLoading || !roomData) return;
+  const fetchWalletData = useCallback(async () => {
     const {
       data: { user },
-      error: authError,
     } = await supabase.auth.getUser();
-    if (authError || !user) {
-      toast({
-        title: "Acesso restrito",
-        description: "Você precisa fazer login para favoritar.",
-      });
-      router.push("/login");
+    if (!user) return;
+    const [profileRes, subRes, txRes, favRes] = await Promise.all([
+      supabase
+        .from("profiles")
+        .select(
+          "full_name, specialty, cpf, birth_date, address_street, address_number",
+        )
+        .eq("id", user.id)
+        .single(),
+      supabase
+        .from("subscriptions")
+        .select("id, tier, status, hours, created_at")
+        .eq("user_id", user.id)
+        .eq("status", "ACTIVE")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      supabase
+        .from("wallet_transactions")
+        .select("amount, created_at, description, type, tier, expires_at")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false }),
+      supabase.from("favorites").select("room_id").eq("user_id", user.id),
+    ]);
+
+    setActiveSub(subRes.data || null);
+    const allTxs = txRes.data || [];
+    setTxHistory(allTxs);
+    let calculatedSavings = 0;
+    allTxs.forEach((tx) => {
+      if (tx.amount > 0 && tx.description) {
+        const rateMatch = tx.description.match(/\[Rate:(\d+(?:\.\d+)?)\]/i);
+        if (rateMatch) {
+          const rate = Number(rateMatch[1]);
+          const tier = normalizePassTier(tx.tier);
+          const base = BASE_HOURLY_RATES[tier] || 40;
+          if (base > rate) {
+            calculatedSavings += (base - rate) * Number(tx.amount);
+          }
+        }
+      }
+    });
+    setTotalSavings(calculatedSavings);
+    const fifoTxs = [...allTxs].reverse();
+    const fifoBalances = computeWalletBalancesFIFO(fifoTxs);
+    setWalletBalances({
+      start: fifoBalances.start,
+      vip: fifoBalances.vip,
+      master: fifoBalances.master,
+    });
+    if (favRes.data) {
+      setFavorites(new Set(favRes.data.map((f: any) => f.room_id)));
+    }
+    const pData = profileRes.data;
+    const missing: string[] = [];
+    if (!pData?.specialty) missing.push("Especialidade");
+    if (!pData?.cpf) missing.push("CPF");
+    if (!pData?.birth_date) missing.push("Data de Nascimento");
+    if (!pData?.address_street || !pData?.address_number) {
+      missing.push("Endereço");
+    }
+    const totalChecks = 5;
+    const completedChecks = totalChecks - missing.length;
+    const completionPct = Math.max(
+      20,
+      Math.round((completedChecks / totalChecks) * 100),
+    );
+    setProfile({
+      name: pData?.full_name || "Doutor(a)",
+      balance: fifoBalances.total,
+      specialty: pData?.specialty || null,
+      isComplete: missing.length === 0,
+      completionPct,
+      missingFields: missing,
+    });
+  }, [supabase]);
+
+  const handleCancelSubscription = async () => {
+    if (
+      !confirm(
+        "Tem certeza que deseja cancelar a renovação automática do seu Fusion Pass+?\n\nNenhuma nova cobrança será feita no seu cartão de crédito e suas horas atuais continuarão disponíveis na carteira até a data de vencimento.",
+      )
+    ) {
       return;
     }
-    setIsFavoriteLoading(true);
+    setCancellingSub(true);
     try {
-      if (isFavorited) {
-        const { error } = await supabase
+      const res = await fetch("/api/subscriptions/cancel", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          data.error || "Não foi possível cancelar a assinatura.",
+        );
+      }
+      toast({
+        title: "Renovação automática cancelada",
+        description: data.message,
+      });
+      setActiveSub(null);
+      await fetchWalletData();
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "Erro ao cancelar assinatura",
+        description: err.message,
+      });
+    } finally {
+      setCancellingSub(false);
+    }
+  };
+
+  useEffect(() => {
+    async function fetchData() {
+      const [{ data: roomsData }, { data: couponsData }] = await Promise.all([
+        supabase
+          .from("rooms")
+          .select(
+            `id, name, description, image_url, modalities, is_partner, specialty, tier, address_details, host_id, reviews ( rating )`,
+          )
+          .eq("is_active", true)
+          .eq("is_paused", false),
+        supabase
+          .from("coupons")
+          .select("*")
+          .eq("is_active", true)
+          .order("created_at", { ascending: false }),
+      ]);
+
+      const safeRooms = roomsData || [];
+
+      if (couponsData && couponsData.length > 0) {
+        const now = new Date();
+        const todayIso = now.toISOString().slice(0, 10);
+
+        const validCampaigns = couponsData.filter((c: any) => {
+          if (c.valid_until && new Date(c.valid_until) < now) return false;
+          if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses)) {
+            return false;
+          }
+          let rules = c.schedule_rules;
+          if (typeof rules === "string") {
+            try {
+              rules = JSON.parse(rules);
+            } catch {
+              rules = null;
+            }
+          }
+          if (
+            rules?.start_date &&
+            todayIso < String(rules.start_date).slice(0, 10)
+          ) {
+            return false;
+          }
+          const showOnCal =
+            typeof c.show_on_calendar === "boolean"
+              ? c.show_on_calendar
+              : Boolean(rules?.show_on_calendar);
+          const isCampaign =
+            Boolean(rules?.is_campaign) || Boolean(rules?.enabled) || showOnCal;
+          return isCampaign && showOnCal;
+        });
+
+        if (validCampaigns.length > 0) {
+          const primaryCamp = validCampaigns[0];
+          let parsedRules = primaryCamp.schedule_rules;
+          if (typeof parsedRules === "string") {
+            try {
+              parsedRules = JSON.parse(parsedRules);
+            } catch {
+              parsedRules = null;
+            }
+          }
+
+          const participatingRoomsCount = safeRooms.filter((r: any) =>
+            validCampaigns.some((camp: any) => {
+              if (
+                Array.isArray(camp.valid_room_ids) &&
+                camp.valid_room_ids.length > 0
+              ) {
+                return camp.valid_room_ids.includes(r.id);
+              }
+              return true;
+            }),
+          ).length;
+
+          const discountVal = Number(primaryCamp.discount_value || 50);
+          const discountLabel =
+            primaryCamp.type === "fixed"
+              ? `R$ ${discountVal} OFF`
+              : `${discountVal}% OFF`;
+
+          setActiveBlackCampaign({
+            id: primaryCamp.id,
+            name:
+              primaryCamp.campaign_name ||
+              parsedRules?.campaign_name ||
+              "BLACK FUSION",
+            discountLabel,
+            roomsCount: participatingRoomsCount,
+          });
+        } else {
+          setActiveBlackCampaign(null);
+        }
+      } else {
+        setActiveBlackCampaign(null);
+      }
+
+      if (roomsData) {
+        const formattedRooms: Room[] = roomsData.map((r: any) => {
+          const address = r.address_details || {};
+          const pricing = address.pricing || {};
+          const finalModalities = Array.isArray(r.modalities)
+            ? r.modalities
+            : [];
+          const reviewsArray = r.reviews || [];
+          const rating =
+            reviewsArray.length > 0
+              ? reviewsArray.reduce(
+                  (acc: number, curr: any) => acc + curr.rating,
+                  0,
+                ) / reviewsArray.length
+              : 0;
+          const hourlyPriceNumber = Number(pricing.hourly || 45);
+          const turnos = [pricing.morning, pricing.afternoon, pricing.night]
+            .filter(Boolean)
+            .map(Number)
+            .filter((v) => !isNaN(v) && v > 0);
+          const shiftPriceNumber =
+            turnos.length > 0 ? Math.min(...turnos) : null;
+          const monthlyPriceNumber =
+            pricing.monthly && Number(pricing.monthly) > 0
+              ? Number(pricing.monthly)
+              : null;
+
+          let label = "Sob consulta";
+          let numPrice = 0;
+          if (
+            appliedFilters.modality === "hora" &&
+            pricing.hourly &&
+            finalModalities.includes("hora")
+          ) {
+            label = `R$ ${pricing.hourly}/hora`;
+            numPrice = Number(pricing.hourly);
+          } else if (
+            appliedFilters.modality === "turno" &&
+            finalModalities.includes("turno")
+          ) {
+            label =
+              shiftPriceNumber && shiftPriceNumber > 0
+                ? `R$ ${shiftPriceNumber}/turno`
+                : "Sob consulta";
+            numPrice = shiftPriceNumber || 0;
+          } else if (
+            appliedFilters.modality === "fixo" &&
+            pricing.monthly &&
+            finalModalities.includes("fixo")
+          ) {
+            label = `R$ ${pricing.monthly}/mês`;
+            numPrice = Number(pricing.monthly);
+          } else {
+            if (finalModalities.includes("hora") && pricing.hourly) {
+              label = `R$ ${pricing.hourly}/hora`;
+              numPrice = Number(pricing.hourly);
+            } else if (finalModalities.includes("turno") && shiftPriceNumber) {
+              label = `R$ ${shiftPriceNumber}/turno`;
+              numPrice = shiftPriceNumber;
+            } else if (finalModalities.includes("fixo") && pricing.monthly) {
+              label = `R$ ${pricing.monthly}/mês`;
+              numPrice = Number(pricing.monthly);
+            }
+          }
+
+          return {
+            id: r.id,
+            name: r.name || "Sala sem nome",
+            description: r.description || "",
+            category: r.specialty || "Multiuso",
+            tier: r.tier || "start",
+            priceLabel: label,
+            filterPrice: numPrice,
+            hourlyPriceNumber,
+            shiftPriceNumber,
+            monthlyPriceNumber,
+            image: r.image_url || "/placeholder.jpg",
+            rating: rating,
+            reviews_count: reviewsArray.length,
+            distance: address.city || "Localização pendente",
+            modalities: finalModalities,
+            isPartner: r.is_partner === true,
+            locationString: [address.street, address.city, address.neighborhood]
+              .filter(Boolean)
+              .join(", "),
+            rawAddress: address,
+            host_id: r.host_id,
+            specialty: r.specialty,
+          };
+        });
+        setDbRooms(formattedRooms);
+      }
+      if (!isPublic) await fetchWalletData();
+      setLoading(false);
+    }
+    fetchData();
+  }, [isPublic, supabase, appliedFilters.modality, fetchWalletData]);
+
+  const executeAISearch = useCallback(
+    async (customText?: string) => {
+      if (!canUseAIConcierge) return;
+      const textToSearch = (customText ?? aiQuery).trim();
+      if (!textToSearch) {
+        toast({
+          title: "Digite ou fale sua dúvida",
+          description:
+            'Ex: "É possível sublocar uma sala?" ou "Atendo 2h a 4h por semana"',
+        });
+        return;
+      }
+      setIsRunningAISearch(true);
+      setPendingUserQuestion(textToSearch);
+      setIsAISearchExpanded(true);
+      setAiQuery("");
+      setTimeout(() => {
+        aiThreadEndRef.current?.scrollIntoView({
+          behavior: "smooth",
+          block: "end",
+        });
+      }, 60);
+      try {
+        const historyPayload = aiExchanges.flatMap((ex) => [
+          { role: "user" as const, content: ex.userQuery },
+          {
+            role: "assistant" as const,
+            content: [ex.headline, ex.recommendationSummary, ex.closingQuestion]
+              .filter(Boolean)
+              .join(" "),
+          },
+        ]);
+        const detectedUserTier =
+          walletBalances.master > 0
+            ? "Premium"
+            : walletBalances.vip > 0
+              ? "VIP"
+              : walletBalances.start > 0
+                ? "Basic"
+                : activeSub?.tier || null;
+
+        const res = await fetch("/api/ai-search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: textToSearch,
+            history: historyPayload,
+            walletBalance: profile.balance,
+            activeTier: detectedUserTier,
+            userSpecialty: profile.specialty,
+            isProfileComplete: profile.isComplete,
+            missingProfileFields: profile.missingFields,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            data.error || "Falha ao consultar o Concierge IA da Fusion.",
+          );
+        }
+
+        const ext = data.extraction;
+        const matchesList: RoomAvailabilityMatch[] = data.matches || [];
+        if (ext?.shouldApplyFilters) {
+          const parsedDate = ext?.dateISO
+            ? new Date(`${ext.dateISO}T12:00:00`)
+            : undefined;
+          const nextFilters = {
+            city: ext?.city || "Qualquer lugar",
+            date: parsedDate,
+            time: ext?.shift || "",
+            modality: (ext?.modality || "hora") as RentalType,
+            category: ext?.category || "Todas as Salas",
+          };
+          setPendingFilters(nextFilters);
+          setAppliedFilters(nextFilters);
+          if (ext?.tier && ext.tier !== "all") {
+            setActiveTier(ext.tier);
+          } else {
+            setActiveTier("all");
+          }
+          const map: Record<string, RoomAvailabilityMatch> = {};
+          matchesList.forEach((m: RoomAvailabilityMatch) => {
+            map[m.roomId] = m;
+          });
+          setAiMatchesMap(map);
+          setAiTargetDateISO(ext?.dateISO || null);
+          setHasSearched(true);
+        }
+
+        const newExchange: AIConversationExchange = {
+          id: `${Date.now()}`,
+          userQuery: textToSearch,
+          intentType: ext?.intentType || "room_search",
+          headline:
+            ext?.headline ||
+            data.assistantMessage ||
+            "Aqui está a melhor recomendação para o seu atendimento:",
+          comparisonBlocks: Array.isArray(ext?.comparisonBlocks)
+            ? ext.comparisonBlocks
+            : [],
+          recommendationSummary: ext?.recommendationSummary || "",
+          closingQuestion: ext?.closingQuestion || "",
+          followUpSuggestions: Array.isArray(ext?.followUpSuggestions)
+            ? ext.followUpSuggestions
+            : dynamicStarterCards.map((c) => c.title),
+          suggestedCta: ext?.suggestedCta || "none",
+          recommendedRooms:
+            ext?.shouldApplyFilters !== false
+              ? matchesList
+                  .filter(
+                    (m) =>
+                      m.availableSlots &&
+                      m.availableSlots.length > 0 &&
+                      m.score >= 0,
+                  )
+                  .slice(0, 3)
+              : [],
+          targetDateISO: ext?.dateISO || null,
+        };
+        setAiExchanges((prev) => [...prev.slice(-8), newExchange]);
+        setIsMobileSearchOpen(false);
+        setTimeout(() => {
+          aiThreadEndRef.current?.scrollIntoView({
+            behavior: "smooth",
+            block: "end",
+          });
+        }, 120);
+      } catch (err: any) {
+        toast({
+          variant: "destructive",
+          title: "Não foi possível consultar o Concierge IA",
+          description: err.message,
+        });
+      } finally {
+        setIsRunningAISearch(false);
+        setPendingUserQuestion(null);
+      }
+    },
+    [
+      canUseAIConcierge,
+      aiQuery,
+      aiExchanges,
+      walletBalances,
+      activeSub,
+      profile,
+      dynamicStarterCards,
+      toast,
+    ],
+  );
+
+  const handleToggleVoiceSearch = useCallback(() => {
+    if (!canUseAIConcierge) return;
+    if (isListeningVoice) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+      setIsListeningVoice(false);
+      return;
+    }
+    const SpeechRecognition =
+      typeof window !== "undefined"
+        ? (window as any).SpeechRecognition ||
+          (window as any).webkitSpeechRecognition
+        : null;
+    if (!SpeechRecognition) {
+      setIsAISearchExpanded(true);
+      setTimeout(() => aiInputRef.current?.focus(), 100);
+      toast({
+        title: "Digite sua pergunta abaixo",
+        description:
+          "Seu navegador não suporta microfone direto, mas o Concierge IA responde por texto imediatamente!",
+      });
+      return;
+    }
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.lang = "pt-BR";
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      let finalTranscript = "";
+      recognition.onstart = () => {
+        setIsAISearchExpanded(true);
+        setIsListeningVoice(true);
+      };
+      recognition.onresult = (event: any) => {
+        let interim = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript;
+          } else {
+            interim += transcript;
+          }
+        }
+        const currentText = (finalTranscript || interim).trim();
+        if (currentText) {
+          setAiQuery(currentText);
+        }
+      };
+      recognition.onerror = () => {
+        setIsListeningVoice(false);
+      };
+      recognition.onend = () => {
+        setIsListeningVoice(false);
+        if (finalTranscript.trim()) {
+          executeAISearch(finalTranscript.trim());
+        }
+      };
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch {
+      setIsListeningVoice(false);
+    }
+  }, [canUseAIConcierge, isListeningVoice, executeAISearch, toast]);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+    };
+  }, []);
+
+  const requestLocation = () => {
+    if ("geolocation" in navigator) {
+      toast({
+        title: "Buscando localização...",
+        description: "Aguarde um momento...",
+      });
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setUserLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          });
+          setUsingLocation(true);
+          setPendingFilters((prev) => ({ ...prev, city: "Perto de mim" }));
+          if (isMobileSearchOpen) {
+            setActiveMobileTab("quando");
+          } else {
+            setActiveSearchTab("quando");
+          }
+        },
+        () => {
+          toast({ variant: "destructive", title: "Permissão de GPS negada." });
+        },
+      );
+    }
+  };
+
+  const handleClearFilters = () => {
+    const cleared = {
+      city: "Qualquer lugar",
+      date: undefined,
+      time: "",
+      modality: "hora" as RentalType,
+      category: "Todas as Salas",
+    };
+    setPendingFilters(cleared);
+    setAppliedFilters(cleared);
+    setActiveTier("all");
+    setUsingLocation(false);
+    setHasSearched(false);
+    setAiExchanges([]);
+    setAiMatchesMap({});
+    setAiTargetDateISO(null);
+    setAiQuery("");
+    setActiveMobileTab("onde");
+  };
+
+  const handleExecuteSearch = () => {
+    setAppliedFilters(pendingFilters);
+    setHasSearched(true);
+    setActiveSearchTab(null);
+    setIsMobileSearchOpen(false);
+    window.scrollTo({ top: 280, behavior: "smooth" });
+  };
+
+  const handleQuickCategorySelect = (categoryId: string) => {
+    setPendingFilters((prev) => ({ ...prev, category: categoryId }));
+    setAppliedFilters((prev) => ({ ...prev, category: categoryId }));
+    setHasSearched(categoryId !== "Todas as Salas");
+  };
+
+  const handleOpenPassWithTier = (
+    tier: PassTier = "vip",
+    hours: number | null = null,
+  ) => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("open-fusion-pass", {
+          detail: { step: "plans", tier },
+        }),
+      );
+      return;
+    }
+    setPassPreselect({ tier, hours });
+    setIsPassModalOpen(true);
+  };
+
+  const hasAIMatches = Object.keys(aiMatchesMap).length > 0;
+
+  const searchResults = useMemo(() => {
+    let exactMatches = dbRooms;
+    let isFallback = false;
+    let fallbackMessage = "";
+
+    if (
+      appliedFilters.city !== "Qualquer lugar" &&
+      appliedFilters.city !== "Perto de mim"
+    ) {
+      exactMatches = exactMatches.filter(
+        (r) =>
+          r.rawAddress?.city?.toLowerCase() ===
+          appliedFilters.city.toLowerCase(),
+      );
+    }
+    if (appliedFilters.category !== "Todas as Salas") {
+      exactMatches = exactMatches.filter((r) =>
+        r.category
+          .toLowerCase()
+          .includes(appliedFilters.category.split(" ")[0].toLowerCase()),
+      );
+    }
+    if (appliedFilters.modality) {
+      exactMatches = exactMatches.filter((r) =>
+        r.modalities.includes(appliedFilters.modality),
+      );
+    }
+    if (activeTier !== "all") {
+      exactMatches = exactMatches.filter((r) => r.tier === activeTier);
+    }
+
+    if (exactMatches.length === 0 && hasSearched) {
+      isFallback = true;
+      const cityMatches = dbRooms.filter(
+        (r) =>
+          appliedFilters.city === "Qualquer lugar" ||
+          appliedFilters.city === "Perto de mim" ||
+          r.rawAddress?.city?.toLowerCase() ===
+            appliedFilters.city.toLowerCase(),
+      );
+      if (cityMatches.length > 0) {
+        exactMatches = cityMatches;
+        fallbackMessage = `Não encontramos espaços exatos para "${appliedFilters.category}" na modalidade selecionada, mas separamos estas excelentes salas disponíveis na região.`;
+      } else {
+        exactMatches = dbRooms;
+        fallbackMessage = `Ainda não temos unidades em "${appliedFilters.city}". Confira nossos consultórios mais reservados:`;
+      }
+    }
+
+    if (usingLocation && userLocation) {
+      exactMatches = exactMatches
+        .map((r) => {
+          let d = 999;
+          if (r.rawAddress?.lat && r.rawAddress?.lng)
+            d = calculateDistance(
+              userLocation.lat,
+              userLocation.lng,
+              r.rawAddress.lat,
+              r.rawAddress.lng,
+            );
+          return { ...r, distanceKm: d };
+        })
+        .sort((a, b) => (a.distanceKm || 999) - (b.distanceKm || 999));
+    } else if (hasAIMatches) {
+      const openInAI = exactMatches.filter(
+        (r) => (aiMatchesMap[r.id]?.availableSlots?.length ?? 0) > 0,
+      );
+      exactMatches = (openInAI.length > 0 ? openInAI : exactMatches).sort(
+        (a, b) => {
+          const scoreA = aiMatchesMap[a.id]?.score ?? -999;
+          const scoreB = aiMatchesMap[b.id]?.score ?? -999;
+          return scoreB - scoreA;
+        },
+      );
+    }
+
+    return { rooms: exactMatches, isFallback, fallbackMessage };
+  }, [
+    dbRooms,
+    appliedFilters,
+    activeTier,
+    hasSearched,
+    usingLocation,
+    userLocation,
+    hasAIMatches,
+    aiMatchesMap,
+  ]);
+
+  const masterRooms = searchResults.rooms.filter((r) => r.tier === "master");
+  const vipRooms = searchResults.rooms.filter((r) => r.tier === "vip");
+  const startRooms = searchResults.rooms.filter(
+    (r) => r.tier === "start" || !r.tier,
+  );
+
+  async function toggleFavorite(e: React.MouseEvent, roomId: string) {
+    e.stopPropagation();
+    if (isPublic) return router.push("/login");
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return;
+    const isFavorited = favorites.has(roomId);
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (isFavorited) next.delete(roomId);
+      else next.add(roomId);
+      return next;
+    });
+    try {
+      if (isFavorited)
+        await supabase
           .from("favorites")
           .delete()
           .eq("user_id", user.id)
-          .eq("room_id", roomData.id);
-        if (error) throw error;
-        setIsFavorited(false);
-        toast({ description: "Sala removida dos favoritos." });
-      } else {
-        const { error } = await supabase
+          .eq("room_id", roomId);
+      else
+        await supabase
           .from("favorites")
-          .insert({ user_id: user.id, room_id: roomData.id });
-        if (error) throw error;
-        setIsFavorited(true);
-        toast({
-          title: "Salvo!",
-          description: "A sala foi adicionada aos favoritos.",
-        });
-      }
+          .insert({ user_id: user.id, room_id: roomId });
     } catch {
-      toast({
-        variant: "destructive",
-        title: "Erro",
-        description: "Não foi possível salvar o favorito.",
-      });
-    } finally {
-      setIsFavoriteLoading(false);
-    }
-  };
-
-  const handleShare = async () => {
-    if (isSharing) return;
-    setIsSharing(true);
-    const shareData = {
-      title: roomData?.name || "Sala na Fusion Clinic",
-      text: `Confira este espaço na Fusion Clinic: ${roomData?.name || "Consultório"}`,
-      url: window.location.href,
-    };
-    try {
-      if (navigator.share) await navigator.share(shareData);
-      else {
-        await navigator.clipboard.writeText(shareData.url);
-        toast({ title: "Link copiado!" });
-      }
-    } catch (err: any) {
-      if (err.name !== "AbortError") {
-        await navigator.clipboard.writeText(shareData.url);
-        toast({ title: "Link copiado!" });
-      }
-    } finally {
-      setTimeout(() => setIsSharing(false), 500);
-    }
-  };
-
-  const openLightbox = (index: number) => {
-    setCurrentPhotoIndex(index);
-    setIsLightboxOpen(true);
-    setTimeout(() => {
-      if (lightboxRef.current)
-        lightboxRef.current.scrollLeft =
-          lightboxRef.current.clientWidth * index;
-    }, 10);
-  };
-
-  const handleLightboxScroll = () => {
-    if (lightboxRef.current) {
-      const scrollPosition = lightboxRef.current.scrollLeft;
-      const width = lightboxRef.current.clientWidth;
-      const newIndex = Math.round(scrollPosition / width);
-      if (newIndex !== currentPhotoIndex) setCurrentPhotoIndex(newIndex);
-    }
-  };
-
-  const nextPhoto = () => {
-    if (
-      currentPhotoIndex < (roomData?.address_details?.gallery?.length || 0) &&
-      lightboxRef.current
-    ) {
-      lightboxRef.current.scrollBy({
-        left: lightboxRef.current.clientWidth,
-        behavior: "smooth",
+      setFavorites((prev) => {
+        const next = new Set(prev);
+        if (isFavorited) next.add(roomId);
+        else next.delete(roomId);
+        return next;
       });
     }
-  };
+  }
 
-  const prevPhoto = () => {
-    if (currentPhotoIndex > 0 && lightboxRef.current) {
-      lightboxRef.current.scrollBy({
-        left: -lightboxRef.current.clientWidth,
-        behavior: "smooth",
-      });
+  const renderTargetedPassBanner = () => {
+    if (activeTier === "all") return null;
+    let title, subtitle, Icon, benefits;
+    let baseHourlyRate = BASE_HOURLY_RATES.start;
+    if (activeTier === "vip") {
+      baseHourlyRate = BASE_HOURLY_RATES.vip;
+      title = "Pacote de Horas • Salas VIP";
+      subtitle = `Reduza o valor da hora avulsa de R$ ${baseHourlyRate}/h com os pacotes VIP e aumente sua margem em cada atendimento.`;
+      Icon = Star;
+      benefits = [
+        "Economia de até 41% por hora",
+        "Validade de 30 dias",
+        "Sem fidelidade",
+      ];
+    } else if (activeTier === "master") {
+      baseHourlyRate = BASE_HOURLY_RATES.master;
+      title = "Pacote de Horas • Salas Premium";
+      subtitle = `Acesso livre a todas as salas da Fusion Clinic (Premium, VIP e Basic) pagando muito menos que os R$ ${baseHourlyRate}/h avulsos.`;
+      Icon = Crown;
+      benefits = [
+        "Libera 100% das unidades",
+        "Zero taxa de upgrade",
+        "Repasse ou doe horas",
+      ];
+    } else {
+      baseHourlyRate = BASE_HOURLY_RATES.start;
+      title = "Pacote de Horas • Salas Basic";
+      subtitle = `Em vez de pagar R$ ${baseHourlyRate}/h por consulta avulsa, ative um pacote Basic e garanta o menor custo por hora da plataforma.`;
+      Icon = Shield;
+      benefits = [
+        "Maior rentabilidade por paciente",
+        "Crédito liberado na hora",
+        "Cancele quando quiser",
+      ];
     }
-  };
-
-  const toggleSlot = (slotKey: string) => {
-    setSelectedSlots((prev: string[]) =>
-      prev.includes(slotKey)
-        ? prev.filter((s: string) => s !== slotKey)
-        : [...prev, slotKey].sort(),
-    );
-  };
-
-  const toggleDay = (day: number) => {
-    setSelectedDays((prev: number[]) =>
-      prev.includes(day)
-        ? prev.filter((d: number) => d !== day)
-        : [...prev, day].sort(),
-    );
-  };
-
-  const nextMonth = () => setCurrentMonthView(addMonths(currentMonthView, 1));
-  const prevMonth = () => setCurrentMonthView(addMonths(currentMonthView, -1));
-
-  const monthStart = startOfMonth(currentMonthView);
-  const monthEnd = endOfMonth(monthStart);
-  const calendarDays = eachDayOfInterval({
-    start: startOfWeek(monthStart),
-    end: endOfWeek(monthEnd),
-  });
-  const canGoPrevMonth = !isBefore(
-    startOfMonth(currentMonthView),
-    startOfMonth(today),
-  );
-
-  const rawGallery = Array.isArray(address.gallery) ? address.gallery : [];
-  const allImages: string[] = [roomData.image_url, ...rawGallery].filter(
-    Boolean,
-  );
-  const imagesToShow: string[] = allImages.slice(0, 5);
-  const totalImages = imagesToShow.length;
-
-  const isPartner = roomData.is_partner === true;
-  const roomModalities: string[] = Array.isArray(roomData.modalities)
-    ? roomData.modalities
-    : [];
-  const displayAmenities: string[] =
-    Array.isArray(address.amenities) && address.amenities.length > 0
-      ? address.amenities
-      : ["wifi", "tv", "coffee", "ac", "printer", "parking"];
-
-  const getGridClass = (total: number, index: number) => {
-    if (total === 1) return "col-span-4 row-span-2";
-    if (total === 2) return "col-span-2 row-span-2";
-    if (total === 3)
-      return index === 0 ? "col-span-2 row-span-2" : "col-span-2 row-span-1";
-    if (total === 4)
-      return index === 0
-        ? "col-span-2 row-span-2"
-        : index === 1
-          ? "col-span-2 row-span-1"
-          : "col-span-1 row-span-1";
-    return index === 0 ? "col-span-2 row-span-2" : "col-span-1 row-span-1";
-  };
-
-  const mapSearchQuery = encodeURIComponent(
-    `${address.neighborhood || ""}, ${address.city || ""}`,
-  );
-  const clinicHostName = roomData.profiles?.full_name || "Equipe Fusion Clinic";
-  const avgRating =
-    reviews.length > 0
-      ? (
-          reviews.reduce(
-            (acc: number, curr: any) => acc + Number(curr.rating || 0),
-            0,
-          ) / reviews.length
-        ).toFixed(1)
-      : "Novo";
-
-  const filteredReviews =
-    reviewFilter === 0
-      ? reviews
-      : reviews.filter((r: any) => r.rating === reviewFilter);
-
-  const baseAvulsoPrice = getBasePrice();
-  const activeSelectedPkg =
-    packages.find((p: any) => Number(p.hours) === Number(selectedPkgHours)) ||
-    packages[1] ||
-    packages[0] ||
-    null;
-
-  const bestHourlyRateInPass =
-    packages.length > 0
-      ? Math.min(
-          ...packages.map((p: any) => {
-            const h = Math.max(1, Number(p.hours) || 1);
-            const pr = Number(p.price) || 0;
-            const total = h > 1 && pr <= 120 ? pr * h : pr;
-            return total / h;
-          }),
-        )
-      : baseAvulsoPrice * 0.7;
-
-  const maxDiscountPct = Math.max(
-    15,
-    Math.min(
-      41,
-      Math.round(
-        ((baseAvulsoPrice - bestHourlyRateInPass) / baseAvulsoPrice) * 100,
-      ),
-    ),
-  );
-
-  const roomTierLabel =
-    normalizeCreditTier(roomData.tier) === "master"
-      ? "Premium"
-      : normalizeCreditTier(roomData.tier) === "vip"
-        ? "VIP"
-        : "Basic";
-
-  const selectedDayCampaign = getCampaignForDateAndHour(selectedDate);
-
-  return (
-    <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-in slide-in-from-bottom-4 duration-300">
-      {/* Modal de Regulamento da Campanha */}
-      <CampaignRulesModal
-        isOpen={Boolean(rulesModalData)}
-        onClose={() => setRulesModalData(null)}
-        campaignName={rulesModalData?.name}
-        rulesText={rulesModalData?.rulesText}
-        badgeText={rulesModalData?.badgeText}
-      />
-
-      {/* TOP BAR LIMPA */}
-      <div className="flex-none bg-white z-30 border-b border-slate-100 md:border-transparent">
-        <div className="max-w-5xl mx-auto pt-5 px-5 flex justify-between items-center pb-3.5">
-          <button
-            onClick={onBack}
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 text-slate-900 transition-colors hover:bg-slate-50 cursor-pointer"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <div className="flex items-center gap-2.5">
-            <button
-              onClick={handleShare}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50 cursor-pointer"
-            >
-              <Share className="w-4 h-4 text-slate-900" />
-            </button>
-            <button
-              onClick={handleFavoriteToggle}
-              disabled={isFavoriteLoading}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
-            >
-              <Heart
-                className={`w-5 h-5 transition-colors ${
-                  isFavorited ? "fill-red-500 text-red-500" : "text-slate-900"
-                }`}
-              />
-            </button>
+    return (
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 p-5 sm:p-6 rounded-2xl mb-6 bg-[#FAF7F4] border border-[#BF4B24]/25 shadow-2xs transition-all mx-4 sm:mx-0">
+        <div className="flex items-start sm:items-center gap-4 w-full sm:w-auto">
+          <div className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 bg-white border border-[#BF4B24]/20 text-[#BF4B24]">
+            <Icon className="w-5 h-5" />
           </div>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto pb-28 md:pb-12 scrollbar-hide">
-        {/* CABEÇALHO EDITORIAL DO ESPAÇO */}
-        <div className="max-w-5xl mx-auto px-5 pt-2 pb-5">
-          {isPartner && (
-            <div className="mb-2.5 inline-flex items-center gap-1.5 bg-stone-100 text-stone-800 border border-stone-200/80 text-[11px] font-bold px-2.5 py-1 rounded-md">
-              <BadgeCheck className="w-3.5 h-3.5 text-[#BF4B24]" />
-              Espaço Verificado • Fusion Partner
-            </div>
-          )}
-          <div className="flex justify-between items-start gap-4 mb-2">
-            <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight leading-tight">
-              {roomData.name || "Consultório"}
-            </h1>
-            <div className="flex items-center gap-1 bg-stone-100 px-2.5 py-1 rounded-lg shrink-0 mt-0.5">
-              <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />
-              <span className="text-xs font-bold text-slate-800">
-                {avgRating}{" "}
-                <span className="text-slate-500 font-medium hidden md:inline">
-                  ({reviews.length})
-                </span>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[#BF4B24] bg-white border border-[#BF4B24]/20 px-2 py-0.5 rounded-full">
+                Fusion Pass+
               </span>
+              <h3 className="text-base font-bold text-stone-900 leading-tight">
+                {title}
+              </h3>
             </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs md:text-sm text-slate-600">
-            <div className="flex items-center gap-1 font-semibold text-slate-700">
-              <MapPin className="w-3.5 h-3.5 text-[#BF4B24]" />
-              {address.neighborhood
-                ? `${address.neighborhood}, ${address.city || ""}`
-                : address.city
-                  ? `${address.city}, ${address.state}`
-                  : "Localização verificada"}
-            </div>
-            <span className="text-slate-300">•</span>
-            <div className="flex items-center gap-1 text-slate-600">
-              <Users className="w-3.5 h-3.5 text-slate-400" />
-              Até {address.capacity || 4} pessoas
+            <p className="text-xs sm:text-sm text-stone-600 mt-1 leading-relaxed max-w-xl">
+              {subtitle}
+            </p>
+            <div className="flex flex-wrap items-center gap-4 mt-2.5">
+              {benefits.map((ben, idx) => (
+                <div key={idx} className="flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="text-xs font-semibold text-stone-700">
+                    {ben}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
         </div>
+        <Button
+          onClick={() => handleOpenPassWithTier(activeTier)}
+          className="w-full sm:w-auto shrink-0 rounded-xl font-bold h-11 px-5 bg-[#BF4B24] hover:bg-[#9A3C1D] text-white text-xs cursor-pointer"
+        >
+          Simular pacote com desconto
+        </Button>
+      </div>
+    );
+  };
 
-        {/* GALERIA MOBILE */}
-        <div className="md:hidden relative w-full h-[34vh] bg-slate-100 flex overflow-x-auto snap-x snap-mandatory scrollbar-hide touch-pan-x">
-          {allImages.length > 0 ? (
-            allImages.map((img: string, idx: number) => (
-              <div
-                key={idx}
-                onClick={() => setIsAllPhotosOpen(true)}
-                className="relative w-full h-full shrink-0 snap-center snap-always cursor-pointer"
-              >
-                <Image
-                  src={img}
-                  alt={`Foto ${idx + 1}`}
-                  fill
-                  quality={75}
-                  className="object-cover"
-                  sizes="100vw"
-                  priority={idx < 3}
-                />
-              </div>
-            ))
-          ) : (
-            <div className="w-full h-full flex items-center justify-center text-slate-400 font-medium bg-slate-100">
-              Sem fotos
-            </div>
-          )}
-          {allImages.length > 0 && (
-            <button
-              onClick={() => setIsAllPhotosOpen(true)}
-              className="absolute bottom-3.5 right-4 bg-slate-900/80 backdrop-blur-xs text-white font-semibold text-xs py-1.5 px-3 rounded-lg flex items-center gap-1.5"
-            >
-              <Grid className="w-3.5 h-3.5" /> 1/{allImages.length}
-            </button>
-          )}
-        </div>
+  if (loading)
+    return (
+      <div className="flex justify-center items-center min-h-[60vh] bg-[#FAF7F4]">
+        <Loader2 className="w-9 h-9 animate-spin text-[#BF4B24]" />
+      </div>
+    );
 
-        {/* BARRA RÁPIDA DE HORÁRIOS MOBILE */}
-        <div className="md:hidden px-5 pt-4">
-          <div className="bg-stone-50 border border-stone-200/90 rounded-2xl p-3.5 flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-white border border-stone-200 flex items-center justify-center shrink-0">
-                  <CalendarIcon className="w-4 h-4 text-[#BF4B24]" />
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-slate-900">
-                    {isSameDay(selectedDate, today)
-                      ? "Disponibilidade para Hoje"
-                      : format(selectedDate, "dd 'de' MMMM", { locale: ptBR })}
-                  </p>
-                  <p className="text-[11px] text-slate-500 font-medium">
-                    {freeSlotsForSelectedDate.length > 0
-                      ? `${freeSlotsForSelectedDate.length} horário(s) livre(s) nesta data`
-                      : "Toque para escolher outra data no calendário"}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={scrollToBookingSection}
-                className="text-xs font-bold text-[#BF4B24] bg-white border border-stone-200 px-3 py-2 rounded-xl shrink-0 active:scale-95 transition-transform"
-              >
-                Ver calendário
-              </button>
-            </div>
+  const firstName = profile.name ? profile.name.split(" ")[0] : "Especialista";
+  const hasActiveWalletCredits = profile.balance > 0 || Boolean(activeSub);
+  const isBlackFridayActive = Boolean(activeBlackCampaign);
 
-            {activeTab === "hora" && freeSlotsForSelectedDate.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pt-1">
-                {freeSlotsForSelectedDate
-                  .slice(0, 5)
-                  .map((slotTime: string) => {
-                    const slotKey = `${format(selectedDate, "yyyy-MM-dd")}|${slotTime}`;
-                    const isSelected = selectedSlots.includes(slotKey);
-                    const pricing = getSlotPricingDetails(slotKey);
-                    return (
-                      <button
-                        key={slotKey}
-                        type="button"
-                        onClick={() => toggleSlot(slotKey)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap border transition-colors shrink-0 flex items-center gap-1 ${
-                          isSelected
-                            ? "bg-[#BF4B24] text-white border-[#BF4B24]"
-                            : pricing.campaign
-                              ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-                              : "bg-white text-slate-700 border-stone-200 hover:border-stone-300"
-                        }`}
-                      >
-                        <span>{slotTime.split(" - ")[0]}</span>
-                        {pricing.campaign && (
-                          <span
-                            className={`text-[9px] font-black px-1 rounded ${
-                              isSelected
-                                ? "bg-black/20 text-white"
-                                : "bg-white text-slate-900"
-                            }`}
-                          >
-                            {pricing.campaign.badgeText}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                {freeSlotsForSelectedDate.length > 5 && (
+  // ==========================================================================
+  // PÁGINA FULL-SCREEN DO CONCIERGE IA
+  // ==========================================================================
+  const fullScreenConciergeOverlay =
+    canUseAIConcierge &&
+    isAISearchExpanded &&
+    isPortalReady &&
+    typeof document !== "undefined"
+      ? createPortal(
+          <div className="fixed inset-0 z-[9999] bg-[#FAF7F4] flex flex-col h-[100dvh] w-screen overflow-hidden font-sans animate-in fade-in duration-200">
+            <div className="bg-[#141210] text-white px-4 sm:px-6 pt-[max(env(safe-area-inset-top,14px),14px)] pb-3.5 border-b border-white/10 shrink-0 shadow-md">
+              <div className="max-w-3xl mx-auto flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
                   <button
                     type="button"
-                    onClick={scrollToBookingSection}
-                    className="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-600 bg-stone-200/60 whitespace-nowrap shrink-0"
+                    onClick={() => setIsAISearchExpanded(false)}
+                    aria-label="Voltar para as salas"
+                    className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center shrink-0 transition-colors cursor-pointer"
                   >
-                    +{freeSlotsForSelectedDate.length - 5} horários
+                    <ArrowLeft className="w-5 h-5" />
                   </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* GALERIA DESKTOP */}
-        <div className="hidden md:block max-w-5xl mx-auto px-5 mb-8">
-          <div className="grid grid-cols-4 grid-rows-2 gap-2 h-[420px] w-full rounded-2xl overflow-hidden relative bg-slate-100">
-            {imagesToShow.map((img: string, idx: number) => {
-              const gridClass = getGridClass(totalImages, idx);
-              return (
-                <div
-                  key={idx}
-                  onClick={() => setIsAllPhotosOpen(true)}
-                  className={`relative group ${gridClass}`}
-                >
-                  <Image
-                    src={img}
-                    alt={`Detalhe ${idx + 1}`}
-                    fill
-                    className="object-cover transition-all duration-300 group-hover:scale-[1.01] group-hover:brightness-95 cursor-pointer"
-                    sizes="(max-width: 768px) 100vw, 50vw"
-                    priority={idx === 0}
-                  />
-                </div>
-              );
-            })}
-            {allImages.length > 5 && (
-              <button
-                onClick={() => setIsAllPhotosOpen(true)}
-                className="absolute bottom-4 right-4 bg-white hover:bg-slate-50 border border-slate-200 text-slate-900 font-semibold text-xs py-2 px-4 rounded-xl flex items-center gap-2 shadow-sm transition-transform active:scale-95"
-              >
-                <Grid className="w-3.5 h-3.5" /> Mostrar todas as{" "}
-                {allImages.length} fotos
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="px-5 py-6 max-w-5xl mx-auto flex flex-col lg:grid lg:grid-cols-12 gap-10">
-          <div className="order-1 lg:order-1 lg:col-span-7 space-y-7">
-            <div className="flex items-center justify-between pb-5 border-b border-slate-100">
-              <div className="flex items-center gap-3.5">
-                <div className="w-11 h-11 rounded-full bg-stone-100 border border-stone-200 flex items-center justify-center text-slate-700 shrink-0">
-                  <Building2 className="w-5 h-5 text-[#BF4B24]" />
-                </div>
-                <div>
-                  <p className="text-sm font-bold text-slate-900">
-                    Espaço gerenciado por {clinicHostName}
-                  </p>
-                  <p className="text-xs text-slate-500 font-medium mt-0.5">
-                    Check-in digital na porta • Hora clínica de 50 min
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {packages.length > 0 && activeTab === "hora" && (
-              <div
-                ref={fusionPassCardRef}
-                className="rounded-2xl border border-[#BF4B24]/30 bg-[#FAF7F5] overflow-hidden transition-all duration-300 shadow-2xs"
-              >
-                <div
-                  onClick={() => setIsPassDetailsExpanded((prev) => !prev)}
-                  className="p-4 sm:p-5 cursor-pointer flex items-center justify-between gap-4 hover:bg-orange-50/40 transition-colors"
-                >
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-[#BF4B24] text-white">
-                        <Tag className="w-3 h-3" />
-                        Fusion Pass+
+                  <div className="relative w-9 h-9 rounded-xl bg-gradient-to-br from-[#DE5D2E] to-[#9A3C1D] text-white flex items-center justify-center shrink-0 shadow-xs ring-1 ring-white/20">
+                    <Sparkles className="w-4 h-4" />
+                    <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#141210]" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm sm:text-base font-extrabold text-white tracking-tight truncate">
+                        Concierge Fusion IA
                       </span>
-                      <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/70 px-2 py-0.5 rounded-full">
-                        Economize até {maxDiscountPct}% nesta sala
-                      </span>
+                      {profile.specialty ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider bg-emerald-400/15 text-emerald-300 border border-emerald-400/30 px-2 py-0.5 rounded-full">
+                          <Stethoscope className="w-3 h-3" />
+                          {profile.specialty}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider bg-amber-400/15 text-[#FBBF24] border border-amber-400/30 px-2 py-0.5 rounded-full">
+                          Consultor VIP
+                        </span>
+                      )}
                     </div>
-                    <h3 className="text-sm sm:text-base font-bold text-stone-900 pt-0.5">
-                      Atenda aqui por{" "}
-                      <span className="text-[#BF4B24] font-black">
-                        R$ {bestHourlyRateInPass.toFixed(2).replace(".", ",")}
-                        /hora
-                      </span>{" "}
-                      <span className="text-xs font-normal text-stone-500">
-                        (em vez de R${" "}
-                        {baseAvulsoPrice.toFixed(2).replace(".", ",")}/h no
-                        avulso)
-                      </span>
-                    </h3>
-                    <p className="text-xs text-stone-500">
-                      Toque para simular seu pacote de horas e ver como funciona
-                      o desconto
+                    <p className="text-[11px] text-stone-300 truncate">
+                      {profile.specialty
+                        ? `Consultoria rápida e direta para ${profile.specialty}`
+                        : "Descubra em 2 perguntas o plano mais econômico para você"}
                     </p>
                   </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {aiExchanges.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAiExchanges([]);
+                        setAiMatchesMap({});
+                        setAiTargetDateISO(null);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-[11px] font-bold text-stone-200 transition-colors cursor-pointer"
+                    >
+                      Recomeçar
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="px-3.5 py-2 rounded-xl bg-white border border-stone-200/90 text-xs font-bold text-[#BF4B24] shrink-0 flex items-center gap-1 shadow-2xs"
+                    onClick={() => setIsAISearchExpanded(false)}
+                    className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold text-white flex items-center gap-1 cursor-pointer"
                   >
-                    <span className="hidden sm:inline">
-                      {isPassDetailsExpanded ? "Ocultar" : "Ver desconto"}
-                    </span>
-                    <ChevronDown
-                      className={`w-4 h-4 transition-transform duration-200 ${
-                        isPassDetailsExpanded ? "rotate-180" : ""
-                      }`}
-                    />
+                    <span className="hidden sm:inline">Fechar</span>
+                    <X className="w-4 h-4" />
                   </button>
                 </div>
+              </div>
+            </div>
 
-                {isPassDetailsExpanded && activeSelectedPkg && (
-                  <div className="px-4 pb-5 sm:px-5 sm:pb-5 pt-2 border-t border-[#BF4B24]/15 bg-white space-y-4 animate-in fade-in duration-200">
+            <div className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5">
+              <div className="max-w-3xl mx-auto space-y-5 pb-8">
+                {!profile.isComplete && (
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-50/90 via-orange-50/60 to-white border border-[#BF4B24]/30 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider bg-[#BF4B24] text-white px-2 py-0.5 rounded-full">
+                          <AlertCircle className="w-3 h-3" />
+                          Perfil {profile.completionPct}%
+                        </span>
+                        <span className="text-xs font-bold text-stone-900">
+                          Falta preencher: {profile.missingFields.join(", ")}
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleGoToCompleteProfile}
+                      className="px-3.5 py-2 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <UserCheck className="w-3.5 h-3.5 text-[#FBBF24]" />
+                      <span>Completar perfil</span>
+                    </button>
+                  </div>
+                )}
+
+                {aiExchanges.length === 0 && !isRunningAISearch && (
+                  <div className="space-y-4">
+                    <div className="bg-white rounded-3xl p-5 border border-stone-200/85 shadow-2xs flex items-start gap-3.5">
+                      <div className="w-10 h-10 rounded-2xl bg-[#FAF7F4] border border-[#BF4B24]/25 text-[#BF4B24] flex items-center justify-center shrink-0 mt-0.5">
+                        <MessageSquareText className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <h3 className="text-sm sm:text-base font-bold text-stone-900">
+                          Olá, Dr(a). {firstName}! Como posso te ajudar hoje?
+                        </h3>
+                        <p className="text-xs sm:text-sm text-stone-600 leading-relaxed">
+                          Me conte quantas horas por semana pretende atender ou
+                          qual é a sua dúvida. Eu faço as perguntas certas e te
+                          entrego <strong>a melhor recomendação</strong> com o
+                          cálculo exato da sua economia.
+                        </p>
+                      </div>
+                    </div>
                     <div>
-                      <p className="text-xs font-bold text-stone-700 mb-2">
-                        1. Escolha quantas horas por mês você costuma atender
-                        (Salas {roomTierLabel}):
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-stone-400 mb-2.5 pl-1">
+                        Toque para iniciar a conversa:
                       </p>
-                      <div className="grid grid-cols-3 gap-2">
-                        {packages.map((pkg: any) => {
-                          const isSelected =
-                            Number(selectedPkgHours) === Number(pkg.hours);
-                          const h = Math.max(1, Number(pkg.hours) || 1);
-                          const pr = Number(pkg.price) || 0;
-                          const total = h > 1 && pr <= 120 ? pr * h : pr;
-                          const hrRate = total / h;
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {dynamicStarterCards.map((card) => {
+                          const Icon = card.icon;
                           return (
                             <button
-                              key={pkg.id || pkg.hours}
+                              key={card.title}
                               type="button"
-                              onClick={() => setSelectedPkgHours(pkg.hours)}
-                              className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                                isSelected
-                                  ? "border-[#BF4B24] bg-[#FAF7F5] ring-1 ring-[#BF4B24]"
-                                  : "border-stone-200 bg-white hover:border-stone-300"
-                              }`}
+                              onClick={() => executeAISearch(card.title)}
+                              className="group p-3.5 rounded-2xl bg-white hover:bg-orange-50/40 border border-stone-200/90 hover:border-[#BF4B24]/45 text-left transition-all flex items-start gap-3 shadow-2xs cursor-pointer active:scale-[0.99]"
                             >
-                              <span className="text-xs sm:text-sm font-bold text-stone-900 block">
-                                {h} horas
-                              </span>
-                              <span className="text-[11px] font-semibold text-[#BF4B24] block mt-0.5">
-                                R$ {hrRate.toFixed(2).replace(".", ",")}/h
-                              </span>
+                              <div className="w-9 h-9 rounded-xl bg-[#FAF7F4] group-hover:bg-[#BF4B24] text-[#BF4B24] group-hover:text-white border border-[#BF4B24]/20 flex items-center justify-center shrink-0 transition-colors mt-0.5">
+                                <Icon className="w-4 h-4" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#BF4B24] block">
+                                  {card.badge}
+                                </span>
+                                <p className="text-xs sm:text-sm font-bold text-stone-900 group-hover:text-[#BF4B24] transition-colors mt-0.5 leading-snug">
+                                  {card.title}
+                                </p>
+                                <p className="text-[11px] text-stone-500 mt-0.5 line-clamp-1">
+                                  {card.desc}
+                                </p>
+                              </div>
+                              <ChevronRight className="w-4 h-4 text-stone-300 group-hover:text-[#BF4B24] shrink-0 self-center" />
                             </button>
                           );
                         })}
                       </div>
                     </div>
-
-                    {(() => {
-                      const pkgHours = Math.max(
-                        1,
-                        Number(activeSelectedPkg.hours || 1),
-                      );
-                      const rawPr = Number(activeSelectedPkg.price || 0);
-                      const pkgTotalBRL =
-                        pkgHours > 1 && rawPr <= 120 ? rawPr * pkgHours : rawPr;
-                      const hourlyRate = pkgTotalBRL / pkgHours;
-                      const avulsoTotalBRL = baseAvulsoPrice * pkgHours;
-                      const savingsBRL = Math.max(
-                        0,
-                        avulsoTotalBRL - pkgTotalBRL,
-                      );
-                      return (
-                        <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                          <div className="space-y-0.5">
-                            <span className="text-[11px] font-semibold text-stone-500">
-                              Pacote de {pkgHours} horas (Salas {roomTierLabel})
-                            </span>
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-xl font-black text-stone-900">
-                                R$ {hourlyRate.toFixed(2).replace(".", ",")}/h
-                              </span>
-                              <span className="text-xs text-stone-400 line-through">
-                                R${" "}
-                                {baseAvulsoPrice.toFixed(2).replace(".", ",")}/h
-                              </span>
-                            </div>
-                            <p className="text-[11px] text-stone-500">
-                              Total do pacote: R${" "}
-                              {pkgTotalBRL.toLocaleString("pt-BR", {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
-                            </p>
-                          </div>
-                          {savingsBRL > 0 && (
-                            <div className="bg-emerald-50 border border-emerald-200/70 px-3 py-2 rounded-xl text-left sm:text-right shrink-0">
-                              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 block">
-                                Sua economia imediata
-                              </span>
-                              <span className="text-sm font-black text-emerald-700 flex items-center sm:justify-end gap-1 mt-0.5">
-                                <TrendingDown className="w-4 h-4" />
-                                R${" "}
-                                {savingsBRL.toLocaleString("pt-BR", {
-                                  minimumFractionDigits: 2,
-                                  maximumFractionDigits: 2,
-                                })}{" "}
-                                no mês
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
-
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-[11px] text-stone-600">
-                      <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#FAF7F5]/60 border border-stone-200/60">
-                        <Unlock className="w-3.5 h-3.5 text-[#BF4B24] shrink-0 mt-0.5" />
-                        <span>
-                          <strong className="text-stone-900 block">
-                            Cancele quando quiser
-                          </strong>
-                          Sem fidelidade e sem multa.
-                        </span>
-                      </div>
-                      <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#FAF7F5]/60 border border-stone-200/60">
-                        <CalendarClock className="w-3.5 h-3.5 text-[#BF4B24] shrink-0 mt-0.5" />
-                        <span>
-                          <strong className="text-stone-900 block">
-                            30 dias para utilizar
-                          </strong>
-                          Créditos liberados na hora na carteira.
-                        </span>
-                      </div>
-                      <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#FAF7F5]/60 border border-stone-200/60">
-                        <ArrowLeftRight className="w-3.5 h-3.5 text-[#BF4B24] shrink-0 mt-0.5" />
-                        <span>
-                          <strong className="text-stone-900 block">
-                            Doe ou negocie horas
-                          </strong>
-                          Não usou tudo? Repasse a outros profissionais.
-                        </span>
-                      </div>
-                    </div>
-
-                    <Button
-                      type="button"
-                      onClick={handleGoToFusionPass}
-                      className="w-full h-11 bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-bold text-xs sm:text-sm rounded-xl shadow-xs flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <span>
-                        Assinar pacote de {activeSelectedPkg.hours}h com
-                        desconto
-                      </span>
-                      <ArrowRight className="w-4 h-4" />
-                    </Button>
                   </div>
                 )}
-              </div>
-            )}
 
-            <section>
-              <h2 className="text-lg font-bold text-slate-900 mb-2.5">
-                Sobre o consultório
-              </h2>
-              <p className="text-slate-600 leading-relaxed text-sm">
-                {roomData.description ||
-                  "Consultório preparado para atendimentos de saúde, com isolamento acústico, climatização e recepção equipada para receber seus pacientes com conforto."}
-              </p>
-            </section>
-
-            <div className="w-full h-px bg-slate-100" />
-
-            <section>
-              <h2 className="text-lg font-bold text-slate-900 mb-4">
-                O que este espaço oferece
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {displayAmenities.map((amId: string) => {
-                  const amenityDef = AMENITIES_LIST.find((a) => a.id === amId);
-                  if (!amenityDef) return null;
-                  const Icon = amenityDef.icon;
+                {aiExchanges.map((exchange) => {
+                  const hasSingleVerdict =
+                    exchange.comparisonBlocks.length === 1;
                   return (
-                    <div
-                      key={amId}
-                      className="flex items-center gap-3 p-3.5 rounded-xl bg-stone-50/70 border border-stone-200/70"
-                    >
-                      <Icon className="w-5 h-5 text-slate-700 shrink-0" />
-                      <span className="text-xs font-semibold text-slate-800">
-                        {amenityDef.label}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+                    <div key={exchange.id} className="space-y-3.5">
+                      <div className="flex flex-col items-end">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-1 pr-1">
+                          Você
+                        </span>
+                        <div className="bg-stone-900 text-white px-4 py-2.5 rounded-2xl rounded-tr-xs text-xs sm:text-sm font-semibold max-w-[85%] shadow-xs">
+                          {exchange.userQuery}
+                        </div>
+                      </div>
 
-            <div className="w-full h-px bg-slate-100" />
-
-            <section>
-              <h2 className="text-lg font-bold text-slate-900 mb-4">
-                Localização aproximada
-              </h2>
-              <div className="relative w-full h-60 bg-slate-100 rounded-2xl overflow-hidden border border-slate-200">
-                <div className="absolute top-[-70px] left-0 w-full h-[calc(100%+70px)] pointer-events-none">
-                  <iframe
-                    width="100%"
-                    height="100%"
-                    style={{ border: 0 }}
-                    loading="lazy"
-                    allowFullScreen
-                    src={`https://www.google.com/maps?q=${mapSearchQuery}&output=embed&z=15`}
-                  ></iframe>
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="w-40 h-40 bg-[#BF4B24]/15 border border-[#BF4B24]/40 rounded-full"></div>
-                </div>
-                <div className="absolute bottom-3.5 left-3.5 right-3.5 md:right-auto md:w-64 bg-white/95 backdrop-blur-xs px-4 py-2.5 rounded-xl shadow-xs border border-slate-200/80 flex items-center gap-3 pointer-events-none">
-                  <div className="w-8 h-8 rounded-lg bg-stone-100 flex items-center justify-center shrink-0">
-                    <MapPin className="w-4 h-4 text-[#BF4B24]" />
-                  </div>
-                  <div className="overflow-hidden">
-                    <p className="text-xs font-bold text-slate-900 truncate">
-                      {address.neighborhood || "Região Central"}
-                    </p>
-                    <p className="text-[11px] font-medium text-slate-500 truncate">
-                      {address.city
-                        ? `${address.city}, ${address.state}`
-                        : "Localização verificada"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="bg-stone-50 rounded-xl p-3.5 mt-3 border border-stone-200/70 flex items-start gap-3">
-                <Lock className="w-4 h-4 text-slate-600 shrink-0 mt-0.5" />
-                <p className="text-xs text-slate-600 leading-relaxed">
-                  Para privacidade da clínica, o número exato, sala e instruções
-                  de acesso são liberados assim que sua reserva é confirmada.
-                </p>
-              </div>
-            </section>
-          </div>
-
-          {/* COLUNA DE AGENDAMENTO */}
-          <div
-            ref={bookingSectionRef}
-            className="order-2 lg:order-2 lg:col-span-5 flex flex-col gap-6 scroll-mt-20"
-          >
-            <div
-              className={`bg-white p-5 md:p-6 border rounded-2xl transition-all duration-300 md:shadow-md md:h-fit md:sticky md:top-24 flex flex-col ${
-                highlightSchedule
-                  ? "border-[#BF4B24] ring-4 ring-[#BF4B24]/15"
-                  : "border-slate-200"
-              }`}
-            >
-              {roomModalities.length > 1 && (
-                <div className="flex bg-stone-100 p-1 rounded-xl mb-5">
-                  {roomModalities.includes("hora") && (
-                    <button
-                      onClick={() => setActiveTab("hora")}
-                      className={`flex-1 text-xs font-bold py-2 rounded-lg transition-all ${
-                        activeTab === "hora"
-                          ? "bg-white shadow-xs text-slate-900"
-                          : "text-slate-500"
-                      }`}
-                    >
-                      Por Hora
-                    </button>
-                  )}
-                  {roomModalities.includes("turno") && (
-                    <button
-                      onClick={() => setActiveTab("turno")}
-                      className={`flex-1 text-xs font-bold py-2 rounded-lg transition-all ${
-                        activeTab === "turno"
-                          ? "bg-white shadow-xs text-slate-900"
-                          : "text-slate-500"
-                      }`}
-                    >
-                      Por Turno
-                    </button>
-                  )}
-                  {roomModalities.includes("fixo") && (
-                    <button
-                      onClick={() => setActiveTab("fixo")}
-                      className={`flex-1 text-xs font-bold py-2 rounded-lg transition-all ${
-                        activeTab === "fixo"
-                          ? "bg-white shadow-xs text-slate-900"
-                          : "text-slate-500"
-                      }`}
-                    >
-                      Fixo Mensal
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {activeTab === "hora" && (
-                <section className="animate-in fade-in">
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <h2 className="text-base font-bold text-slate-900">
-                        Escolha a data e os horários
-                      </h2>
-                      <p className="text-xs text-slate-500">
-                        Selecione um ou mais horários para reservar
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-lg font-bold text-slate-900">
-                        R$ {getBasePrice()}
-                      </span>
-                      <span className="text-xs text-slate-500 block">
-                        /hora avulsa
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* BANNER DA CAMPANHA COM BOTÃO "LER REGRAS" */}
-                  {selectedDayCampaign ? (
-                    <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 space-y-2 shadow-md">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Flame className="w-4 h-4 text-amber-400 fill-amber-400 shrink-0" />
-                          <div className="min-w-0">
-                            <span className="text-[11px] font-black text-white block uppercase tracking-wide truncate">
-                              {selectedDayCampaign.campaignName}
-                            </span>
-                            <span className="text-[10px] font-medium text-slate-300 block">
-                              {selectedDayCampaign.eligibleHoursForDay.length >
-                              0
-                                ? `Horários em oferta hoje: ${selectedDayCampaign.eligibleHoursForDay
-                                    .map(
-                                      (h) => `${String(h).padStart(2, "0")}h`,
-                                    )
-                                    .join(", ")}`
-                                : "Horários selecionados com desconto especial!"}
-                            </span>
+                      <div className="bg-white rounded-3xl p-4 sm:p-5 border border-stone-200/90 shadow-xs space-y-4">
+                        <div className="flex items-start gap-3">
+                          <div className="w-8 h-8 rounded-xl bg-[#FAF7F4] border border-[#BF4B24]/25 text-[#BF4B24] flex items-center justify-center shrink-0 mt-0.5">
+                            <Sparkles className="w-4 h-4" />
+                          </div>
+                          <div className="space-y-1.5 flex-1">
+                            <p className="text-xs sm:text-[15px] font-medium text-stone-800 leading-relaxed">
+                              {renderFormattedText(exchange.headline)}
+                            </p>
                           </div>
                         </div>
-                        <span className="px-2 py-0.5 rounded-md bg-white text-slate-900 text-[10px] font-black shrink-0">
-                          {selectedDayCampaign.badgeText} OFF
-                        </span>
-                      </div>
 
-                      {selectedDayCampaign.rulesText && (
-                        <div className="pt-1.5 border-t border-white/10 flex items-center justify-between">
-                          <span className="text-[10px] text-slate-400">
-                            Consulte prazo de uso e remarcação:
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setRulesModalData({
-                                name: selectedDayCampaign.campaignName,
-                                rulesText: selectedDayCampaign.rulesText!,
-                                badgeText: `${selectedDayCampaign.badgeText} OFF`,
-                              })
-                            }
-                            className="inline-flex items-center gap-1 text-[11px] font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-2 cursor-pointer shrink-0"
-                          >
-                            <ScrollText className="w-3 h-3" />
-                            <span>Ler regras</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    roomCampaigns.length > 0 && (
-                      <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 text-[11px] font-medium text-white flex items-center justify-between gap-2 shadow-sm">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                          <span>
-                            Toque nos{" "}
-                            <strong className="text-amber-400">
-                              dias em preto
-                            </strong>{" "}
-                            no calendário para ver horários com desconto!
-                          </span>
-                        </div>
-                        {firstRoomCampaignWithRules && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setRulesModalData(firstRoomCampaignWithRules)
-                            }
-                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-2 cursor-pointer shrink-0"
-                          >
-                            <ScrollText className="w-3 h-3" />
-                            <span>Regras</span>
-                          </button>
-                        )}
-                      </div>
-                    )
-                  )}
-
-                  {preselectedSlotStr && selectedSlots.length > 0 && (
-                    <div className="mb-3 px-3 py-2 rounded-xl bg-orange-50 border border-orange-200/80 flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold text-[#BF4B24] flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5 text-[#BF4B24] shrink-0" />
-                        Horário das {normalizeSlotLabel(preselectedSlotStr)} já
-                        selecionado para você
-                      </span>
-                    </div>
-                  )}
-
-                  {packages.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleExpandAndScrollToPass}
-                      className="w-full mb-4 px-3 py-2 rounded-xl bg-[#FAF7F5] hover:bg-orange-50/70 border border-[#BF4B24]/25 flex items-center justify-between gap-2 text-left transition-colors cursor-pointer"
-                    >
-                      <span className="text-[11px] font-medium text-stone-700">
-                        No <strong className="text-[#BF4B24]">Pass+</strong> sai
-                        a{" "}
-                        <strong className="text-stone-900">
-                          R$ {bestHourlyRateInPass.toFixed(2).replace(".", ",")}
-                          /h
-                        </strong>{" "}
-                        <span className="text-emerald-700 font-bold">
-                          (-{maxDiscountPct}%)
-                        </span>
-                      </span>
-                      <span className="text-[11px] font-bold text-[#BF4B24] flex items-center shrink-0">
-                        Ver pacote
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      </span>
-                    </button>
-                  )}
-
-                  <div className="w-full bg-stone-50/60 rounded-xl border border-stone-200/80 p-3.5 mb-5">
-                    <div className="flex items-center justify-between mb-3">
-                      <button
-                        onClick={prevMonth}
-                        disabled={!canGoPrevMonth}
-                        className={`p-1.5 rounded-lg transition-colors ${
-                          canGoPrevMonth
-                            ? "text-slate-600 hover:bg-stone-200/60"
-                            : "text-slate-200 cursor-not-allowed"
-                        }`}
-                      >
-                        <ChevronLeft className="w-4 h-4" />
-                      </button>
-                      <div className="font-bold text-slate-900 capitalize text-sm">
-                        {format(currentMonthView, "MMMM 'de' yyyy", {
-                          locale: ptBR,
-                        })}
-                      </div>
-                      <button
-                        onClick={nextMonth}
-                        className="p-1.5 rounded-lg text-slate-600 hover:bg-stone-200/60 transition-colors"
-                      >
-                        <ChevronRight className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <div className="grid grid-cols-7 text-center mb-1.5">
-                      {["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"].map(
-                        (d: string) => (
+                        {exchange.comparisonBlocks.length > 0 && (
                           <div
-                            key={d}
-                            className="text-[10px] font-semibold text-slate-400 uppercase"
+                            className={
+                              hasSingleVerdict
+                                ? "grid grid-cols-1 gap-3"
+                                : exchange.comparisonBlocks.length === 2
+                                  ? "grid grid-cols-1 sm:grid-cols-2 gap-3"
+                                  : "grid grid-cols-1 sm:grid-cols-3 gap-3"
+                            }
                           >
-                            {d}
-                          </div>
-                        ),
-                      )}
-                    </div>
-                    <div className="grid grid-cols-7 gap-y-1.5 gap-x-1">
-                      {calendarDays.map((day: Date) => {
-                        const dateStr = format(day, "yyyy-MM-dd");
-                        const isSelected = isSameDay(day, selectedDate);
-                        const isPast =
-                          isBefore(day, today) && !isSameDay(day, today);
-                        const isCurrentMonth = isSameMonth(
-                          day,
-                          currentMonthView,
-                        );
-                        const hasSelection = selectedSlots.some(
-                          (slotKey: string) => slotKey.startsWith(dateStr),
-                        );
-                        const dayCampaign =
-                          !isPast && isCurrentMonth
-                            ? getCampaignForDateAndHour(day)
-                            : null;
-                        return (
-                          <button
-                            key={day.toISOString()}
-                            onClick={() => {
-                              if (!isPast) setSelectedDate(day);
-                            }}
-                            disabled={isPast || !isCurrentMonth}
-                            className={`relative h-10 w-full rounded-lg text-xs font-semibold flex flex-col items-center justify-center transition-colors ${
-                              !isCurrentMonth ? "invisible" : ""
-                            } ${
-                              isPast ? "text-slate-300 cursor-not-allowed" : ""
-                            } ${
-                              isSelected
-                                ? "bg-[#BF4B24] text-white font-bold shadow-md"
-                                : dayCampaign
-                                  ? "bg-slate-900 text-white border border-slate-950 hover:bg-slate-800 shadow-sm"
-                                  : ""
-                            } ${
-                              !isSelected &&
-                              !dayCampaign &&
-                              !isPast &&
-                              isCurrentMonth
-                                ? "text-slate-700 hover:bg-stone-200/60"
-                                : ""
-                            }`}
-                          >
-                            <span className="relative z-10 leading-none">
-                              {format(day, "d")}
-                            </span>
-                            {dayCampaign && !hasSelection && (
-                              <span
-                                className={`text-[8px] font-black leading-none mt-0.5 ${
-                                  isSelected
-                                    ? "text-white/90"
-                                    : "text-amber-400"
+                            {exchange.comparisonBlocks.map((block, bIdx) => (
+                              <div
+                                key={bIdx}
+                                className={`p-4 rounded-2xl border flex flex-col justify-between space-y-2.5 ${
+                                  hasSingleVerdict
+                                    ? "bg-gradient-to-br from-[#FAF7F4] to-orange-50/40 border-[#BF4B24]/35 shadow-2xs"
+                                    : "bg-[#FAF7F4] border-stone-200/90"
                                 }`}
                               >
-                                {dayCampaign.badgeText}
-                              </span>
-                            )}
-                            {hasSelection && (
-                              <span className="absolute bottom-1 w-1.5 h-1.5 rounded-full bg-white" />
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    {roomCampaigns.length > 0 && (
-                      <div className="mt-2.5 pt-2 border-t border-stone-200/70 flex items-center justify-center gap-2 text-[10px] font-bold text-slate-800">
-                        <span className="w-2 h-2 rounded-full bg-slate-900" />
-                        Dias em preto possuem horários com desconto (Black
-                        Friday)
-                      </div>
-                    )}
-                  </div>
+                                <div className="space-y-2">
+                                  <div className="pb-2 border-b border-stone-200/70 flex items-center justify-between gap-2 flex-wrap">
+                                    <h4 className="text-xs sm:text-sm font-extrabold text-stone-900">
+                                      {renderFormattedText(block.title)}
+                                    </h4>
+                                    {block.subtitle && (
+                                      <span className="text-[11px] font-bold text-[#BF4B24] bg-white px-2.5 py-0.5 rounded-full border border-[#BF4B24]/20">
+                                        {block.subtitle}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <ul className="space-y-2 pt-0.5">
+                                    {block.bullets.map((bullet, i) => (
+                                      <li
+                                        key={i}
+                                        className="text-xs text-stone-700 leading-relaxed flex items-start gap-2"
+                                      >
+                                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                                        <span>
+                                          {renderFormattedText(bullet)}
+                                        </span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
 
-                  <div className="flex items-center justify-between mb-2.5">
-                    <h3 className="text-xs font-bold text-slate-800">
-                      Horários em{" "}
-                      <span className="text-[#BF4B24]">
-                        {format(selectedDate, "dd/MM (EEEE)", {
-                          locale: ptBR,
-                        })}
-                      </span>
-                    </h3>
-                    <span className="text-[11px] font-semibold text-slate-500">
-                      {freeSlotsForSelectedDate.length} livre(s)
-                    </span>
-                  </div>
+                        {exchange.recommendedRooms.length > 0 && (
+                          <div className="space-y-3 pt-1">
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                              {exchange.recommendedRooms.map((match) => {
+                                const fullRoom = dbRooms.find(
+                                  (r) => r.id === match.roomId,
+                                );
+                                if (!fullRoom) return null;
+                                const isMaster = fullRoom.tier === "master";
+                                const isVip = fullRoom.tier === "vip";
+                                const passRate =
+                                  bestHourlyRates[fullRoom.tier] ||
+                                  (isMaster ? 50 : isVip ? 34 : 27.95);
+                                const neighborhood =
+                                  fullRoom.rawAddress?.neighborhood ||
+                                  match.neighborhood ||
+                                  "Lagoa Nova";
+                                const hourlyRate =
+                                  match.hourlyPrice ||
+                                  fullRoom.hourlyPriceNumber ||
+                                  45;
+                                const shiftPrice =
+                                  match.shiftPrice ?? fullRoom.shiftPriceNumber;
+                                const monthlyPrice =
+                                  match.monthlyPrice ??
+                                  fullRoom.monthlyPriceNumber;
+                                const equipmentSummary =
+                                  match.aiPitch ||
+                                  fullRoom.description ||
+                                  "Consultório climatizado com isolamento acústico, recepção e Wi-Fi.";
+                                return (
+                                  <div
+                                    key={match.roomId}
+                                    onClick={() => {
+                                      setIsAISearchExpanded(false);
+                                      if (onOpenRoom) {
+                                        onOpenRoom({
+                                          ...fullRoom,
+                                          selectedModality:
+                                            appliedFilters.modality,
+                                          preselectedDate:
+                                            exchange.targetDateISO || undefined,
+                                          preselectedSlot:
+                                            match.exactSlotAvailable &&
+                                            match.requestedSlotLabel
+                                              ? match.requestedSlotLabel
+                                              : match.availableSlots[0] ||
+                                                undefined,
+                                        });
+                                      }
+                                    }}
+                                    className="group rounded-2xl bg-white border border-stone-200/90 hover:border-[#BF4B24]/50 overflow-hidden transition-all duration-300 hover:shadow-md cursor-pointer flex flex-col"
+                                  >
+                                    <div className="relative w-full h-32 bg-stone-100 overflow-hidden">
+                                      <Image
+                                        src={fullRoom.image}
+                                        alt={fullRoom.name}
+                                        fill
+                                        sizes="(max-width: 768px) 100vw, 320px"
+                                        className="object-cover group-hover:scale-105 transition-transform duration-500"
+                                        onError={(e: any) => {
+                                          e.target.src = "/placeholder.jpg";
+                                        }}
+                                      />
+                                      <div className="absolute inset-0 bg-gradient-to-t from-black/65 via-black/10 to-black/20 pointer-events-none" />
+                                      <div className="absolute top-2 left-2 right-2 flex items-center justify-between gap-1 z-10">
+                                        <span
+                                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${
+                                            isMaster
+                                              ? "bg-stone-950/90 text-amber-300"
+                                              : isVip
+                                                ? "bg-[#BF4B24] text-white"
+                                                : "bg-white/95 text-stone-800"
+                                          }`}
+                                        >
+                                          {isMaster
+                                            ? "Premium"
+                                            : isVip
+                                              ? "VIP"
+                                              : "Basic"}
+                                        </span>
+                                      </div>
+                                      <div className="absolute bottom-2 left-2 right-2 z-10">
+                                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-2 py-0.5 rounded-md bg-emerald-600 text-white">
+                                          <Clock className="w-2.5 h-2.5" />
+                                          {match.matchReason}
+                                        </span>
+                                      </div>
+                                    </div>
+                                    <div className="p-3 flex-1 flex flex-col justify-between bg-white space-y-2">
+                                      <div className="space-y-1">
+                                        <span className="text-[10px] text-stone-500 font-medium block truncate">
+                                          {neighborhood} •{" "}
+                                          {fullRoom.specialty ||
+                                            fullRoom.category}
+                                        </span>
+                                        <h4 className="font-bold text-xs sm:text-sm text-stone-900 group-hover:text-[#BF4B24] transition-colors line-clamp-1">
+                                          {fullRoom.name}
+                                        </h4>
+                                        <p className="text-[11px] text-stone-600 leading-snug line-clamp-2">
+                                          {equipmentSummary}
+                                        </p>
+                                        <div className="pt-1 flex items-baseline gap-1.5 flex-wrap">
+                                          <span className="text-xs font-extrabold text-stone-900">
+                                            R$ {hourlyRate}/h
+                                          </span>
+                                          <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                                            Pass+ R${" "}
+                                            {Number(passRate)
+                                              .toFixed(2)
+                                              .replace(".00", "")}
+                                            /h
+                                          </span>
+                                        </div>
+                                        {(shiftPrice || monthlyPrice) && (
+                                          <div className="flex items-center gap-1 flex-wrap text-[10px] font-semibold text-stone-500">
+                                            {shiftPrice && (
+                                              <span>Turno R$ {shiftPrice}</span>
+                                            )}
+                                            {shiftPrice && monthlyPrice && (
+                                              <span>•</span>
+                                            )}
+                                            {monthlyPrice && (
+                                              <span>
+                                                Mensal R$ {monthlyPrice}
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                      {match.availableSlots.length > 0 && (
+                                        <div className="flex items-center gap-1.5 flex-wrap pt-1.5 border-t border-stone-100">
+                                          {match.availableSlots
+                                            .slice(0, 3)
+                                            .map((slot) => (
+                                              <button
+                                                key={slot}
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setIsAISearchExpanded(false);
+                                                  if (onOpenRoom) {
+                                                    onOpenRoom({
+                                                      ...fullRoom,
+                                                      selectedModality: "hora",
+                                                      preselectedDate:
+                                                        exchange.targetDateISO ||
+                                                        undefined,
+                                                      preselectedSlot: slot,
+                                                    });
+                                                  }
+                                                }}
+                                                className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-[#FAF7F4] hover:bg-[#BF4B24] text-stone-800 hover:text-white border border-stone-200"
+                                              >
+                                                {slot}
+                                              </button>
+                                            ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
 
-                  {availableSlots.length === 0 ? (
-                    <div className="text-center py-6 bg-stone-50 rounded-xl border border-stone-200/70">
-                      <Clock className="w-5 h-5 text-slate-400 mx-auto mb-1.5" />
-                      <p className="text-slate-600 font-semibold text-xs">
-                        Nenhum horário disponível nesta data.
-                      </p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        Experimente selecionar outro dia no calendário acima.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-2 max-h-[250px] overflow-y-auto pr-1 scrollbar-hide">
-                      {availableSlots.map((slotTime: string) => {
-                        const slotKey = `${format(selectedDate, "yyyy-MM-dd")}|${slotTime}`;
-                        const isBooked = isSlotBooked(slotKey);
-                        const isPastSlot = isSlotPast(slotKey);
-                        const isUnavailable = isBooked || isPastSlot;
-                        const isSelected = selectedSlots.includes(slotKey);
-                        const pricing = getSlotPricingDetails(slotKey);
-                        const hasPromo =
-                          !isUnavailable && Boolean(pricing.campaign);
-                        return (
-                          <button
-                            key={slotKey}
-                            type="button"
-                            onClick={() =>
-                              !isUnavailable && toggleSlot(slotKey)
-                            }
-                            disabled={isUnavailable}
-                            className={`relative h-14 rounded-xl flex flex-col items-center justify-center transition-all border ${
-                              isUnavailable
-                                ? "border-slate-100 bg-slate-50 opacity-45 cursor-not-allowed"
-                                : isSelected
-                                  ? "border-[#BF4B24] bg-[#BF4B24]/10 ring-1 ring-[#BF4B24]"
-                                  : hasPromo
-                                    ? "border-slate-900 bg-slate-50 hover:bg-slate-100 shadow-sm"
-                                    : "border-slate-200 bg-white hover:border-slate-300"
-                            }`}
-                          >
-                            {hasPromo && (
-                              <span className="absolute -top-2 right-2 px-1.5 py-0.2 rounded-full bg-slate-900 text-white text-[9px] font-black shadow-2xs border border-slate-700">
-                                {pricing.campaign?.badgeText} OFF
-                              </span>
-                            )}
-                            <span
-                              className={`text-xs font-bold ${
-                                isUnavailable
-                                  ? "text-slate-400 line-through"
-                                  : isSelected
-                                    ? "text-[#BF4B24]"
-                                    : "text-slate-800"
-                              }`}
-                            >
-                              {slotTime}
-                            </span>
-                            {isUnavailable ? (
-                              <span className="text-[10px] font-medium text-slate-400 mt-0.5">
-                                Ocupado
-                              </span>
-                            ) : hasPromo ? (
-                              <div className="flex items-center gap-1 mt-0.5">
-                                <span className="text-[9px] text-slate-400 line-through">
-                                  R${" "}
-                                  {pricing.basePrice
-                                    .toFixed(2)
-                                    .replace(".", ",")}
-                                </span>
-                                <span className="text-[10px] font-black text-slate-900">
-                                  R${" "}
-                                  {pricing.finalPrice
-                                    .toFixed(2)
-                                    .replace(".", ",")}
-                                </span>
+                        {(exchange.recommendationSummary ||
+                          exchange.suggestedCta !== "none") && (
+                          <div className="p-3.5 rounded-2xl bg-emerald-50/80 border border-emerald-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            {exchange.recommendationSummary ? (
+                              <div className="flex items-start gap-2">
+                                <BadgeCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+                                <p className="text-xs text-emerald-950 font-medium leading-relaxed">
+                                  {renderFormattedText(
+                                    exchange.recommendationSummary,
+                                  )}
+                                </p>
                               </div>
                             ) : (
-                              <span
-                                className={`text-[10px] font-medium mt-0.5 ${
-                                  isSelected
-                                    ? "text-[#BF4B24]"
-                                    : "text-slate-500"
-                                }`}
-                              >
-                                R${" "}
-                                {pricing.finalPrice
-                                  .toFixed(2)
-                                  .replace(".", ",")}
+                              <span className="text-xs font-bold text-emerald-950">
+                                Deseja avançar com esta recomendação?
                               </span>
                             )}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <div className="hidden md:block pt-5 border-t border-slate-100 mt-5">
-                    {selectedSlots.length > 0 && (
-                      <div className="space-y-1.5 mb-3">
-                        {totalCampaignDiscountBRL > 0 && (
-                          <div className="flex items-center justify-between text-xs bg-slate-900 text-white px-3 py-1.5 rounded-lg border border-slate-950 font-bold shadow-sm">
-                            <span className="flex items-center gap-1.5">
-                              <Flame className="w-3.5 h-3.5 text-amber-400" />
-                              Desconto aplicado (
-                              {matchedAutoCampaign?.campaignName ||
-                                "Black Friday"}
-                              )
-                            </span>
-                            <span className="text-amber-400">
-                              - R${" "}
-                              {totalCampaignDiscountBRL
-                                .toFixed(2)
-                                .replace(".", ",")}
-                            </span>
+                            {exchange.suggestedCta === "complete_profile" && (
+                              <button
+                                type="button"
+                                onClick={handleGoToCompleteProfile}
+                                className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
+                              >
+                                <UserCheck className="w-3.5 h-3.5 text-[#FBBF24]" />
+                                <span>Completar perfil</span>
+                              </button>
+                            )}
+                            {exchange.suggestedCta === "open_pass_modal" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsAISearchExpanded(false);
+                                  handleOpenPassWithTier("vip");
+                                }}
+                                className="px-4 py-2.5 rounded-xl bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-bold text-xs shrink-0 flex items-center justify-center gap-1.5 shadow-2xs cursor-pointer"
+                              >
+                                <Tag className="w-3.5 h-3.5" />
+                                <span>Abrir Planos Fusion Pass+</span>
+                              </button>
+                            )}
+                            {exchange.suggestedCta === "switch_to_turno" && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsAISearchExpanded(false);
+                                  setPendingFilters((p) => ({
+                                    ...p,
+                                    modality: "turno",
+                                  }));
+                                  setAppliedFilters((p) => ({
+                                    ...p,
+                                    modality: "turno",
+                                  }));
+                                }}
+                                className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs shrink-0 flex items-center justify-center gap-1.5 cursor-pointer"
+                              >
+                                <span>Ver Salas para Turno / Fixo</span>
+                                <ChevronRight className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         )}
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="font-medium text-slate-600">
-                            Total ({selectedSlots.length}{" "}
-                            {selectedSlots.length === 1
-                              ? "horário"
-                              : "horários"}
-                            )
-                          </span>
-                          <div className="text-right">
-                            {totalCampaignDiscountBRL > 0 && (
-                              <span className="text-xs text-slate-400 line-through mr-2">
-                                R${" "}
-                                {totalBaseHourlyCost
-                                  .toFixed(2)
-                                  .replace(".", ",")}
-                              </span>
+
+                        {(exchange.closingQuestion ||
+                          exchange.followUpSuggestions.length > 0) && (
+                          <div className="pt-2 border-t border-stone-100 space-y-2.5">
+                            {exchange.closingQuestion && (
+                              <p className="text-xs sm:text-sm font-bold text-stone-900 leading-snug">
+                                {renderFormattedText(exchange.closingQuestion)}
+                              </p>
                             )}
-                            <span className="text-lg font-bold text-slate-900">
-                              R$ {totalHourlyCost.toFixed(2).replace(".", ",")}
-                            </span>
+                            <div className="flex flex-wrap gap-2">
+                              {exchange.followUpSuggestions.map(
+                                (followUp, fIdx) => (
+                                  <button
+                                    key={fIdx}
+                                    type="button"
+                                    onClick={() => executeAISearch(followUp)}
+                                    className="text-xs font-bold text-[#BF4B24] bg-[#FAF7F4] hover:bg-[#BF4B24] hover:text-white border border-[#BF4B24]/35 px-3.5 py-2 rounded-xl transition-all cursor-pointer text-left flex items-center gap-1.5 shadow-2xs active:scale-95"
+                                  >
+                                    <span>{followUp}</span>
+                                    <ArrowRight className="w-3.5 h-3.5 opacity-80 shrink-0" />
+                                  </button>
+                                ),
+                              )}
+                            </div>
                           </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {isRunningAISearch && (
+                  <div className="space-y-3 animate-in fade-in duration-150">
+                    {pendingUserQuestion && (
+                      <div className="flex flex-col items-end">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 mb-1 pr-1">
+                          Você
+                        </span>
+                        <div className="bg-stone-900 text-white px-4 py-2.5 rounded-2xl rounded-tr-xs text-xs sm:text-sm font-semibold max-w-[85%]">
+                          {pendingUserQuestion}
                         </div>
                       </div>
                     )}
-                    <Button
-                      onClick={handleAction}
-                      disabled={actionLoading}
-                      className="w-full h-12 rounded-xl font-bold transition-all text-sm bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-xs cursor-pointer"
-                    >
-                      {actionLoading
-                        ? "Processando..."
-                        : selectedSlots.length > 0
-                          ? `Reservar (${selectedSlots.length}h)`
-                          : "Selecione um horário acima"}
-                    </Button>
-                  </div>
-                </section>
-              )}
-
-              {activeTab === "turno" && (
-                <section className="animate-in fade-in space-y-5">
-                  <div>
-                    <h2 className="text-sm font-bold text-slate-900 mb-2.5">
-                      1. Qual turno você deseja?
-                    </h2>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      {[
-                        {
-                          id: "morning",
-                          label: "Manhã",
-                          price: pricingData.morning,
-                        },
-                        {
-                          id: "afternoon",
-                          label: "Tarde",
-                          price: pricingData.afternoon,
-                        },
-                        {
-                          id: "night",
-                          label: "Noite",
-                          price: pricingData.night,
-                        },
-                      ].map((t) => (
-                        <button
-                          key={t.id}
-                          onClick={() => setSelectedShift(t.id as any)}
-                          className={`flex flex-col items-center justify-center p-3 rounded-xl border transition-all ${
-                            selectedShift === t.id
-                              ? "border-[#BF4B24] bg-orange-50/60 text-[#BF4B24]"
-                              : "border-slate-200 hover:border-slate-300 bg-white"
-                          }`}
-                        >
-                          <span className="text-xs font-bold">{t.label}</span>
-                          <span
-                            className={`text-[10px] font-semibold mt-0.5 ${
-                              selectedShift === t.id
-                                ? "text-[#BF4B24]"
-                                : "text-slate-500"
-                            }`}
-                          >
-                            {t.price ? `R$ ${t.price}` : "--"}
-                          </span>
-                        </button>
-                      ))}
+                    <div className="bg-white rounded-3xl p-4 border border-stone-200/90 shadow-2xs flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-xl bg-[#FAF7F4] border border-[#BF4B24]/25 flex items-center justify-center shrink-0">
+                        <Loader2 className="w-4 h-4 text-[#BF4B24] animate-spin" />
+                      </div>
+                      <p className="text-xs sm:text-sm font-semibold text-stone-700">
+                        Analisando sua resposta...
+                      </p>
                     </div>
                   </div>
-                  <div>
-                    <h2 className="text-sm font-bold text-slate-900 mb-2.5">
-                      2. Quais dias da semana?
-                    </h2>
-                    <div className="flex gap-2 justify-between">
-                      {["D", "S", "T", "Q", "Q", "S", "S"].map(
-                        (day: string, i: number) => (
-                          <button
-                            key={i}
-                            onClick={() => toggleDay(i)}
-                            className={`w-10 h-10 rounded-xl text-xs font-bold transition-all ${
-                              selectedDays.includes(i)
-                                ? "bg-slate-900 text-white"
-                                : "bg-stone-100 text-slate-600 hover:bg-stone-200"
-                            }`}
-                          >
-                            {day}
-                          </button>
-                        ),
-                      )}
-                    </div>
-                  </div>
-                  <div className="bg-stone-50 border border-stone-200 p-3.5 rounded-xl flex gap-3">
-                    <Shield className="w-4 h-4 text-slate-700 shrink-0 mt-0.5" />
-                    <p className="text-xs text-slate-600 leading-relaxed">
-                      Locações de turnos fixos são combinadas diretamente pelo{" "}
-                      <strong className="font-bold text-slate-800">
-                        Chat Seguro
-                      </strong>{" "}
-                      da plataforma.
-                    </p>
-                  </div>
-                  <div className="hidden md:block pt-4 border-t border-slate-100">
-                    <div className="flex justify-between items-end mb-3">
-                      <span className="text-xs font-semibold text-slate-500">
-                        Estimativa semanal
-                      </span>
-                      <span className="text-xl font-bold text-slate-900">
-                        R$ {totalShiftCost.toFixed(2)}
-                      </span>
-                    </div>
-                    <Button
-                      onClick={handleAction}
-                      disabled={
-                        actionLoading ||
-                        !selectedShift ||
-                        selectedDays.length === 0
-                      }
-                      className="w-full h-12 rounded-xl font-bold bg-slate-900 hover:bg-slate-800 text-white gap-2"
-                    >
-                      {actionLoading ? (
-                        "Processando..."
-                      ) : (
-                        <>
-                          <MessageSquare className="w-4 h-4" /> Solicitar
-                          Proposta
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </section>
-              )}
+                )}
 
-              {activeTab === "fixo" && (
-                <section className="animate-in fade-in space-y-5">
-                  <div className="text-center py-6 bg-stone-50 rounded-xl border border-stone-200">
-                    <p className="text-xs font-semibold text-slate-500 mb-1">
-                      Mensalidade (Sala Exclusiva)
-                    </p>
-                    <h3 className="text-2xl font-bold text-slate-900">
-                      {pricingData.monthly ? `R$ ${pricingData.monthly}` : "--"}
-                    </h3>
-                  </div>
-                  <div className="bg-stone-50 border border-stone-200 p-3.5 rounded-xl flex gap-3">
-                    <Shield className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
-                    <p className="text-xs text-slate-600 leading-relaxed">
-                      No contrato mensal você conta com exclusividade na sala e
-                      pode optar pelo modo Coanfitrião para sublocar seus
-                      horários vagos.
-                    </p>
-                  </div>
-                  <div className="hidden md:block pt-4 border-t border-slate-100">
-                    <Button
-                      onClick={handleAction}
-                      disabled={actionLoading}
-                      className="w-full h-12 rounded-xl font-bold bg-slate-900 hover:bg-slate-800 text-white gap-2"
-                    >
-                      {actionLoading ? (
-                        "Processando..."
-                      ) : (
-                        <>
-                          <MessageSquare className="w-4 h-4" /> Iniciar
-                          Negociação
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </section>
-              )}
-            </div>
-          </div>
-
-          {/* AVALIAÇÕES */}
-          <div className="order-3 lg:order-3 lg:col-span-7 lg:col-start-1 pt-6 border-t border-slate-100 lg:border-none lg:pt-0">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-lg font-bold text-slate-900">
-                Avaliações de profissionais
-              </h2>
-              <div className="flex items-center gap-1.5">
-                <Star className="w-4 h-4 fill-amber-500 text-amber-500" />
-                <span className="font-bold text-base text-slate-900">
-                  {avgRating}
-                </span>
-                <span className="text-xs font-medium text-slate-500">
-                  ({reviews.length})
-                </span>
+                <div ref={aiThreadEndRef} />
               </div>
             </div>
 
-            {reviews.length > 0 && (
-              <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide mb-5 pb-1">
+            <div className="bg-white border-t border-stone-200/90 px-4 sm:px-6 pt-3 pb-[max(env(safe-area-inset-bottom,14px),14px)] shrink-0 shadow-[0_-8px_30px_rgba(0,0,0,0.06)]">
+              <div className="max-w-3xl mx-auto flex items-center gap-2">
+                <div className="relative flex-1">
+                  <input
+                    ref={aiInputRef}
+                    type="text"
+                    value={aiQuery}
+                    onChange={(e) => setAiQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") executeAISearch();
+                    }}
+                    placeholder="Responda aqui ou digite sua dúvida..."
+                    className="w-full h-12 pl-4 pr-10 rounded-2xl bg-[#FAF7F4] border border-stone-200/95 text-xs sm:text-sm text-stone-900 placeholder:text-stone-400 focus:outline-none focus:border-[#BF4B24] focus:bg-white transition-colors"
+                  />
+                  {aiQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setAiQuery("")}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-stone-400 hover:text-stone-700"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
                 <button
-                  onClick={() => setReviewFilter(0)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 border ${
-                    reviewFilter === 0
-                      ? "bg-slate-900 text-white border-slate-900"
-                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                  type="button"
+                  onClick={handleToggleVoiceSearch}
+                  title={
+                    isListeningVoice ? "Parar gravação" : "Falar no microfone"
+                  }
+                  className={`h-12 px-3.5 sm:px-4 rounded-2xl font-bold text-xs flex items-center gap-1.5 shrink-0 transition-all cursor-pointer ${
+                    isListeningVoice
+                      ? "bg-red-600 text-white animate-pulse shadow-md"
+                      : "bg-stone-100 hover:bg-stone-200 text-stone-800"
                   }`}
                 >
-                  Todas
+                  {isListeningVoice ? (
+                    <>
+                      <MicOff className="w-4 h-4" />
+                      <span className="hidden sm:inline">Ouvindo...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="w-4 h-4 text-[#BF4B24]" />
+                      <span className="hidden sm:inline">Voz</span>
+                    </>
+                  )}
                 </button>
-                {[5, 4, 3, 2, 1].map((star: number) => {
-                  const count = reviews.filter(
-                    (r: any) => r.rating === star,
-                  ).length;
-                  if (count === 0) return null;
-                  return (
+                <button
+                  type="button"
+                  disabled={isRunningAISearch}
+                  onClick={() => executeAISearch()}
+                  className="h-12 px-4 sm:px-5 rounded-2xl bg-gradient-to-r from-[#C24116] to-[#DE5D2E] hover:from-[#A83812] hover:to-[#C84B20] disabled:opacity-60 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 shadow-sm transition-all cursor-pointer"
+                >
+                  {isRunningAISearch ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <span className="hidden sm:inline">Enviar</span>
+                      <SendHorizontal className="w-4 h-4" />
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
+
+  return (
+    <div className="flex flex-col pb-24 bg-[#FAF7F4] min-h-screen relative font-sans">
+      {fullScreenConciergeOverlay}
+      <FusionPassModal
+        isOpen={isPassModalOpen}
+        onOpenChange={setIsPassModalOpen}
+        initialTier={passPreselect.tier}
+        initialHours={passPreselect.hours}
+        onBestRatesLoaded={setBestHourlyRates}
+        onSubscriptionSuccess={async () => {
+          await fetchWalletData();
+          setIsWalletOpen(true);
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+      />
+
+      {/* GAVETA DE BUSCA TRADICIONAL MOBILE */}
+      {isMobileSearchOpen && (
+        <div className="fixed inset-0 z-[200] bg-[#FAF7F4] flex flex-col md:hidden animate-in slide-in-from-bottom-6 duration-200">
+          <div className="flex justify-between items-center px-5 pt-4 pb-3 bg-white border-b border-stone-200/80 shrink-0 z-10">
+            <button
+              onClick={() => setIsMobileSearchOpen(false)}
+              aria-label="Fechar busca"
+              className="w-9 h-9 rounded-full bg-stone-100 flex items-center justify-center hover:bg-stone-200 text-stone-700 transition-colors"
+            >
+              <X className="w-4 h-4 stroke-[2.5]" />
+            </button>
+            <span className="text-xs font-bold uppercase tracking-wider text-stone-800">
+              Buscar Consultório
+            </span>
+            <button
+              onClick={handleClearFilters}
+              className="text-xs font-semibold text-[#BF4B24] hover:underline"
+            >
+              Limpar
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+            {canUseAIConcierge && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsMobileSearchOpen(false);
+                  setIsAISearchExpanded(true);
+                }}
+                className="w-full bg-stone-950 text-white rounded-2xl p-4 flex items-center justify-between gap-3 shadow-sm"
+              >
+                <div className="flex items-center gap-3 text-left">
+                  <div className="w-9 h-9 rounded-xl bg-[#BF4B24] flex items-center justify-center shrink-0">
+                    <Sparkles className="w-4 h-4 text-white" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-extrabold text-[#FBBF24] block">
+                      Conversar com o Concierge IA
+                    </span>
+                    <span className="text-[11px] text-stone-300">
+                      Descubra o plano mais econômico para sua rotina
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-stone-400 shrink-0" />
+              </button>
+            )}
+
+            {/* 1. ONDE - MOBILE */}
+            {activeMobileTab === "onde" ? (
+              <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-200/80 animate-in fade-in duration-150">
+                <h2 className="text-lg font-bold text-stone-900 mb-3.5">
+                  Onde você deseja atender?
+                </h2>
+                <div className="space-y-2 max-h-[48vh] overflow-y-auto scrollbar-hide">
+                  <button
+                    onClick={requestLocation}
+                    className="w-full flex items-center gap-3.5 p-3 rounded-2xl bg-[#FAF7F4] border border-[#BF4B24]/25 text-left"
+                  >
+                    <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shrink-0 border border-[#BF4B24]/20">
+                      <Compass className="w-5 h-5 text-[#BF4B24]" />
+                    </div>
+                    <div>
+                      <span className="block text-sm font-bold text-stone-900">
+                        Perto de mim
+                      </span>
+                      <span className="block text-xs text-stone-500">
+                        Usar localização atual do GPS
+                      </span>
+                    </div>
+                  </button>
+                  <div className="w-full h-px bg-stone-100 my-2.5" />
+                  <button
+                    onClick={() => {
+                      setPendingFilters((p) => ({
+                        ...p,
+                        city: "Qualquer lugar",
+                      }));
+                      setActiveMobileTab("quando");
+                    }}
+                    className={`w-full flex items-center gap-3.5 p-3 rounded-2xl transition-colors text-left border ${
+                      pendingFilters.city === "Qualquer lugar"
+                        ? "border-[#BF4B24] bg-[#FAF7F4]/60"
+                        : "border-transparent hover:bg-stone-50"
+                    }`}
+                  >
+                    <div className="w-10 h-10 bg-stone-100 rounded-full flex items-center justify-center shrink-0">
+                      <Building2 className="w-5 h-5 text-stone-600" />
+                    </div>
+                    <span className="text-sm font-semibold text-stone-800">
+                      Todas as unidades (Qualquer lugar)
+                    </span>
+                  </button>
+                  {availableCities.map((city: string) => (
                     <button
-                      key={star}
-                      onClick={() => setReviewFilter(star)}
-                      className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 flex items-center gap-1 border ${
-                        reviewFilter === star
-                          ? "bg-stone-100 text-slate-900 border-slate-300"
-                          : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                      key={city}
+                      onClick={() => {
+                        setPendingFilters((p) => ({ ...p, city }));
+                        setActiveMobileTab("quando");
+                      }}
+                      className={`w-full flex items-center gap-3.5 p-3 rounded-2xl transition-colors text-left border ${
+                        pendingFilters.city === city
+                          ? "border-[#BF4B24] bg-[#FAF7F4]/60"
+                          : "border-transparent hover:bg-stone-50"
                       }`}
                     >
-                      {star}{" "}
-                      <Star className="w-3 h-3 fill-amber-500 text-amber-500" />
-                      <span className="text-[10px] text-slate-400 ml-0.5">
-                        ({count})
+                      <div className="w-10 h-10 bg-stone-100 rounded-full flex items-center justify-center shrink-0">
+                        <MapPin className="w-5 h-5 text-stone-600" />
+                      </div>
+                      <span className="text-sm font-semibold text-stone-800">
+                        {city}
                       </span>
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div
+                onClick={() => setActiveMobileTab("onde")}
+                className="bg-white rounded-2xl px-5 py-4 flex justify-between border border-stone-200/80 items-center cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <span className="text-xs font-semibold text-stone-500">
+                  Localização
+                </span>
+                <span className="text-xs font-bold text-stone-900">
+                  {pendingFilters.city}
+                </span>
               </div>
             )}
 
-            {loadingReviews ? (
-              <div className="flex justify-center py-10">
-                <Loader2 className="w-6 h-6 animate-spin text-slate-300" />
-              </div>
-            ) : reviews.length === 0 ? (
-              <div className="text-center py-10 bg-stone-50 rounded-2xl border border-stone-200/70">
-                <p className="font-bold text-slate-800 text-sm">
-                  Este consultório ainda não possui avaliações
-                </p>
-                <p className="text-xs text-slate-500 mt-1">
-                  As avaliações são feitas exclusivamente por profissionais após
-                  o uso da sala.
-                </p>
-              </div>
-            ) : filteredReviews.length === 0 ? (
-              <div className="text-center py-8 text-slate-500 text-xs font-medium">
-                Nenhuma avaliação com esta nota.
+            {/* 2. QUANDO - MOBILE */}
+            {activeMobileTab === "quando" ? (
+              <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-200/80 animate-in fade-in duration-150 flex flex-col overflow-hidden max-h-[65vh]">
+                <div className="pb-2 shrink-0 flex items-center justify-between">
+                  <h2 className="text-lg font-bold text-stone-900">
+                    Para quando você precisa?
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={() => setActiveMobileTab("como")}
+                    className="text-xs font-bold text-[#BF4B24]"
+                  >
+                    Pular data ›
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto pb-4 scrollbar-hide">
+                  <Calendar
+                    mode="single"
+                    selected={pendingFilters.date}
+                    onSelect={(d) => {
+                      if (d) {
+                        setPendingFilters((p) => ({ ...p, date: d }));
+                        setActiveMobileTab("como");
+                      }
+                    }}
+                    disabled={(date) =>
+                      date < new Date(new Date().setHours(0, 0, 0, 0))
+                    }
+                    locale={ptBR}
+                    numberOfMonths={3}
+                    disableNavigation
+                    showOutsideDays={false}
+                    className="p-0 w-full [&_.rdp-months]:flex-col [&_.rdp-month]:mb-8 [&_.rdp-nav]:hidden [&_.rdp-caption_label]:text-base [&_.rdp-caption_label]:font-bold [&_.rdp-caption_label]:capitalize [&_.rdp-head_cell]:text-stone-400 [&_.rdp-head_cell]:font-semibold [&_.rdp-head_cell]:text-[11px] [&_.rdp-head_cell]:uppercase [&_.rdp-table]:w-full"
+                    modifiersClassNames={{
+                      today: "font-bold bg-stone-100 text-stone-900",
+                    }}
+                  />
+                </div>
               </div>
             ) : (
-              <div className="space-y-4">
-                {filteredReviews.map((review: any) => {
-                  const hasComment =
-                    review.comment && review.comment.trim().length > 0;
-                  return (
-                    <div
-                      key={review.id}
-                      className="bg-white p-5 rounded-2xl border border-slate-200/80"
-                    >
-                      <div className="flex items-center gap-3 mb-3">
-                        <div className="w-10 h-10 rounded-full overflow-hidden bg-stone-100 border border-stone-200 shrink-0">
-                          {review.profiles?.avatar_url ? (
-                            <img
-                              src={review.profiles.avatar_url}
-                              alt="Avatar"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center text-slate-400">
-                              <User className="w-5 h-5" />
-                            </div>
-                          )}
+              <div
+                onClick={() => setActiveMobileTab("quando")}
+                className="bg-white rounded-2xl px-5 py-4 flex justify-between border border-stone-200/80 items-center cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <span className="text-xs font-semibold text-stone-500">
+                  Data
+                </span>
+                <span className="text-xs font-bold text-stone-900">
+                  {pendingFilters.date
+                    ? format(pendingFilters.date, "dd 'de' MMM", {
+                        locale: ptBR,
+                      })
+                    : "Qualquer data"}
+                </span>
+              </div>
+            )}
+
+            {/* 3. COMO - MOBILE */}
+            {activeMobileTab === "como" ? (
+              <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-200/80 animate-in fade-in duration-150">
+                <h2 className="text-lg font-bold text-stone-900 mb-4">
+                  Modalidade de locação
+                </h2>
+                <div className="flex bg-stone-100 p-1 rounded-xl mb-5">
+                  <button
+                    onClick={() =>
+                      setPendingFilters((p) => ({ ...p, modality: "hora" }))
+                    }
+                    className={`flex-1 text-xs font-bold py-2.5 rounded-lg transition-all ${
+                      pendingFilters.modality === "hora"
+                        ? "bg-white shadow-2xs text-[#BF4B24]"
+                        : "text-stone-600"
+                    }`}
+                  >
+                    Por Hora
+                  </button>
+                  <button
+                    onClick={() =>
+                      setPendingFilters((p) => ({ ...p, modality: "turno" }))
+                    }
+                    className={`flex-1 text-xs font-bold py-2.5 rounded-lg transition-all ${
+                      pendingFilters.modality === "turno"
+                        ? "bg-white shadow-2xs text-[#BF4B24]"
+                        : "text-stone-600"
+                    }`}
+                  >
+                    Turno Fixo
+                  </button>
+                  <button
+                    onClick={() =>
+                      setPendingFilters((p) => ({ ...p, modality: "fixo" }))
+                    }
+                    className={`flex-1 text-xs font-bold py-2.5 rounded-lg transition-all ${
+                      pendingFilters.modality === "fixo"
+                        ? "bg-white shadow-2xs text-[#BF4B24]"
+                        : "text-stone-600"
+                    }`}
+                  >
+                    Mensal
+                  </button>
+                </div>
+                {pendingFilters.modality !== "fixo" ? (
+                  <>
+                    <h3 className="text-xs font-bold text-stone-700 mb-2.5">
+                      Período de preferência (opcional)
+                    </h3>
+                    <div className="space-y-2">
+                      {[
+                        {
+                          id: "manha",
+                          label: "Manhã",
+                          sub: "08h às 12h",
+                          icon: Clock,
+                        },
+                        {
+                          id: "tarde",
+                          label: "Tarde",
+                          sub: "12h às 18h",
+                          icon: Clock,
+                        },
+                        {
+                          id: "noite",
+                          label: "Noite",
+                          sub: "18h às 22h",
+                          icon: Clock,
+                        },
+                      ].map((shift) => (
+                        <label
+                          key={shift.id}
+                          className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                            pendingFilters.time === shift.id
+                              ? "border-[#BF4B24] bg-[#FAF7F4]"
+                              : "border-stone-200/80"
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="shiftMobile"
+                            className="sr-only"
+                            checked={pendingFilters.time === shift.id}
+                            onChange={() =>
+                              setPendingFilters((p) => ({
+                                ...p,
+                                time: shift.id,
+                              }))
+                            }
+                          />
+                          <shift.icon
+                            className={`w-4 h-4 ${
+                              pendingFilters.time === shift.id
+                                ? "text-[#BF4B24]"
+                                : "text-stone-400"
+                            }`}
+                          />
+                          <div>
+                            <p className="text-xs font-bold text-stone-900">
+                              {shift.label}
+                            </p>
+                            <p className="text-[11px] text-stone-500">
+                              {shift.sub}
+                            </p>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="bg-[#FAF7F4] p-4 rounded-xl border border-[#BF4B24]/25 mt-2">
+                    <p className="text-xs font-bold text-stone-900">
+                      Sala Exclusiva Mensal
+                    </p>
+                    <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                      Exclusividade sobre o consultório com opção de sublocar
+                      horários vagos no modo Coanfitrião (recebendo 80%).
+                    </p>
+                  </div>
+                )}
+                <div className="mt-5 pt-3.5 border-t border-stone-100">
+                  <Button
+                    onClick={() => setActiveMobileTab("oque")}
+                    className="bg-stone-900 hover:bg-stone-800 text-white rounded-xl h-11 font-bold text-xs w-full"
+                  >
+                    Escolher especialidade
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div
+                onClick={() => setActiveMobileTab("como")}
+                className="bg-white rounded-2xl px-5 py-4 flex justify-between border border-stone-200/80 items-center cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <span className="text-xs font-semibold text-stone-500">
+                  Modalidade
+                </span>
+                <span className="text-xs font-bold text-stone-900">
+                  {pendingFilters.modality === "hora"
+                    ? "Por Hora"
+                    : pendingFilters.modality === "turno"
+                      ? "Turno Fixo"
+                      : "Mensal"}
+                  {pendingFilters.modality !== "fixo" && pendingFilters.time
+                    ? ` • ${
+                        pendingFilters.time === "manha"
+                          ? "Manhã"
+                          : pendingFilters.time === "tarde"
+                            ? "Tarde"
+                            : "Noite"
+                      }`
+                    : ""}
+                </span>
+              </div>
+            )}
+
+            {/* 4. O QUÊ - MOBILE */}
+            {activeMobileTab === "oque" ? (
+              <div className="bg-white rounded-3xl p-5 shadow-sm border border-stone-200/80 animate-in fade-in duration-150 pb-6">
+                <h2 className="text-lg font-bold text-stone-900 mb-4">
+                  Qual a especialidade?
+                </h2>
+                <div className="grid grid-cols-1 gap-2.5">
+                  {CATEGORIES.map((cat) => {
+                    const Icon = cat.icon;
+                    const isSelected = pendingFilters.category === cat.id;
+                    return (
+                      <button
+                        key={cat.id}
+                        onClick={() =>
+                          setPendingFilters((p) => ({ ...p, category: cat.id }))
+                        }
+                        className={`p-3.5 rounded-2xl flex items-center gap-3.5 transition-all border text-left ${
+                          isSelected
+                            ? "border-[#BF4B24] bg-[#FAF7F4]"
+                            : "border-stone-200/80 bg-white"
+                        }`}
+                      >
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${
+                            isSelected
+                              ? "bg-[#BF4B24] text-white border-transparent"
+                              : "bg-stone-50 text-stone-600 border-stone-200/70"
+                          }`}
+                        >
+                          <Icon className="w-4 h-4" />
                         </div>
                         <div>
-                          <p className="font-bold text-sm text-slate-900">
-                            {review.profiles?.full_name ||
-                              "Profissional Verificado"}
-                          </p>
-                          <p className="text-[11px] font-medium text-slate-400">
-                            {format(
-                              parseISO(review.created_at),
-                              "dd 'de' MMM, yyyy",
-                              {
-                                locale: ptBR,
-                              },
-                            )}
-                          </p>
-                        </div>
-                        <div className="ml-auto flex items-center gap-1 bg-stone-100 px-2.5 py-1 rounded-lg">
-                          <Star className="w-3.5 h-3.5 fill-amber-500 text-amber-500" />
-                          <span className="font-bold text-xs text-slate-800">
-                            {Number(review.rating).toFixed(1)}
+                          <span className="block text-xs font-bold text-stone-900">
+                            {cat.id}
+                          </span>
+                          <span className="block text-[11px] text-stone-500 mt-0.5 leading-tight">
+                            {cat.desc}
                           </span>
                         </div>
-                      </div>
-                      {hasComment && (
-                        <p className="text-slate-600 text-sm leading-relaxed">
-                          &ldquo;{review.comment}&rdquo;
-                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div
+                onClick={() => setActiveMobileTab("oque")}
+                className="bg-white rounded-2xl px-5 py-4 flex justify-between border border-stone-200/80 items-center cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <span className="text-xs font-semibold text-stone-500">
+                  Especialidade
+                </span>
+                <span className="text-xs font-bold text-stone-900">
+                  {pendingFilters.category}
+                </span>
+              </div>
+            )}
+            <div className="h-24 w-full" />
+          </div>
+          <div className="fixed bottom-0 inset-x-0 p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] bg-white border-t border-stone-200/80 z-50 flex items-center gap-3">
+            <Button
+              onClick={handleExecuteSearch}
+              className="w-full h-12 bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-bold text-sm rounded-xl shadow-sm"
+            >
+              <Search className="w-4 h-4 mr-2" />
+              Mostrar consultórios disponíveis
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* HERO MOBILE (FICA PRETO/DOURADO APENAS AQUI NA BLACK, SEM VAZAR)     */}
+      {/* ==================================================================== */}
+      <header
+        className={`relative overflow-hidden px-4 pt-3.5 pb-12 lg:bg-none lg:bg-transparent lg:shadow-none lg:pt-14 lg:pb-16 rounded-b-[28px] lg:rounded-none shadow-xs z-30 lg:pointer-events-none transition-colors duration-300 ${
+          isBlackFridayActive ? "bg-[#09090B]" : "bg-[#B83B10]"
+        }`}
+      >
+        <div className="lg:hidden absolute inset-y-0 right-0 w-[62%] z-0 pointer-events-none">
+          <img
+            src="/hero.png"
+            alt="Consultório Fusion Clinic"
+            className="w-full h-full object-cover object-[center_65%] opacity-55"
+          />
+          <div
+            className="absolute inset-0"
+            style={{
+              background: isBlackFridayActive
+                ? "linear-gradient(90deg, #09090B 0%, rgba(9,9,11,0.92) 34%, rgba(9,9,11,0.35) 100%)"
+                : "linear-gradient(90deg, #B83B10 0%, rgba(184,59,16,0.92) 32%, rgba(184,59,16,0.35) 100%)",
+            }}
+          />
+        </div>
+        <div className="lg:hidden relative z-10 mx-auto max-w-md">
+          <div
+            className={`flex items-center justify-between mb-3.5 ${
+              !isPublic ? "pr-11" : ""
+            }`}
+          >
+            <div className="inline-flex items-center bg-white/95 backdrop-blur-xs px-3 py-1.5 rounded-xl shadow-2xs border border-white/60">
+              {!logoError ? (
+                <img
+                  src="/logo-fusion-orange.png"
+                  alt="Fusion Clinic"
+                  onError={() => setLogoError(true)}
+                  className="h-5 w-auto object-contain"
+                />
+              ) : (
+                <span className="text-sm font-black text-[#BF4B24] tracking-tight leading-none">
+                  Fusion{" "}
+                  <span className="font-semibold text-stone-600 text-[11px]">
+                    clinic
+                  </span>
+                </span>
+              )}
+            </div>
+            {!isPublic && (
+              <button
+                type="button"
+                onClick={() => setIsWalletOpen(!isWalletOpen)}
+                className="inline-flex items-center gap-1.5 bg-white/95 text-stone-900 px-3 py-1.5 rounded-xl text-[11px] font-bold shadow-2xs active:scale-95 transition-transform"
+              >
+                <Wallet className="w-3.5 h-3.5 text-[#BF4B24]" />
+                <span>
+                  {isWalletOpen
+                    ? "Voltar à busca"
+                    : `${profile.balance}h na Carteira`}
+                </span>
+              </button>
+            )}
+          </div>
+          {!isPublic ? (
+            <div className="space-y-1">
+              <h1 className="text-[22px] font-extrabold text-white tracking-tight leading-[1.15]">
+                Olá, Dr(a). {firstName}.{" "}
+                <span
+                  className={`font-serif italic font-normal block ${
+                    isBlackFridayActive ? "text-[#FBBF24]" : "text-orange-50"
+                  }`}
+                >
+                  Estrutura pronta para você.
+                </span>
+              </h1>
+              <p
+                className={`text-xs leading-relaxed max-w-[310px] ${
+                  isBlackFridayActive ? "text-stone-300" : "text-orange-50/90"
+                }`}
+              >
+                Reserve consultórios por hora, turno ou converse com o Concierge
+                IA para descobrir o plano ideal.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <h1 className="text-[23px] font-extrabold text-white tracking-tight leading-[1.15]">
+                Consultórios prontos,{" "}
+                <span
+                  className={`font-serif italic font-normal block ${
+                    isBlackFridayActive ? "text-[#FBBF24]" : "text-orange-50"
+                  }`}
+                >
+                  esperando por você.
+                </span>
+              </h1>
+              <p
+                className={`text-xs leading-relaxed max-w-[310px] ${
+                  isBlackFridayActive ? "text-stone-300" : "text-orange-50/90"
+                }`}
+              >
+                Atenda seus pacientes por hora, turno ou pacote, sem custos
+                fixos de manutenção.
+              </p>
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* TELA DE CARTEIRA (SALDO FUSION) */}
+      {isWalletOpen ? (
+        <div className="mx-auto w-full max-w-5xl px-4 -mt-6 relative z-20 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <div className="bg-white rounded-3xl p-6 md:p-10 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-stone-200/80 relative overflow-hidden mb-6">
+            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+              <div>
+                <p className="text-stone-500 font-bold uppercase tracking-wider text-xs mb-1.5 flex items-center gap-2">
+                  <Wallet className="w-4 h-4 text-[#BF4B24]" /> Saldo Total
+                  Disponível
+                </p>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-5xl md:text-6xl font-black text-stone-900 tracking-tight">
+                    {profile.balance}
+                  </span>
+                  <span className="text-lg font-semibold text-stone-400">
+                    Horas
+                  </span>
+                </div>
+                <p className="text-xs text-stone-500 mt-1.5 max-w-md leading-relaxed">
+                  Créditos Premium liberam todas as salas. Créditos VIP liberam
+                  salas VIP e Basic.
+                </p>
+              </div>
+              <div className="bg-[#FAF7F4] border border-stone-200/80 rounded-2xl p-5 min-w-[240px]">
+                <p className="text-[10px] font-bold text-stone-400 uppercase tracking-widest mb-3">
+                  Composição do Saldo
+                </p>
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2 text-xs font-semibold text-stone-600">
+                      <Shield className="w-3.5 h-3.5 text-stone-400" /> Basic
+                    </span>
+                    <span className="font-bold text-sm text-stone-900">
+                      {walletBalances.start}h
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2 text-xs font-semibold text-stone-600">
+                      <Star className="w-3.5 h-3.5 text-[#BF4B24]" /> VIP
+                    </span>
+                    <span className="font-bold text-sm text-stone-900">
+                      {walletBalances.vip}h
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-2 text-xs font-semibold text-stone-600">
+                      <Crown className="w-3.5 h-3.5 text-amber-500" /> Premium
+                    </span>
+                    <span className="font-bold text-sm text-stone-900">
+                      {walletBalances.master}h
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="relative z-10 mt-6 pt-5 border-t border-stone-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              {activeSub ? (
+                <>
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge className="bg-emerald-50 text-emerald-800 border border-emerald-200 text-xs font-bold flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3" /> Assinatura Mensal
+                        Ativa
+                      </Badge>
+                      <span className="text-xs font-black text-stone-900 uppercase">
+                        Plano{" "}
+                        {activeSub.tier === "master"
+                          ? "Premium"
+                          : activeSub.tier === "vip"
+                            ? "VIP"
+                            : "Basic"}{" "}
+                        ({activeSub.hours}h/mês)
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-500 max-w-xl">
+                      Suas horas renovam automaticamente. Você pode alterar ou
+                      cancelar quando quiser sem multa.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        handleOpenPassWithTier(
+                          activeSub.tier === "master"
+                            ? "master"
+                            : activeSub.tier === "vip"
+                              ? "vip"
+                              : "start",
+                          activeSub.hours,
+                        )
+                      }
+                      className="rounded-xl border-stone-200 text-stone-700 font-bold text-xs h-10 px-4"
+                    >
+                      Fazer Upgrade / +Horas
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={cancellingSub}
+                      onClick={handleCancelSubscription}
+                      className="rounded-xl border-red-200 text-red-600 hover:bg-red-50 font-bold text-xs h-10 px-4"
+                    >
+                      {cancellingSub ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                          Cancelando...
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="w-3.5 h-3.5 mr-1.5" />
+                          Cancelar renovação
+                        </>
                       )}
-                      {review.host_reply && (
-                        <div className="mt-3.5 p-3.5 bg-stone-50 rounded-xl border border-stone-200/70">
-                          <p className="text-xs font-bold text-slate-800 mb-1 flex items-center gap-1">
-                            <Check className="w-3.5 h-3.5 text-[#BF4B24]" />{" "}
-                            Resposta da Clínica
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between w-full gap-3">
+                  <div>
+                    <p className="text-sm font-bold text-stone-900">
+                      Quer economizar até 41% nas próximas reservas?
+                    </p>
+                    <p className="text-xs text-stone-500 mt-0.5">
+                      Adicione um pacote de horas à sua carteira sem fidelidade.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    onClick={() => handleOpenPassWithTier("vip")}
+                    className="bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-bold text-xs rounded-xl h-10 px-5 shrink-0"
+                  >
+                    Ver Planos Fusion Pass+
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-3xl p-6 md:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-stone-200/80 mb-10">
+            <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-5 border-b border-stone-100 pb-4 gap-3">
+              <h3 className="text-base font-bold text-stone-900 flex items-center gap-2">
+                <History className="w-4 h-4 text-[#BF4B24]" /> Extrato da
+                Carteira
+              </h3>
+              {totalSavings > 0 && (
+                <div className="bg-emerald-50 border border-emerald-200/70 px-3.5 py-2 rounded-xl flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4 text-emerald-600" />
+                  <span className="text-xs font-bold text-emerald-800">
+                    Economia acumulada:
+                  </span>
+                  <span className="text-sm font-black text-emerald-700">
+                    R${" "}
+                    {totalSavings.toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              )}
+            </div>
+            <div className="space-y-3 max-h-[380px] overflow-y-auto pr-1 scrollbar-hide">
+              {txHistory.length === 0 ? (
+                <div className="text-center py-8">
+                  <Wallet className="w-9 h-9 text-stone-200 mx-auto mb-2" />
+                  <p className="text-xs font-semibold text-stone-500">
+                    Nenhuma movimentação encontrada.
+                  </p>
+                </div>
+              ) : (
+                txHistory.map((tx: any, idx: number) => {
+                  const isCredit = Number(tx.amount) > 0;
+                  const amt = Math.abs(Number(tx.amount));
+                  const txDate = tx.created_at
+                    ? format(new Date(tx.created_at), "dd/MM/yyyy 'às' HH:mm")
+                    : "Data não disponível";
+                  return (
+                    <div
+                      key={tx.id || idx}
+                      className="flex items-start gap-3.5 p-3.5 rounded-2xl border border-stone-100 bg-[#FAF7F4]/60"
+                    >
+                      <div
+                        className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
+                          isCredit
+                            ? "bg-emerald-100 text-emerald-700"
+                            : "bg-orange-100 text-[#BF4B24]"
+                        }`}
+                      >
+                        {isCredit ? (
+                          <ArrowDownToLine className="w-4 h-4" />
+                        ) : (
+                          <ArrowUpFromLine className="w-4 h-4" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2 mb-0.5">
+                          <p className="text-xs sm:text-sm font-bold text-stone-900 truncate">
+                            {tx.description?.replace(/\[Asaas:.*?\]/g, "") ||
+                              (isCredit
+                                ? "Recarga de Créditos"
+                                : "Uso de Créditos")}
                           </p>
-                          <p className="text-xs text-slate-600">
-                            {review.host_reply}
+                          <span
+                            className={`text-xs sm:text-sm font-black whitespace-nowrap ${
+                              isCredit ? "text-emerald-700" : "text-[#BF4B24]"
+                            }`}
+                          >
+                            {isCredit ? "+" : "-"}
+                            {amt}h
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-stone-500">
+                          <span>{txDate}</span>
+                          <span className="font-semibold text-stone-700">
+                            {normalizePassTier(tx.tier).toUpperCase()}
+                          </span>
+                          {isCredit && tx.expires_at && (
+                            <span className="text-stone-400">
+                              Válido até{" "}
+                              {format(new Date(tx.expires_at), "dd/MM/yyyy")}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* BARRA DE BUSCA DESKTOP E CÁPSULA MOBILE */}
+          <div className="mx-auto w-full max-w-[960px] px-4 -mt-6 lg:-mt-8 relative z-40 sticky top-3 lg:static animate-in fade-in duration-300">
+            <div className="hidden md:flex bg-white rounded-full shadow-[0_18px_45px_rgba(28,25,23,0.12)] items-center border border-stone-200/90 p-2 relative">
+              <Popover
+                open={activeSearchTab === "onde"}
+                onOpenChange={(o) => setActiveSearchTab(o ? "onde" : null)}
+              >
+                <PopoverTrigger asChild>
+                  <div
+                    className={`flex-1 px-5 py-2.5 rounded-full cursor-pointer transition-colors flex items-center gap-3 ${
+                      activeSearchTab === "onde"
+                        ? "bg-stone-50 shadow-2xs ring-1 ring-stone-200"
+                        : "hover:bg-stone-50/80"
+                    }`}
+                  >
+                    <MapPin className="w-5 h-5 text-stone-700 shrink-0 stroke-[1.8]" />
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-stone-800">
+                        Onde
+                      </div>
+                      <div
+                        className={`text-sm truncate mt-0.5 ${
+                          appliedFilters.city !== "Qualquer lugar"
+                            ? "text-stone-900 font-semibold"
+                            : "text-stone-500 font-normal"
+                        }`}
+                      >
+                        {pendingFilters.city}
+                      </div>
+                    </div>
+                  </div>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-80 p-6 rounded-3xl mt-4 shadow-2xl border border-stone-100"
+                  align="start"
+                >
+                  <h3 className="text-sm font-bold text-stone-900 mb-4">
+                    Buscar por Região
+                  </h3>
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 scrollbar-hide">
+                    <button
+                      onClick={requestLocation}
+                      className="w-full flex items-center gap-4 p-3 rounded-2xl hover:bg-stone-50 transition-colors text-left group border border-transparent hover:border-stone-200/70"
+                    >
+                      <div className="w-11 h-11 bg-[#FAF7F4] rounded-full flex items-center justify-center shrink-0 border border-[#BF4B24]/20">
+                        <Compass className="w-5 h-5 text-[#BF4B24]" />
+                      </div>
+                      <div>
+                        <span className="block font-bold text-stone-900 text-sm">
+                          Perto de mim
+                        </span>
+                        <span className="block text-xs text-stone-500">
+                          Usar GPS do dispositivo
+                        </span>
+                      </div>
+                    </button>
+                    <div className="w-full h-px bg-stone-100 my-2"></div>
+                    {availableCities.map((city: string) => (
+                      <button
+                        key={city}
+                        onClick={() => {
+                          setPendingFilters((p) => ({ ...p, city }));
+                          setActiveSearchTab("quando");
+                        }}
+                        className="w-full flex items-center gap-4 p-3 rounded-2xl hover:bg-stone-50 transition-colors text-left border border-transparent hover:border-stone-200/70"
+                      >
+                        <div className="w-11 h-11 bg-stone-100 rounded-full flex items-center justify-center shrink-0">
+                          <MapPin className="w-5 h-5 text-stone-600" />
+                        </div>
+                        <span className="font-semibold text-stone-800 text-sm">
+                          {city}
+                        </span>
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => {
+                        setPendingFilters((p) => ({
+                          ...p,
+                          city: "Qualquer lugar",
+                        }));
+                        setActiveSearchTab("quando");
+                      }}
+                      className="w-full mt-2 text-center text-xs font-semibold text-stone-400 hover:text-stone-700 underline"
+                    >
+                      Limpar localização
+                    </button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              <div className="w-px h-9 bg-stone-200/80 mx-1"></div>
+
+              <Popover
+                open={activeSearchTab === "quando"}
+                onOpenChange={(o) => setActiveSearchTab(o ? "quando" : null)}
+              >
+                <PopoverTrigger asChild>
+                  <div
+                    className={`flex-1 px-5 py-2.5 rounded-full cursor-pointer transition-colors flex items-center gap-3 ${
+                      activeSearchTab === "quando"
+                        ? "bg-stone-50 shadow-2xs ring-1 ring-stone-200"
+                        : "hover:bg-stone-50/80"
+                    }`}
+                  >
+                    <CalendarIcon className="w-5 h-5 text-stone-700 shrink-0 stroke-[1.8]" />
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-stone-800">
+                        Quando
+                      </div>
+                      <div
+                        className={`text-sm truncate mt-0.5 ${
+                          pendingFilters.date
+                            ? "text-stone-900 font-semibold"
+                            : "text-stone-500 font-normal"
+                        }`}
+                      >
+                        {pendingFilters.date
+                          ? format(pendingFilters.date, "dd MMM", {
+                              locale: ptBR,
+                            }) +
+                            (pendingFilters.time &&
+                            pendingFilters.modality !== "fixo"
+                              ? ` • ${
+                                  pendingFilters.time === "manha"
+                                    ? "Manhã"
+                                    : pendingFilters.time === "tarde"
+                                      ? "Tarde"
+                                      : "Noite"
+                                }`
+                              : "")
+                          : "Insira as datas"}
+                      </div>
+                    </div>
+                  </div>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-auto p-6 rounded-3xl mt-4 shadow-2xl border border-stone-100 overflow-y-auto max-h-[85vh]"
+                  align="center"
+                >
+                  <div className="flex flex-col md:flex-row gap-6">
+                    <div>
+                      <h3 className="text-sm font-bold text-stone-900 mb-2">
+                        Selecione a Data
+                      </h3>
+                      <Calendar
+                        mode="single"
+                        selected={pendingFilters.date}
+                        onSelect={(date) => {
+                          setPendingFilters((p) => ({ ...p, date }));
+                        }}
+                        disabled={(date) =>
+                          date < new Date(new Date().setHours(0, 0, 0, 0))
+                        }
+                        locale={ptBR}
+                        modifiersClassNames={{
+                          today: "font-normal bg-transparent text-stone-900",
+                        }}
+                        className="p-0"
+                      />
+                    </div>
+                    <div className="w-px bg-stone-100 hidden md:block"></div>
+                    <div className="w-64 flex flex-col pb-4">
+                      <h3 className="text-sm font-bold text-stone-900 mb-3">
+                        Como deseja alugar?
+                      </h3>
+                      <div className="flex bg-stone-100 p-1 rounded-xl mb-6">
+                        <button
+                          onClick={() =>
+                            setPendingFilters((p) => ({
+                              ...p,
+                              modality: "hora",
+                            }))
+                          }
+                          className={`flex-1 text-[11px] font-bold py-1.5 rounded-lg transition-all ${
+                            pendingFilters.modality === "hora"
+                              ? "bg-white shadow-2xs text-stone-900"
+                              : "text-stone-500"
+                          }`}
+                        >
+                          Por Hora
+                        </button>
+                        <button
+                          onClick={() =>
+                            setPendingFilters((p) => ({
+                              ...p,
+                              modality: "turno",
+                            }))
+                          }
+                          className={`flex-1 text-[11px] font-bold py-1.5 rounded-lg transition-all ${
+                            pendingFilters.modality === "turno"
+                              ? "bg-white shadow-2xs text-stone-900"
+                              : "text-stone-500"
+                          }`}
+                        >
+                          Turno Fixo
+                        </button>
+                        <button
+                          onClick={() =>
+                            setPendingFilters((p) => ({
+                              ...p,
+                              modality: "fixo",
+                            }))
+                          }
+                          className={`flex-1 text-[11px] font-bold py-1.5 rounded-lg transition-all ${
+                            pendingFilters.modality === "fixo"
+                              ? "bg-white shadow-2xs text-stone-900"
+                              : "text-stone-500"
+                          }`}
+                        >
+                          Mensal
+                        </button>
+                      </div>
+                      {pendingFilters.modality !== "fixo" ? (
+                        <>
+                          <h3 className="text-sm font-bold text-stone-900 mb-3">
+                            Período de preferência
+                          </h3>
+                          <div className="space-y-2">
+                            {[
+                              {
+                                id: "manha",
+                                label: "Manhã",
+                                sub: "08h às 12h",
+                                icon: Clock,
+                              },
+                              {
+                                id: "tarde",
+                                label: "Tarde",
+                                sub: "12h às 18h",
+                                icon: Clock,
+                              },
+                              {
+                                id: "noite",
+                                label: "Noite",
+                                sub: "18h às 22h",
+                                icon: Clock,
+                              },
+                            ].map((shift) => (
+                              <label
+                                key={shift.id}
+                                className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                                  pendingFilters.time === shift.id
+                                    ? "border-[#BF4B24] bg-[#FAF7F4]"
+                                    : "border-stone-200/80 hover:border-stone-300"
+                                }`}
+                              >
+                                <input
+                                  type="radio"
+                                  name="shiftDsk"
+                                  className="sr-only"
+                                  checked={pendingFilters.time === shift.id}
+                                  onChange={() =>
+                                    setPendingFilters((p) => ({
+                                      ...p,
+                                      time: shift.id,
+                                    }))
+                                  }
+                                />
+                                <shift.icon
+                                  className={`w-4 h-4 ${
+                                    pendingFilters.time === shift.id
+                                      ? "text-[#BF4B24]"
+                                      : "text-stone-400"
+                                  }`}
+                                />
+                                <div>
+                                  <p
+                                    className={`text-xs font-bold ${
+                                      pendingFilters.time === shift.id
+                                        ? "text-stone-900"
+                                        : "text-stone-700"
+                                    }`}
+                                  >
+                                    {shift.label}
+                                  </p>
+                                  <p className="text-[10px] text-stone-500">
+                                    {shift.sub}
+                                  </p>
+                                </div>
+                              </label>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="bg-[#FAF7F4] p-4 rounded-xl border border-[#BF4B24]/25 mt-2">
+                          <p className="text-xs font-bold text-stone-900">
+                            Locação Mensal Exclusiva
+                          </p>
+                          <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+                            Você terá exclusividade sobre o consultório, podendo
+                            inclusive sublocar horários livres no modo
+                            Coanfitrião (recebendo 80%).
                           </p>
                         </div>
                       )}
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-stone-100 flex justify-end">
+                    <Button
+                      onClick={() => setActiveSearchTab("oque")}
+                      className="bg-stone-900 hover:bg-stone-800 text-white rounded-xl h-10 px-6 font-bold text-xs"
+                    >
+                      Próximo
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
 
-      {/* BARRA INFERIOR MOBILE INTELIGENTE */}
-      <div className="md:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 px-5 py-3.5 pb-[calc(0.875rem+env(safe-area-inset-bottom))] flex items-center justify-between shadow-[0_-8px_30px_rgba(15,23,42,0.08)] z-50">
-        <div onClick={scrollToBookingSection} className="cursor-pointer pr-2">
-          <p className="text-[11px] font-semibold text-slate-500">
-            {activeTab === "hora"
-              ? selectedSlots.length > 0
-                ? `${selectedSlots.length} ${selectedSlots.length === 1 ? "horário selecionado" : "horários selecionados"}`
-                : "A partir de"
-              : activeTab === "turno"
-                ? "Estimativa semanal"
-                : "Contrato mensal"}
-          </p>
-          <div className="flex items-baseline gap-1.5">
-            {activeTab === "hora" && totalCampaignDiscountBRL > 0 && (
-              <span className="text-xs text-slate-400 line-through">
-                R$ {totalBaseHourlyCost.toFixed(2).replace(".", ",")}
-              </span>
-            )}
-            <span className="text-xl font-bold text-slate-900">
-              R${" "}
-              {activeTab === "hora"
-                ? selectedSlots.length > 0
-                  ? totalHourlyCost.toFixed(2).replace(".", ",")
-                  : getBasePrice()
-                : activeTab === "turno"
-                  ? totalShiftCost
-                  : pricingData.monthly || 0}
-            </span>
-            {activeTab === "hora" && selectedSlots.length === 0 && (
-              <span className="text-xs font-medium text-slate-500">/hora</span>
-            )}
-          </div>
-          {activeTab === "hora" && totalCampaignDiscountBRL > 0 ? (
-            <span className="text-[11px] font-bold text-slate-900 flex items-center gap-1 mt-0.5">
-              <Flame className="w-3 h-3 text-[#BF4B24]" />
-              Economia de R${" "}
-              {totalCampaignDiscountBRL.toFixed(2).replace(".", ",")} aplicada
-            </span>
-          ) : (
-            activeTab === "hora" &&
-            selectedSlots.length === 0 && (
-              <span className="text-[11px] font-semibold text-[#BF4B24] underline underline-offset-2 block">
-                No Pass+ sai a R${" "}
-                {bestHourlyRateInPass.toFixed(2).replace(".", ",")}/h
-              </span>
-            )
-          )}
-        </div>
+              <div className="w-px h-9 bg-stone-200/80 mx-1"></div>
 
-        {activeTab === "hora" ? (
-          <Button
-            onClick={() => {
-              if (selectedSlots.length === 0) {
-                scrollToBookingSection();
-              } else {
-                handleAction();
-              }
-            }}
-            disabled={actionLoading}
-            className="h-12 px-6 rounded-xl font-bold transition-all min-w-[165px] text-sm bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-sm active:scale-95"
-          >
-            {actionLoading
-              ? "Processando..."
-              : selectedSlots.length > 0
-                ? `Reservar (${selectedSlots.length}h)`
-                : "Ver horários"}
-          </Button>
-        ) : (
-          <Button
-            onClick={() => {
-              if (
-                activeTab === "turno" &&
-                (!selectedShift || selectedDays.length === 0)
-              ) {
-                scrollToBookingSection();
-              } else {
-                handleAction();
-              }
-            }}
-            disabled={actionLoading}
-            className="h-12 px-6 rounded-xl font-bold bg-slate-900 hover:bg-slate-800 text-white min-w-[165px] text-sm flex gap-2 active:scale-95"
-          >
-            {actionLoading ? (
-              "Processando..."
-            ) : activeTab === "turno" &&
-              (!selectedShift || selectedDays.length === 0) ? (
-              "Escolher turno"
-            ) : (
-              <>
-                <MessageSquare className="w-4 h-4" /> Negociar
-              </>
-            )}
-          </Button>
-        )}
-      </div>
-
-      {/* GALERIA DE TODAS AS FOTOS */}
-      {isAllPhotosOpen && (
-        <div className="fixed inset-0 z-[150] bg-white flex flex-col animate-in fade-in duration-200">
-          <div className="flex-none p-4 flex justify-between items-center bg-white border-b border-slate-100 z-10 sticky top-0">
-            <button
-              onClick={() => setIsAllPhotosOpen(false)}
-              className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-            >
-              <ArrowLeft className="w-5 h-5 text-slate-900" />
-            </button>
-            <span className="font-bold text-slate-900 text-sm">
-              Fotos do espaço ({allImages.length})
-            </span>
-            <button
-              onClick={handleShare}
-              className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-            >
-              <Share className="w-4 h-4 text-slate-900" />
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto bg-white px-2 py-4 md:px-6">
-            <div className="grid grid-cols-2 gap-1.5 md:max-w-4xl md:mx-auto md:gap-4">
-              {allImages.map((img: string, idx: number) => {
-                const isFullWidth = idx % 3 === 0;
-                return (
+              <Popover
+                open={activeSearchTab === "oque"}
+                onOpenChange={(o) => setActiveSearchTab(o ? "oque" : null)}
+              >
+                <PopoverTrigger asChild>
                   <div
-                    key={idx}
-                    onClick={() => openLightbox(idx)}
-                    className={`relative w-full bg-slate-100 cursor-pointer overflow-hidden rounded-lg md:rounded-2xl group ${
-                      isFullWidth
-                        ? "col-span-2 h-[35vh] md:h-[60vh]"
-                        : "col-span-1 h-[25vh] md:h-[40vh]"
+                    className={`flex-1 px-5 py-2.5 rounded-full cursor-pointer transition-colors flex items-center gap-3 ${
+                      activeSearchTab === "oque"
+                        ? "bg-stone-50 shadow-2xs ring-1 ring-stone-200"
+                        : "hover:bg-stone-50/80"
                     }`}
                   >
-                    <Image
-                      src={img}
-                      alt={`Foto ${idx + 1}`}
-                      fill
-                      className="object-cover transition-transform duration-300 group-hover:scale-105"
-                      sizes="(max-width: 768px) 100vw, 80vw"
-                      priority={idx < 3}
-                    />
+                    <Stethoscope className="w-5 h-5 text-stone-700 shrink-0 stroke-[1.8]" />
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-stone-800">
+                        O Quê?
+                      </div>
+                      <div
+                        className={`text-sm truncate mt-0.5 ${
+                          pendingFilters.category !== "Todas as Salas"
+                            ? "text-stone-900 font-semibold"
+                            : "text-stone-500 font-normal"
+                        }`}
+                      >
+                        {pendingFilters.category}
+                      </div>
+                    </div>
                   </div>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-[460px] p-6 rounded-3xl mt-4 shadow-2xl border border-stone-100"
+                  align="end"
+                >
+                  <h3 className="text-sm font-bold text-stone-900 mb-4">
+                    Especialidade do Consultório
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {CATEGORIES.map((cat) => {
+                      const Icon = cat.icon;
+                      const isSelected = pendingFilters.category === cat.id;
+                      return (
+                        <button
+                          key={cat.id}
+                          onClick={() => {
+                            setPendingFilters((p) => ({
+                              ...p,
+                              category: cat.id,
+                            }));
+                          }}
+                          className={`p-3.5 rounded-2xl flex flex-col items-start gap-2 transition-all border text-left cursor-pointer ${
+                            isSelected
+                              ? "border-[#BF4B24] bg-[#FAF7F4]"
+                              : "border-stone-200/80 bg-white hover:border-stone-300"
+                          }`}
+                        >
+                          <Icon
+                            className={`w-5 h-5 ${
+                              isSelected ? "text-[#BF4B24]" : "text-stone-500"
+                            }`}
+                          />
+                          <div>
+                            <span
+                              className={`block text-xs font-bold ${
+                                isSelected ? "text-stone-900" : "text-stone-800"
+                              }`}
+                            >
+                              {cat.id}
+                            </span>
+                            <span className="block text-[10px] text-stone-500 mt-0.5 leading-tight">
+                              {cat.desc}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              <div className="pr-1.5 pl-2 flex gap-2 items-center">
+                {(hasSearched || aiExchanges.length > 0) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleClearFilters();
+                    }}
+                    className="text-xs font-semibold text-stone-500 hover:text-stone-800 underline mx-1.5 cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                )}
+                {canUseAIConcierge && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAISearchExpanded(true);
+                      setTimeout(() => aiInputRef.current?.focus(), 80);
+                    }}
+                    title="Abrir página do Concierge IA"
+                    className={`h-12 px-4 rounded-full border flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                      aiExchanges.length > 0
+                        ? "bg-stone-950 text-[#FBBF24] border-stone-950 shadow-md"
+                        : "bg-gradient-to-r from-[#FAF7F4] to-orange-50/70 hover:from-orange-50 hover:to-orange-100/60 text-stone-900 border-[#BF4B24]/35 shadow-2xs"
+                    }`}
+                  >
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#BF4B24] opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-[#BF4B24]" />
+                    </span>
+                    <Sparkles className="w-3.5 h-3.5 text-[#BF4B24]" />
+                    <span>Concierge IA</span>
+                  </button>
+                )}
+                <button
+                  onClick={handleExecuteSearch}
+                  aria-label="Buscar consultórios"
+                  className="w-13 h-13 rounded-full bg-gradient-to-r from-[#C24116] to-[#DE5D2E] hover:from-[#A83812] hover:to-[#C84B20] text-white flex items-center justify-center shrink-0 transition-transform active:scale-95 shadow-md shadow-[#BF4B24]/25 cursor-pointer"
+                >
+                  <Search className="w-5 h-5 stroke-[2.2]" />
+                </button>
+              </div>
+            </div>
+
+            {/* CÁPSULA MOBILE */}
+            <div className="md:hidden w-full bg-white rounded-full shadow-[0_12px_32px_rgba(28,25,23,0.12)] flex items-center justify-between p-2 pl-3.5 border border-stone-200/90">
+              <div
+                onClick={() => {
+                  setIsMobileSearchOpen(true);
+                  setActiveMobileTab("onde");
+                }}
+                className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <div className="w-9 h-9 bg-[#BF4B24] text-white rounded-full flex items-center justify-center shrink-0 shadow-2xs">
+                  <Search className="w-4 h-4 stroke-[2.5]" />
+                </div>
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-xs font-bold text-stone-900 truncate">
+                    {appliedFilters.city === "Qualquer lugar"
+                      ? "Onde e quando atender?"
+                      : appliedFilters.city}
+                  </span>
+                  <span className="text-[11px] text-stone-500 truncate">
+                    {appliedFilters.date
+                      ? format(appliedFilters.date, "dd MMM", { locale: ptBR })
+                      : "Qualquer data"}{" "}
+                    •{" "}
+                    {appliedFilters.modality === "hora"
+                      ? "Por hora"
+                      : appliedFilters.modality === "turno"
+                        ? "Turno fixo"
+                        : "Mensal"}{" "}
+                    •{" "}
+                    {appliedFilters.category === "Todas as Salas"
+                      ? "Todas as áreas"
+                      : appliedFilters.category}
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                {canUseAIConcierge && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAISearchExpanded(true);
+                      setTimeout(() => aiInputRef.current?.focus(), 80);
+                    }}
+                    aria-label="Abrir Concierge IA"
+                    className={`h-9 px-3 rounded-full border flex items-center gap-1.5 text-[11px] font-bold transition-all ${
+                      aiExchanges.length > 0
+                        ? "bg-stone-950 text-[#FBBF24] border-stone-950 shadow-2xs"
+                        : "bg-[#FAF7F4] border-[#BF4B24]/35 text-[#BF4B24]"
+                    }`}
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>IA</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileSearchOpen(true);
+                    setActiveMobileTab("onde");
+                  }}
+                  aria-label="Filtros"
+                  className="w-9 h-9 rounded-full border border-stone-200 bg-stone-50 flex items-center justify-center text-stone-700"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* FAIXA DE ESPECIALIDADES NO POLEGAR (MOBILE) */}
+          <div className="lg:hidden px-4 mt-3.5">
+            <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide py-1">
+              {CATEGORIES.map((cat) => {
+                const Icon = cat.icon;
+                const active = appliedFilters.category === cat.id;
+                return (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => handleQuickCategorySelect(cat.id)}
+                    className={`px-3.5 py-2 rounded-full text-xs font-semibold flex items-center gap-1.5 shrink-0 border transition-all ${
+                      active
+                        ? "bg-stone-900 text-white border-stone-900 shadow-2xs"
+                        : "bg-white text-stone-600 border-stone-200/90"
+                    }`}
+                  >
+                    <Icon
+                      className={`w-3.5 h-3.5 ${
+                        active ? "text-[#FBBF24]" : "text-[#BF4B24]"
+                      }`}
+                    />
+                    <span>{cat.shortLabel}</span>
+                  </button>
                 );
               })}
             </div>
           </div>
-        </div>
-      )}
 
-      {/* LIGHTBOX TELA CHEIA */}
-      {isLightboxOpen && (
-        <div className="fixed inset-0 z-[200] bg-black text-white flex flex-col animate-in fade-in zoom-in-95 duration-200">
-          <div className="flex-none p-4 flex justify-between items-center bg-transparent z-20 absolute top-0 w-full">
-            <button
-              onClick={() => setIsLightboxOpen(false)}
-              className="p-2 hover:bg-white/10 rounded-full transition-colors"
-            >
-              <ArrowLeft className="w-6 h-6 text-white" />
-            </button>
-            <span className="font-medium text-sm tracking-widest bg-black/50 px-3 py-1 rounded-full">
-              {currentPhotoIndex + 1} / {allImages.length}
-            </span>
-            <button
-              onClick={handleShare}
-              className="p-2 hover:bg-white/10 rounded-full transition-colors"
-            >
-              <Share className="w-5 h-5 text-white" />
-            </button>
-          </div>
-          <div className="flex-1 relative flex items-center justify-center w-full h-full overflow-hidden">
-            <button
-              onClick={prevPhoto}
-              disabled={currentPhotoIndex === 0}
-              className={`hidden md:flex absolute left-8 z-20 p-3 rounded-full transition-all border border-white/20 ${
-                currentPhotoIndex === 0
-                  ? "bg-white/5 text-white/30 cursor-not-allowed border-transparent"
-                  : "bg-white/10 hover:bg-white/20 text-white"
-              }`}
-            >
-              <ChevronLeft className="w-8 h-8" />
-            </button>
-            <div
-              ref={lightboxRef}
-              onScroll={handleLightboxScroll}
-              className="w-full h-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide scroll-smooth items-center"
-            >
-              {allImages.map((img: string, idx: number) => (
-                <div
-                  key={idx}
-                  className="relative w-full h-full shrink-0 snap-center snap-always flex items-center justify-center p-0 md:p-16"
-                >
-                  <Image
-                    src={img}
-                    alt={`Foto ampliada ${idx + 1}`}
-                    fill
-                    className="object-contain"
-                    sizes="100vw"
-                    priority={Math.abs(currentPhotoIndex - idx) <= 1}
-                  />
-                </div>
-              ))}
-            </div>
-            <button
-              onClick={nextPhoto}
-              disabled={currentPhotoIndex === allImages.length - 1}
-              className={`hidden md:flex absolute right-8 z-20 p-3 rounded-full transition-all border border-white/20 ${
-                currentPhotoIndex === allImages.length - 1
-                  ? "bg-white/5 text-white/30 cursor-not-allowed border-transparent"
-                  : "bg-white/10 hover:bg-white/20 text-white"
-              }`}
-            >
-              <ChevronRight className="w-8 h-8" />
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL DE CADASTRO INCOMPLETO */}
-      {showProfileModal && (
-        <div className="fixed inset-0 z-[250] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl p-6 md:p-8 max-w-sm w-full shadow-xl relative">
-            <div className="w-12 h-12 bg-stone-100 border border-stone-200 rounded-xl flex items-center justify-center mb-4 mx-auto">
-              <ShieldCheck className="w-6 h-6 text-[#BF4B24]" />
-            </div>
-            <h3 className="text-lg font-bold text-center text-slate-900 mb-2">
-              Complete seus dados para reservar
-            </h3>
-            <p className="text-xs text-center text-slate-600 mb-6 leading-relaxed">
-              Para segurança da clínica e emissão do seu comprovante de acesso,
-              precisamos que você preencha seu CPF e endereço no perfil. Leva
-              menos de 1 minuto.
-            </p>
-            <div className="space-y-2.5">
-              <Button
+          {/* CARD DA BLACK FRIDAY NO MOBILE PARA QUEM ESTÁ LOGADO */}
+          {!isPublic && isBlackFridayActive && activeBlackCampaign && (
+            <div className="lg:hidden mx-auto w-full px-4 mt-3 relative z-30">
+              <button
+                type="button"
                 onClick={() => {
-                  setShowProfileModal(false);
-                  if (onNavigateToProfile) onNavigateToProfile();
+                  if (typeof window !== "undefined") {
+                    window.dispatchEvent(
+                      new CustomEvent("open-campaign-rooms-search"),
+                    );
+                  }
                 }}
-                className="w-full h-11 rounded-xl font-bold bg-[#BF4B24] hover:bg-[#9A3C1D] text-white"
+                className="w-full p-3.5 rounded-2xl bg-[#09090B] text-white border border-amber-400/40 flex items-center justify-between gap-2 shadow-md active:scale-[0.99] transition-transform cursor-pointer"
               >
-                Completar meu perfil
-              </Button>
-              <Button
-                onClick={() => setShowProfileModal(false)}
-                variant="ghost"
-                className="w-full h-11 rounded-xl font-semibold text-slate-500 hover:bg-slate-50"
+                <div className="flex items-center gap-2.5 text-left min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-amber-400/15 border border-amber-400/40 flex items-center justify-center shrink-0">
+                    <Flame className="w-4 h-4 text-[#FBBF24] fill-[#FBBF24]" />
+                  </div>
+                  <div className="min-w-0">
+                    <span className="text-xs font-black text-[#FBBF24] block truncate">
+                      {activeBlackCampaign.name} (
+                      {activeBlackCampaign.discountLabel})
+                    </span>
+                    <span className="text-[11px] text-stone-300 block truncate">
+                      Toque para filtrar as {activeBlackCampaign.roomsCount}{" "}
+                      salas participantes
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#FBBF24] shrink-0" />
+              </button>
+            </div>
+          )}
+
+          {/* CARD COMPACTO FUSION PASS+ MOBILE */}
+          <div className="lg:hidden mx-auto w-full px-4 mt-3 relative z-30">
+            {hasActiveWalletCredits ? (
+              <div
+                onClick={() => setIsWalletOpen(true)}
+                className="flex items-center justify-between bg-white px-4 py-3 rounded-2xl border border-[#BF4B24]/30 shadow-2xs cursor-pointer active:scale-[0.99] transition-transform"
               >
-                Agora não
-              </Button>
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-[#FAF7F4] border border-[#BF4B24]/20 flex items-center justify-center shrink-0 text-[#BF4B24]">
+                    <Crown className="w-4 h-4 fill-[#BF4B24]" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#BF4B24]">
+                        Assinante Pass+
+                      </span>
+                      <span className="text-[10px] font-bold bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded">
+                        {profile.balance}h ativas
+                      </span>
+                    </div>
+                    <p className="text-xs font-semibold text-stone-700 truncate mt-0.5">
+                      Toque para ver seu extrato ou fazer upgrade
+                    </p>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-stone-400 shrink-0" />
+              </div>
+            ) : (
+              <div
+                onClick={() =>
+                  handleOpenPassWithTier(
+                    activeTier === "all" ? "vip" : activeTier,
+                  )
+                }
+                className="flex items-center justify-between bg-white px-3.5 py-3 rounded-2xl border border-[#BF4B24]/30 shadow-2xs cursor-pointer active:scale-[0.99] transition-transform"
+              >
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div className="bg-[#FAF7F4] border border-[#BF4B24]/25 text-[#BF4B24] rounded-xl px-2.5 py-1.5 text-center shrink-0">
+                    <span className="text-[9px] font-extrabold uppercase block leading-none">
+                      ATÉ
+                    </span>
+                    <span className="text-sm font-black leading-none block mt-0.5">
+                      -41%
+                    </span>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1 text-xs font-bold text-stone-900 whitespace-nowrap truncate">
+                      <span>Fusion Pass+</span>
+                      <span className="text-stone-300">•</span>
+                      <span className="text-[#BF4B24]">
+                        Hora a partir de R$ 26
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-stone-500 truncate mt-0.5">
+                      Sem fidelidade • Use em 30 dias, doe ou negocie
+                    </p>
+                  </div>
+                </div>
+                <span className="text-xs font-bold text-[#BF4B24] flex items-center shrink-0 ml-2">
+                  <span>Simular</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* ATALHO PARA REABRIR A CONVERSA SALVA DO CONCIERGE IA */}
+          {canUseAIConcierge &&
+            !isAISearchExpanded &&
+            aiExchanges.length > 0 && (
+              <div className="px-4 lg:px-10 mx-auto max-w-5xl lg:max-w-[1360px] w-full mt-3.5">
+                <div
+                  onClick={() => setIsAISearchExpanded(true)}
+                  className="p-3.5 sm:px-5 rounded-2xl bg-stone-950 text-white border border-stone-800 shadow-sm flex items-center justify-between gap-3 cursor-pointer active:scale-[0.99] transition-transform"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-8 h-8 rounded-xl bg-[#BF4B24] text-white flex items-center justify-center shrink-0">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#FBBF24] block">
+                        Conversa aberta no Concierge IA • Toque para retomar
+                      </span>
+                      <p className="text-xs font-medium text-stone-200 truncate">
+                        {aiExchanges[aiExchanges.length - 1].headline.replace(
+                          /\*\*/g,
+                          "",
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs font-bold text-[#FBBF24] shrink-0 flex items-center gap-1">
+                    <span>Abrir chat</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </span>
+                </div>
+              </div>
+            )}
+
+          {/* BARRA DE CURADORIA E FILTROS DO MOSTRUÁRIO */}
+          <div className="px-4 lg:px-10 mx-auto max-w-5xl lg:max-w-[1360px] w-full mt-4 lg:mt-8">
+            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pb-4 lg:pb-5 border-b border-stone-200/80">
+              <div>
+                <p className="text-[10px] lg:text-[11px] font-bold text-stone-400 uppercase tracking-wider mb-2">
+                  Padrão do Consultório
+                </p>
+                <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide pb-0.5">
+                  <button
+                    onClick={() => setActiveTier("all")}
+                    className={`px-3.5 lg:px-4 py-1.5 lg:py-2 rounded-full text-xs sm:text-sm font-semibold transition-all shrink-0 border cursor-pointer ${
+                      activeTier === "all"
+                        ? "bg-stone-900 text-white border-stone-900 shadow-2xs"
+                        : "bg-white text-stone-600 border-stone-200/90 hover:border-stone-300 hover:text-stone-900"
+                    }`}
+                  >
+                    Todos ({searchResults.rooms.length})
+                  </button>
+                  <button
+                    onClick={() => setActiveTier("master")}
+                    className={`px-3.5 lg:px-4 py-1.5 lg:py-2 rounded-full text-xs sm:text-sm font-semibold transition-all flex items-center gap-1.5 shrink-0 border cursor-pointer ${
+                      activeTier === "master"
+                        ? "bg-stone-900 text-amber-300 border-stone-900 shadow-2xs"
+                        : "bg-white text-stone-600 border-stone-200/90 hover:border-stone-300 hover:text-stone-900"
+                    }`}
+                  >
+                    <Crown className="w-3.5 h-3.5 text-amber-500" />
+                    <span>Premium</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTier("vip")}
+                    className={`px-3.5 lg:px-4 py-1.5 lg:py-2 rounded-full text-xs sm:text-sm font-semibold transition-all flex items-center gap-1.5 shrink-0 border cursor-pointer ${
+                      activeTier === "vip"
+                        ? "bg-[#BF4B24] text-white border-[#BF4B24] shadow-2xs"
+                        : "bg-white text-stone-600 border-stone-200/90 hover:border-stone-300 hover:text-stone-900"
+                    }`}
+                  >
+                    <Star className="w-3.5 h-3.5" />
+                    <span>VIP</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTier("start")}
+                    className={`px-3.5 lg:px-4 py-1.5 lg:py-2 rounded-full text-xs sm:text-sm font-semibold transition-all flex items-center gap-1.5 shrink-0 border cursor-pointer ${
+                      activeTier === "start"
+                        ? "bg-stone-800 text-white border-stone-800 shadow-2xs"
+                        : "bg-white text-stone-600 border-stone-200/90 hover:border-stone-300 hover:text-stone-900"
+                    }`}
+                  >
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>Basic</span>
+                  </button>
+                </div>
+              </div>
+              <div className="hidden lg:block">
+                <p className="text-[11px] font-bold text-stone-400 uppercase tracking-wider mb-2.5 text-right">
+                  Filtrar por Especialidade
+                </p>
+                <div className="flex items-center gap-1.5 bg-white p-1 rounded-full border border-stone-200/80 shadow-2xs">
+                  {CATEGORIES.map((cat) => {
+                    const Icon = cat.icon;
+                    const active = appliedFilters.category === cat.id;
+                    return (
+                      <button
+                        key={cat.id}
+                        type="button"
+                        onClick={() => handleQuickCategorySelect(cat.id)}
+                        className={`px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                          active
+                            ? "bg-[#FAF7F4] text-[#BF4B24] border border-[#BF4B24]/30 shadow-2xs"
+                            : "text-stone-600 hover:text-stone-900 hover:bg-stone-50"
+                        }`}
+                      >
+                        <Icon className="w-3.5 h-3.5" />
+                        <span>{cat.shortLabel}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
 
-      <CheckoutModal
-        isOpen={isCheckoutOpen}
-        onClose={handleCheckoutClose}
-        onConfirm={(method, appliedCoupon, cardData) =>
-          handleConfirmCheckout(method, appliedCoupon, cardData)
-        }
-        onSuccess={() => {
-          bookingConfirmedRef.current = true;
-          fetchRoomBookings();
-        }}
-        loading={actionLoading}
-        summary={checkoutSummary}
-        room={roomData}
-        selectedSlots={selectedSlots}
-        selectedDate={selectedDate || new Date()}
-        totalBaseBRL={totalHourlyCost}
-        pixQrCode={pixQrCode}
-        pixCopyPaste={pixCopyPaste}
-        activeBookingId={activeBookingId}
-        campaignInfo={checkoutCampaignInfo}
-      />
+          {searchResults.isFallback && aiExchanges.length === 0 && (
+            <div className="px-4 lg:px-10 max-w-5xl lg:max-w-[1360px] mx-auto w-full mt-5">
+              <div className="p-4 sm:p-5 bg-white border border-[#BF4B24]/25 rounded-2xl flex items-start gap-3.5 animate-in fade-in shadow-2xs">
+                <div className="p-2 bg-[#FAF7F4] rounded-xl shrink-0">
+                  <Compass className="w-5 h-5 text-[#BF4B24]" />
+                </div>
+                <div>
+                  <h4 className="font-bold text-stone-900 text-sm">
+                    Sugestões próximas na Fusion Clinic
+                  </h4>
+                  <p className="text-xs text-stone-600 mt-0.5 leading-relaxed">
+                    {searchResults.fallbackMessage}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {searchResults.rooms.length === 0 ? (
+            <div className="px-4 lg:px-10 max-w-5xl lg:max-w-[1360px] mx-auto w-full mt-8">
+              <div className="text-center py-14 bg-white rounded-3xl border border-stone-200/80 shadow-2xs flex flex-col items-center px-4">
+                <Search className="w-9 h-9 text-stone-300 mb-3" />
+                <h3 className="text-base font-bold text-stone-900 mb-1">
+                  Nenhum consultório encontrado com estes filtros
+                </h3>
+                <p className="text-stone-500 text-xs max-w-sm">
+                  Experimente visualizar todas as especialidades ou limpar o
+                  filtro de região.
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={handleClearFilters}
+                  className="mt-5 font-semibold rounded-xl px-5 text-xs border-stone-200"
+                >
+                  Mostrar todos os consultórios
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div className="px-0 md:px-4 lg:px-10 max-w-5xl lg:max-w-[1360px] mx-auto w-full space-y-9 lg:space-y-12 pb-12 mt-6 lg:mt-8">
+              {/* SEÇÃO 1: SALAS PREMIUM */}
+              {(activeTier === "all" || activeTier === "master") &&
+                masterRooms.length > 0 && (
+                  <section>
+                    <div className="flex items-end justify-between gap-2 mb-3.5 lg:mb-5 px-4 sm:px-0">
+                      <div className="flex items-start gap-2.5 lg:gap-3">
+                        <div className="w-9 h-9 lg:w-10 lg:h-10 rounded-2xl bg-stone-900 text-amber-400 flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
+                          <Crown className="w-4 h-4 lg:w-5 lg:h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h2 className="text-lg lg:text-2xl font-bold text-stone-900 tracking-tight">
+                              Consultórios Premium
+                            </h2>
+                            <span className="text-[10px] lg:text-[11px] font-semibold text-stone-500 bg-stone-200/70 px-2 py-0.5 rounded-full">
+                              {masterRooms.length}
+                            </span>
+                          </div>
+                          <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
+                            Arquitetura executiva e máximo conforto acústico.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPassWithTier("master")}
+                        className="inline-flex items-center gap-0.5 text-[11px] lg:text-xs font-bold text-[#BF4B24] hover:underline cursor-pointer shrink-0"
+                      >
+                        <span className="hidden sm:inline">
+                          Ver pacote Pass+ Premium
+                        </span>
+                        <span className="sm:hidden">Pass+ Premium</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {activeTier === "master" &&
+                      appliedFilters.modality === "hora" &&
+                      renderTargetedPassBanner()}
+                    <div
+                      className={
+                        masterRooms.length === 1
+                          ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 lg:gap-6 px-4 sm:px-0"
+                          : "flex overflow-x-auto gap-3.5 pb-3 snap-x snap-mandatory scrollbar-hide px-4 sm:px-0 lg:grid lg:grid-cols-3 lg:gap-6 lg:overflow-visible lg:pb-0"
+                      }
+                    >
+                      {masterRooms.map((room: Room) => (
+                        <RoomCard
+                          key={room.id}
+                          room={{
+                            ...room,
+                            selectedModality: appliedFilters.modality,
+                            preselectedDate: aiTargetDateISO || undefined,
+                          }}
+                          aiMatch={aiMatchesMap[room.id]}
+                          bestHourlyRate={bestHourlyRates[room.tier]}
+                          isFavorited={favorites.has(room.id)}
+                          onToggleFavorite={toggleFavorite}
+                          onOpen={onOpenRoom}
+                          horizontal={masterRooms.length > 1}
+                          usingLocation={usingLocation}
+                          activeTier={activeTier}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+              {/* SEÇÃO 2: SALAS VIP */}
+              {(activeTier === "all" || activeTier === "vip") &&
+                vipRooms.length > 0 && (
+                  <section>
+                    <div className="flex items-end justify-between gap-2 mb-3.5 lg:mb-5 px-4 sm:px-0">
+                      <div className="flex items-start gap-2.5 lg:gap-3">
+                        <div className="w-9 h-9 lg:w-10 lg:h-10 rounded-2xl bg-[#FAF7F4] border border-[#BF4B24]/25 text-[#BF4B24] flex items-center justify-center shrink-0 mt-0.5">
+                          <Star className="w-4 h-4 lg:w-5 lg:h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h2 className="text-lg lg:text-2xl font-bold text-stone-900 tracking-tight">
+                              Consultórios VIP
+                            </h2>
+                            <span className="text-[10px] lg:text-[11px] font-semibold text-stone-500 bg-stone-200/70 px-2 py-0.5 rounded-full">
+                              {vipRooms.length}
+                            </span>
+                          </div>
+                          <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
+                            Ambientes clínicos completos com design acolhedor.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPassWithTier("vip")}
+                        className="inline-flex items-center gap-0.5 text-[11px] lg:text-xs font-bold text-[#BF4B24] hover:underline cursor-pointer shrink-0"
+                      >
+                        <span className="hidden sm:inline">
+                          Ver pacote Pass+ VIP
+                        </span>
+                        <span className="sm:hidden">Pass+ VIP</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {activeTier === "vip" &&
+                      appliedFilters.modality === "hora" &&
+                      renderTargetedPassBanner()}
+                    <div
+                      className={
+                        vipRooms.length === 1
+                          ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 lg:gap-6 px-4 sm:px-0"
+                          : "flex overflow-x-auto gap-3.5 pb-3 snap-x snap-mandatory scrollbar-hide px-4 sm:px-0 lg:grid lg:grid-cols-3 lg:gap-6 lg:overflow-visible lg:pb-0"
+                      }
+                    >
+                      {vipRooms.map((room: Room) => (
+                        <RoomCard
+                          key={room.id}
+                          room={{
+                            ...room,
+                            selectedModality: appliedFilters.modality,
+                            preselectedDate: aiTargetDateISO || undefined,
+                          }}
+                          aiMatch={aiMatchesMap[room.id]}
+                          bestHourlyRate={bestHourlyRates[room.tier]}
+                          isFavorited={favorites.has(room.id)}
+                          onToggleFavorite={toggleFavorite}
+                          onOpen={onOpenRoom}
+                          horizontal={vipRooms.length > 1}
+                          usingLocation={usingLocation}
+                          activeTier={activeTier}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+              {/* SEÇÃO 3: SALAS BASIC */}
+              {(activeTier === "all" || activeTier === "start") &&
+                startRooms.length > 0 && (
+                  <section>
+                    <div className="flex items-end justify-between gap-2 mb-3.5 lg:mb-5 px-4 sm:px-0">
+                      <div className="flex items-start gap-2.5 lg:gap-3">
+                        <div className="w-9 h-9 lg:w-10 lg:h-10 rounded-2xl bg-white border border-stone-200 text-stone-700 flex items-center justify-center shrink-0 mt-0.5">
+                          <Shield className="w-4 h-4 lg:w-5 lg:h-5" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h2 className="text-lg lg:text-2xl font-bold text-stone-900 tracking-tight">
+                              Consultórios Basic
+                            </h2>
+                            <span className="text-[10px] lg:text-[11px] font-semibold text-stone-500 bg-stone-200/70 px-2 py-0.5 rounded-full">
+                              {startRooms.length}
+                            </span>
+                          </div>
+                          <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
+                            Praticidade e o melhor custo-benefício por consulta.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenPassWithTier("start")}
+                        className="inline-flex items-center gap-0.5 text-[11px] lg:text-xs font-bold text-[#BF4B24] hover:underline cursor-pointer shrink-0"
+                      >
+                        <span className="hidden sm:inline">
+                          Ver pacote Pass+ Basic
+                        </span>
+                        <span className="sm:hidden">Pass+ Basic</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    {activeTier === "start" &&
+                      appliedFilters.modality === "hora" &&
+                      renderTargetedPassBanner()}
+                    <div
+                      className={
+                        startRooms.length === 1
+                          ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 lg:gap-6 px-4 sm:px-0"
+                          : "flex overflow-x-auto gap-3.5 pb-3 snap-x snap-mandatory scrollbar-hide px-4 sm:px-0 lg:grid lg:grid-cols-3 lg:gap-6 lg:overflow-visible lg:pb-0"
+                      }
+                    >
+                      {startRooms.map((room: Room) => (
+                        <RoomCard
+                          key={room.id}
+                          room={{
+                            ...room,
+                            selectedModality: appliedFilters.modality,
+                            preselectedDate: aiTargetDateISO || undefined,
+                          }}
+                          aiMatch={aiMatchesMap[room.id]}
+                          bestHourlyRate={bestHourlyRates[room.tier]}
+                          isFavorited={favorites.has(room.id)}
+                          onToggleFavorite={toggleFavorite}
+                          onOpen={onOpenRoom}
+                          horizontal={startRooms.length > 1}
+                          usingLocation={usingLocation}
+                          activeTier={activeTier}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function RoomCard({
+  room,
+  aiMatch,
+  isFavorited,
+  onToggleFavorite,
+  onOpen,
+  horizontal = false,
+  usingLocation = false,
+  bestHourlyRate,
+}: {
+  room: Room;
+  aiMatch?: RoomAvailabilityMatch;
+  isFavorited: boolean;
+  onToggleFavorite: (e: React.MouseEvent, id: string) => void;
+  onOpen?: (room: Room) => void;
+  horizontal?: boolean;
+  usingLocation?: boolean;
+  bestHourlyRate?: number;
+  activeTier: string;
+}) {
+  const isMaster = room.tier === "master";
+  const isVip = room.tier === "vip";
+  const isHourly = room.selectedModality === "hora";
+  const fallbackPassRate = bestHourlyRate || (isMaster ? 50 : isVip ? 34 : 26);
+  const showPassComparison =
+    isHourly && room.filterPrice > 0 && room.filterPrice > fallbackPassRate;
+  const neighborhood = room.rawAddress?.neighborhood || "Região Central";
+  const city = room.rawAddress?.city || "Unidade Verificada";
+
+  return (
+    <div
+      onClick={() => onOpen && onOpen(room)}
+      className={`group cursor-pointer flex flex-col bg-white border rounded-[22px] overflow-hidden shadow-[0_4px_20px_rgba(28,25,23,0.04)] hover:shadow-[0_14px_35px_rgba(28,25,23,0.10)] hover:-translate-y-1 transition-all duration-300 ${
+        aiMatch?.exactSlotAvailable && aiMatch?.requestedSlotLabel
+          ? "border-emerald-500/60 ring-1 ring-emerald-500/20"
+          : "border-stone-200/85 hover:border-stone-300"
+      } ${
+        horizontal
+          ? "w-[285px] sm:w-[325px] lg:w-full shrink-0 snap-start"
+          : "w-full"
+      }`}
+    >
+      <div
+        className={`relative w-full bg-stone-100 overflow-hidden ${
+          horizontal
+            ? "h-44 sm:h-48 lg:h-auto lg:aspect-[16/10]"
+            : "aspect-[16/10]"
+        }`}
+      >
+        <Image
+          src={room.image}
+          alt={room.name}
+          fill
+          sizes="(max-width: 768px) 100vw, 420px"
+          className="object-cover group-hover:scale-105 transition-transform duration-500"
+          onError={(e: any) => {
+            e.target.src = "/placeholder.jpg";
+          }}
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-black/15 pointer-events-none" />
+        <div className="absolute top-3 left-3 flex items-center gap-1.5 z-10">
+          {room.isPartner && (
+            <span className="bg-white/95 backdrop-blur-xs px-2.5 py-1 rounded-full text-[10px] font-bold text-stone-800 flex items-center gap-1 shadow-2xs">
+              <BadgeCheck className="w-3.5 h-3.5 text-[#BF4B24]" />
+              Verificado
+            </span>
+          )}
+          <span
+            className={`px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center gap-1 shadow-2xs ${
+              isMaster
+                ? "bg-stone-950/90 text-amber-300 backdrop-blur-xs"
+                : isVip
+                  ? "bg-[#BF4B24] text-white"
+                  : "bg-white/95 text-stone-700"
+            }`}
+          >
+            {isMaster ? (
+              <>
+                <Crown className="w-3 h-3" /> Premium
+              </>
+            ) : isVip ? (
+              <>
+                <Star className="w-3 h-3" /> VIP
+              </>
+            ) : (
+              <>
+                <Shield className="w-3 h-3" /> Basic
+              </>
+            )}
+          </span>
+        </div>
+        <button
+          onClick={(e) => onToggleFavorite(e, room.id)}
+          aria-label="Salvar nos favoritos"
+          className="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/85 hover:bg-white backdrop-blur-xs flex items-center justify-center transition-transform active:scale-90 z-10 shadow-2xs"
+        >
+          <Heart
+            className={`h-4 w-4 transition-colors ${
+              isFavorited
+                ? "fill-red-500 text-red-500"
+                : "text-stone-700 hover:text-stone-950"
+            }`}
+          />
+        </button>
+        <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between z-10">
+          <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-white bg-black/45 backdrop-blur-xs px-2.5 py-1 rounded-lg border border-white/15">
+            <Stethoscope className="w-3 h-3 text-orange-200" />
+            {room.specialty || room.category || "Consultório Clínico"}
+          </span>
+          {usingLocation && room.distanceKm && (
+            <span className="text-[10px] font-bold text-white bg-emerald-600/90 backdrop-blur-xs px-2 py-1 rounded-lg flex items-center gap-1">
+              <Navigation className="w-2.5 h-2.5" />
+              {room.distanceKm.toFixed(1)} km
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="flex flex-col p-4 sm:p-5 flex-1 bg-white">
+        <div className="flex items-center justify-between gap-2 text-xs text-stone-500 mb-1">
+          <span className="flex items-center gap-1 font-medium truncate">
+            <MapPin className="w-3.5 h-3.5 text-[#BF4B24] shrink-0" />
+            <span className="truncate">
+              {neighborhood}, {city}
+            </span>
+          </span>
+          {room.reviews_count > 0 ? (
+            <span className="flex items-center gap-1 font-bold text-stone-800 shrink-0">
+              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+              {Number(room.rating).toFixed(1)}
+              <span className="text-stone-400 font-normal">
+                ({room.reviews_count})
+              </span>
+            </span>
+          ) : (
+            <span className="text-[11px] font-semibold text-[#BF4B24] bg-[#FAF7F4] px-2 py-0.5 rounded-md shrink-0">
+              Novo
+            </span>
+          )}
+        </div>
+        <h3 className="font-bold text-base sm:text-[17px] text-stone-900 leading-snug line-clamp-1 group-hover:text-[#BF4B24] transition-colors">
+          {room.name}
+        </h3>
+        {aiMatch && aiMatch.availableSlots.length > 0 ? (
+          <div className="mt-2 mb-1 p-2.5 rounded-xl bg-[#FAF7F4] border border-stone-200/80">
+            <div className="flex items-center justify-between gap-1 mb-1.5">
+              <span
+                className={`text-[10px] font-bold flex items-center gap-1 ${
+                  aiMatch.exactSlotAvailable
+                    ? "text-emerald-700"
+                    : "text-[#BF4B24]"
+                }`}
+              >
+                <Clock className="w-3 h-3" />
+                {aiMatch.matchReason}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {aiMatch.availableSlots.map((slot) => {
+                const isRequested = slot === aiMatch.requestedSlotLabel;
+                return (
+                  <button
+                    key={slot}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (onOpen) {
+                        onOpen({
+                          ...room,
+                          preselectedSlot: slot,
+                        });
+                      }
+                    }}
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                      isRequested
+                        ? "bg-emerald-600 text-white shadow-2xs"
+                        : "bg-white hover:bg-[#BF4B24] text-stone-800 hover:text-white border border-stone-200"
+                    }`}
+                  >
+                    {slot}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <p className="text-[11px] text-stone-400 font-medium mt-1 truncate">
+            {room.description
+              ? room.description
+              : "Check-in digital • Recepção e Wi-Fi inclusos"}
+          </p>
+        )}
+        <div className="mt-auto pt-3.5 border-t border-stone-100 flex items-end justify-between gap-2">
+          <div>
+            <div className="flex items-baseline gap-1.5">
+              <span className="text-base sm:text-lg font-extrabold text-stone-900 tracking-tight">
+                {room.priceLabel}
+              </span>
+              {isHourly && (
+                <span className="text-[11px] text-stone-400 font-medium">
+                  avulso
+                </span>
+              )}
+            </div>
+            {showPassComparison ? (
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50/90 px-2 py-0.5 rounded-md mt-1">
+                <span>
+                  ou R$ {fallbackPassRate.toFixed(0)}/h no Fusion Pass+
+                </span>
+              </span>
+            ) : (
+              <span className="text-[11px] text-stone-400 font-medium block mt-0.5">
+                {room.selectedModality === "turno"
+                  ? "Turno fixo semanal"
+                  : room.selectedModality === "fixo"
+                    ? "Sala exclusiva mensal"
+                    : "Reserva imediata"}
+              </span>
+            )}
+          </div>
+          <span className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-[#FAF7F4] group-hover:bg-[#BF4B24] text-stone-800 group-hover:text-white text-xs font-bold transition-colors shrink-0">
+            <span>Ver agenda</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

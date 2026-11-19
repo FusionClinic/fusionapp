@@ -72,7 +72,6 @@ export default function AppPage() {
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
   const [logoError, setLogoError] = useState(false);
 
-  // Estado que controla as campanhas de horário ativas e as salas participantes
   const [activeBlackCampaign, setActiveBlackCampaign] =
     useState<ActiveBlackCampaignInfo | null>(null);
   const [campaignRooms, setCampaignRooms] = useState<any[]>([]);
@@ -139,7 +138,6 @@ export default function AppPage() {
     };
   }, [router, supabase]);
 
-  // Busca campanhas de horário ativas e carrega as salas vinculadas a elas
   useEffect(() => {
     let isMounted = true;
 
@@ -298,7 +296,6 @@ export default function AppPage() {
     };
   }, [supabase]);
 
-  // Escuta o clique no Pop-up da Black Friday para ativar a página escura das salas participantes
   const handleActivateCampaignRoomsSearch = useCallback(() => {
     setSelectedRoom(null);
     setActiveTab("buscar");
@@ -494,7 +491,7 @@ export default function AppPage() {
         badgeText={campaignDiscountLabel}
       />
 
-      {/* Ponte de alinhamento no Desktop + Tema Preto do Banner Mobile na Black Friday */}
+      {/* Ponte de alinhamento exclusiva para o Desktop (lg:) */}
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -516,44 +513,14 @@ export default function AppPage() {
                 border-radius: 0 !important;
               }
             }
-
-            /* Transforma o Banner Mobile do SearchTab em Preto/Dourado durante a Black Friday */
-            @media (max-width: 1023px) {
-              .fusion-black-mobile-hero > div > div:first-child,
-              .fusion-black-mobile-hero > div > header:first-child,
-              .fusion-black-mobile-hero > div:first-child > div:first-child,
-              .fusion-black-mobile-hero section:first-of-type {
-                background-color: #09090B !important;
-              }
-              .fusion-black-mobile-hero > div > div:first-child [style*="linear-gradient"],
-              .fusion-black-mobile-hero > div > header:first-child [style*="linear-gradient"],
-              .fusion-black-mobile-hero > div:first-child > div:first-child [style*="linear-gradient"],
-              .fusion-black-mobile-hero section:first-of-type [style*="linear-gradient"] {
-                background: linear-gradient(90deg, #09090B 0%, rgba(9,9,11,0.92) 48%, rgba(9,9,11,0.35) 100%) !important;
-              }
-              .fusion-black-mobile-hero > div > div:first-child [class*="from-"],
-              .fusion-black-mobile-hero > div > header:first-child [class*="from-"],
-              .fusion-black-mobile-hero > div:first-child > div:first-child [class*="from-"],
-              .fusion-black-mobile-hero section:first-of-type [class*="from-"] {
-                --tw-gradient-from: #09090B var(--tw-gradient-from-position) !important;
-                --tw-gradient-to: rgba(9, 9, 11, 0.25) var(--tw-gradient-to-position) !important;
-                --tw-gradient-stops: var(--tw-gradient-from), rgba(9, 9, 11, 0.88), var(--tw-gradient-to) !important;
-              }
-              .fusion-black-mobile-hero h1 span,
-              .fusion-black-mobile-hero h1 em {
-                color: #FBBF24 !important;
-              }
-            }
           `,
         }}
       />
 
-      {/* Pop-up Inteligente: usa /black.jpeg quando há campanha ativa e abre a pesquisa de salas participantes */}
+      {/* Pop-up Inteligente */}
       <FusionPassPromoPopup />
 
-      {/* ==================================================================== */}
-      {/* 1. TOP PROMO BAR PRETA                                               */}
-      {/* ==================================================================== */}
+      {/* 1. TOP PROMO BAR PRETA */}
       {!selectedRoom && (
         <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/10">
           <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-2.5 lg:gap-4">
@@ -616,9 +583,7 @@ export default function AppPage() {
         </div>
       )}
 
-      {/* ==================================================================== */}
-      {/* 2. HEADER DESKTOP (FICA PRETO QUANDO NA PÁGINA DAS SALAS DA BLACK)   */}
-      {/* ==================================================================== */}
+      {/* 2. HEADER DESKTOP */}
       {!selectedRoom && (
         <header
           className={cn(
@@ -791,9 +756,7 @@ export default function AppPage() {
         </header>
       )}
 
-      {/* ==================================================================== */}
-      {/* 3. HERO BANNER DESKTOP (EXIBIDO NA BUSCA GERAL)                      */}
-      {/* ==================================================================== */}
+      {/* 3. HERO BANNER DESKTOP */}
       {!selectedRoom && activeTab === "buscar" && !showOnlyCampaignRooms && (
         <section
           className={cn(
@@ -960,9 +923,7 @@ export default function AppPage() {
         </section>
       )}
 
-      {/* ==================================================================== */}
-      {/* 4. CONTEÚDO PRINCIPAL (PÁGINA 100% PRETA DA BLACK OU BUSCA GERAL)    */}
-      {/* ==================================================================== */}
+      {/* 4. CONTEÚDO PRINCIPAL */}
       <main
         className={cn(
           "flex-1 w-full",
@@ -986,12 +947,8 @@ export default function AppPage() {
             {activeTab === "buscar" && (
               <div ref={campaignSectionRef}>
                 {showOnlyCampaignRooms && isBlackFridayActive ? (
-                  /* ========================================================== */
-                  /* PÁGINA 100% PRETA (ALL-BLACK) DAS SALAS DA CAMPANHA        */
-                  /* ========================================================== */
                   <div className="w-full min-h-[80vh] bg-[#050507] text-white">
                     <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-10 pt-5 sm:pt-8 pb-12 animate-in fade-in duration-300">
-                      {/* Painel Superior de Controle e Pesquisa (Preto + Borda Dourada) */}
                       <div className="bg-[#0D0D11] text-white rounded-3xl p-5 sm:p-7 border border-amber-400/35 shadow-[0_20px_50px_rgba(0,0,0,0.85)] mb-7">
                         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-zinc-800/90">
                           <div className="space-y-2">
@@ -1037,7 +994,6 @@ export default function AppPage() {
                           </div>
                         </div>
 
-                        {/* Barra de Pesquisa Escura + Pílulas de Especialidade */}
                         <div className="mt-5 flex flex-col md:flex-row items-stretch md:items-center gap-3">
                           <div className="relative flex-1">
                             <Search className="w-4 h-4 text-[#FBBF24] absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1078,7 +1034,6 @@ export default function AppPage() {
                         </div>
                       </div>
 
-                      {/* Grid de Cards 100% Pretos com Bordas Escuras/Douradas */}
                       {filteredCampaignRooms.length === 0 ? (
                         <div className="bg-[#0D0D11] rounded-3xl border border-zinc-800 p-12 text-center space-y-3">
                           <p className="text-base font-bold text-white">
@@ -1211,12 +1166,7 @@ export default function AppPage() {
                     </div>
                   </div>
                 ) : (
-                  <div
-                    className={cn(
-                      "w-full fusion-desktop-hero-bridge",
-                      isBlackFridayActive ? "fusion-black-mobile-hero" : "",
-                    )}
-                  >
+                  <div className="w-full fusion-desktop-hero-bridge">
                     {isBlackFridayActive && campaignRooms.length > 0 && (
                       <div className="lg:hidden px-4 pt-3 pb-2 bg-[#09090B] space-y-2">
                         <button
@@ -1250,9 +1200,7 @@ export default function AppPage() {
         )}
       </main>
 
-      {/* ==================================================================== */}
-      {/* 5. RODAPÉ INSTITUCIONAL (FICA PRETO QUANDO NA PÁGINA DA BLACK)       */}
-      {/* ==================================================================== */}
+      {/* 5. RODAPÉ INSTITUCIONAL */}
       {!selectedRoom && (
         <footer
           className={cn(
@@ -1391,9 +1339,7 @@ export default function AppPage() {
         </footer>
       )}
 
-      {/* ==================================================================== */}
-      {/* 6. BARRA INFERIOR MOBILE (FICA PRETA QUANDO NA PÁGINA DA BLACK)      */}
-      {/* ==================================================================== */}
+      {/* 6. BARRA INFERIOR MOBILE */}
       {!selectedRoom && (
         <nav
           className={cn(

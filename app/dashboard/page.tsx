@@ -1,7 +1,14 @@
 // app/dashboard/page.tsx
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+  Suspense,
+} from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
@@ -19,6 +26,13 @@ import {
   ChevronRight,
   Tag,
   Crown,
+  Flame,
+  Percent,
+  ScrollText,
+  MapPin,
+  Users,
+  Clock,
+  X,
 } from "lucide-react";
 
 import { SearchTab } from "@/components/search-tab";
@@ -35,11 +49,26 @@ import {
 } from "@/components/review-modal";
 import { PushRegistry } from "@/components/push-registry";
 import { FusionPassPromoPopup } from "@/components/fusion-pass-promo-popup";
+import {
+  CampaignRulesModal,
+  extractCampaignRulesText,
+} from "@/components/campaign-rules-modal";
 
 type TabType =
   "search" | "favorites" | "bookings" | "cohost" | "chat" | "profile";
 
 type CreditTier = "start" | "vip" | "master";
+
+interface ActiveBlackCampaignInfo {
+  id: string;
+  campaignName: string;
+  code: string;
+  discountType: "percentage" | "fixed" | string;
+  discountValue: number;
+  validUntil: string | null;
+  validRoomIds: string[] | null;
+  rulesText: string | null;
+}
 
 const VALID_TABS: TabType[] = [
   "search",
@@ -49,6 +78,16 @@ const VALID_TABS: TabType[] = [
   "chat",
   "profile",
 ];
+
+const WEEKDAY_SHORT_NAMES: Record<string, string> = {
+  "1": "Seg",
+  "2": "Ter",
+  "3": "Qua",
+  "4": "Qui",
+  "5": "Sex",
+  "6": "Sáb",
+  "0": "Dom",
+};
 
 function formatTierLabel(tier: CreditTier | null): string {
   if (tier === "master") return "Premium";
@@ -116,6 +155,17 @@ function DashboardContent() {
   const [isCohost, setIsCohost] = useState(false);
   const [logoError, setLogoError] = useState(false);
 
+  // Estados da Campanha Black Friday (para o profissional logado)
+  const [activeBlackCampaign, setActiveBlackCampaign] =
+    useState<ActiveBlackCampaignInfo | null>(null);
+  const [campaignRooms, setCampaignRooms] = useState<any[]>([]);
+  const [showOnlyCampaignRooms, setShowOnlyCampaignRooms] = useState(false);
+  const [campaignSearchQuery, setCampaignSearchQuery] = useState("");
+  const [campaignSpecialtyFilter, setCampaignSpecialtyFilter] =
+    useState("Todas");
+  const [isCampaignRulesOpen, setIsCampaignRulesOpen] = useState(false);
+  const campaignSectionRef = useRef<HTMLDivElement>(null);
+
   const [specialistInfo, setSpecialistInfo] = useState<{
     fullName: string;
     avatarUrl: string | null;
@@ -141,6 +191,200 @@ function DashboardContent() {
     vipCredits: 0,
     masterCredits: 0,
   });
+
+  // Busca campanhas de horário ativas e as salas participantes
+  useEffect(() => {
+    let isMounted = true;
+
+    async function fetchCampaignsAndParticipatingRooms() {
+      try {
+        const [{ data: couponsData }, { data: roomsData }] = await Promise.all([
+          supabase
+            .from("coupons")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false }),
+          supabase
+            .from("rooms")
+            .select("*")
+            .eq("is_active", true)
+            .order("created_at", { ascending: false }),
+        ]);
+
+        if (!isMounted || !couponsData) return;
+
+        const now = new Date();
+        const todayIso = now.toISOString().slice(0, 10);
+
+        const validCampaigns = couponsData.filter((c: any) => {
+          if (c.valid_until && new Date(c.valid_until) < now) return false;
+          if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses)) {
+            return false;
+          }
+
+          let rules = c.schedule_rules;
+          if (typeof rules === "string") {
+            try {
+              rules = JSON.parse(rules);
+            } catch {
+              rules = null;
+            }
+          }
+
+          if (
+            rules?.start_date &&
+            todayIso < String(rules.start_date).slice(0, 10)
+          ) {
+            return false;
+          }
+
+          const showOnCal =
+            typeof c.show_on_calendar === "boolean"
+              ? c.show_on_calendar
+              : Boolean(rules?.show_on_calendar);
+
+          const isCampaign =
+            Boolean(rules?.is_campaign) || Boolean(rules?.enabled) || showOnCal;
+
+          return isCampaign && showOnCal;
+        });
+
+        if (validCampaigns.length > 0) {
+          const primaryCamp = validCampaigns[0];
+          let parsedRules = primaryCamp.schedule_rules;
+          if (typeof parsedRules === "string") {
+            try {
+              parsedRules = JSON.parse(parsedRules);
+            } catch {
+              parsedRules = null;
+            }
+          }
+
+          setActiveBlackCampaign({
+            id: primaryCamp.id,
+            campaignName:
+              primaryCamp.campaign_name ||
+              parsedRules?.campaign_name ||
+              "BLACK FUSION",
+            code: primaryCamp.code || "BLACK",
+            discountType: primaryCamp.type || "percentage",
+            discountValue: Number(primaryCamp.discount_value || 50),
+            validUntil: primaryCamp.valid_until || null,
+            validRoomIds: Array.isArray(primaryCamp.valid_room_ids)
+              ? primaryCamp.valid_room_ids
+              : null,
+            rulesText: extractCampaignRulesText(primaryCamp),
+          });
+
+          const allActiveRooms = (roomsData || []).filter(
+            (r: any) => !r.is_paused,
+          );
+
+          const matchedRooms = allActiveRooms
+            .map((room: any) => {
+              const matchingCamp = validCampaigns.find((camp: any) => {
+                if (
+                  Array.isArray(camp.valid_room_ids) &&
+                  camp.valid_room_ids.length > 0
+                ) {
+                  return camp.valid_room_ids.includes(room.id);
+                }
+                return true;
+              });
+
+              if (!matchingCamp) return null;
+
+              let cRules = matchingCamp.schedule_rules;
+              if (typeof cRules === "string") {
+                try {
+                  cRules = JSON.parse(cRules);
+                } catch {
+                  cRules = null;
+                }
+              }
+
+              const dayHoursObj = cRules?.day_hours || {};
+              const activeDaysLabels: string[] = [];
+              Object.entries(dayHoursObj).forEach(([dKey, hrs]) => {
+                if (Array.isArray(hrs) && hrs.length > 0) {
+                  const dayLabel = WEEKDAY_SHORT_NAMES[dKey] || "";
+                  if (dayLabel) activeDaysLabels.push(dayLabel);
+                }
+              });
+
+              return {
+                ...room,
+                campaignInfo: {
+                  name:
+                    matchingCamp.campaign_name ||
+                    cRules?.campaign_name ||
+                    matchingCamp.code,
+                  type: matchingCamp.type || "percentage",
+                  discountValue: Number(matchingCamp.discount_value || 50),
+                  daysLabel:
+                    activeDaysLabels.length > 0
+                      ? activeDaysLabels.join(", ")
+                      : "Horários selecionados",
+                },
+              };
+            })
+            .filter(Boolean);
+
+          setCampaignRooms(matchedRooms);
+        } else {
+          setActiveBlackCampaign(null);
+          setCampaignRooms([]);
+          setShowOnlyCampaignRooms(false);
+        }
+      } catch {
+        if (isMounted) {
+          setActiveBlackCampaign(null);
+          setCampaignRooms([]);
+        }
+      }
+    }
+
+    fetchCampaignsAndParticipatingRooms();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase]);
+
+  // Escuta o clique no Pop-up da Black Friday (ou no botão mobile) para abrir a tela preta de salas participantes
+  const handleActivateCampaignRoomsSearch = useCallback(() => {
+    setSelectedRoom(null);
+    setActiveTab("search");
+    setShowOnlyCampaignRooms(true);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search + "#search",
+      );
+    }
+    setTimeout(() => {
+      if (campaignSectionRef.current) {
+        campaignSectionRef.current.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }
+    }, 100);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener(
+      "open-campaign-rooms-search",
+      handleActivateCampaignRoomsSearch,
+    );
+    return () => {
+      window.removeEventListener(
+        "open-campaign-rooms-search",
+        handleActivateCampaignRoomsSearch,
+      );
+    };
+  }, [handleActivateCampaignRoomsSearch]);
 
   useEffect(() => {
     const currentHash = window.location.hash.replace("#", "");
@@ -204,6 +448,8 @@ function DashboardContent() {
       }
     }
 
+    setShowOnlyCampaignRooms(false);
+
     if (activeTab === tab && !selectedRoom) return;
 
     if (tab === "search") {
@@ -255,6 +501,7 @@ function DashboardContent() {
 
   const handleNavigateFromRoom = (tab: TabType) => {
     setSelectedRoom(null);
+    setShowOnlyCampaignRooms(false);
     setActiveTab(tab);
     window.history.replaceState(
       null,
@@ -431,7 +678,6 @@ function DashboardContent() {
             existingReviews.map((r: any) => r.booking_id).filter(Boolean),
           );
 
-          // Conjunto unificado de IDs e sessões já puladas (LocalStorage + User Metadata do Supabase)
           const skippedSet = new Set<string>(
             Array.isArray(user.user_metadata?.skipped_review_ids)
               ? user.user_metadata.skipped_review_ids
@@ -448,7 +694,6 @@ function DashboardContent() {
             }
           } catch {}
 
-          // Agrupa reservas de múltiplas horas da mesma sala e mesmo dia em uma única sessão
           const sessionsMap = new Map<string, any[]>();
           pastBookings.forEach((b: any) => {
             const dayKey = `${b.room_id}_${String(b.start_time || "").slice(0, 10)}`;
@@ -473,7 +718,6 @@ function DashboardContent() {
 
             if (isSessionHandled) continue;
 
-            // Encontrou a sessão mais recente ainda não avaliada nem pulada
             const primaryBooking = groupBookings[groupBookings.length - 1];
             setPendingReviewBooking({
               ...primaryBooking,
@@ -492,15 +736,281 @@ function DashboardContent() {
     initializeDashboard();
   }, [supabase, router, isDoorScanSession]);
 
+  const filteredCampaignRooms = useMemo(() => {
+    const q = campaignSearchQuery.toLowerCase().trim();
+    return campaignRooms.filter((room) => {
+      let addr = room.address_details || {};
+      if (typeof addr === "string") {
+        try {
+          addr = JSON.parse(addr);
+        } catch {
+          addr = {};
+        }
+      }
+
+      if (campaignSpecialtyFilter !== "Todas") {
+        const mainSpec = String(room.specialty || "").toLowerCase();
+        const secSpecs = Array.isArray(addr.secondary_specialties)
+          ? addr.secondary_specialties.map((s: string) => s.toLowerCase())
+          : [];
+        const filterLower = campaignSpecialtyFilter.toLowerCase();
+        const matchSpec =
+          mainSpec.includes(filterLower) ||
+          secSpecs.some((s: string) => s.includes(filterLower));
+        if (!matchSpec) return false;
+      }
+
+      if (!q) return true;
+      const matchName = String(room.name || "")
+        .toLowerCase()
+        .includes(q);
+      const matchNeighborhood = String(addr.neighborhood || "")
+        .toLowerCase()
+        .includes(q);
+      const matchCity = String(addr.city || "")
+        .toLowerCase()
+        .includes(q);
+      const matchSpecialty = String(room.specialty || "")
+        .toLowerCase()
+        .includes(q);
+
+      return matchName || matchNeighborhood || matchCity || matchSpecialty;
+    });
+  }, [campaignRooms, campaignSearchQuery, campaignSpecialtyFilter]);
+
+  const isBlackFridayActive = Boolean(activeBlackCampaign);
+  const isFullDarkCampaignPage =
+    !selectedRoom &&
+    activeTab === "search" &&
+    showOnlyCampaignRooms &&
+    isBlackFridayActive;
+
+  const campaignDiscountLabel =
+    activeBlackCampaign?.discountType === "fixed"
+      ? `R$ ${activeBlackCampaign.discountValue} OFF`
+      : `${activeBlackCampaign?.discountValue || 50}% OFF`;
+
   const renderTab = () => {
     switch (activeTab) {
       case "search":
         return (
-          <SearchTab
-            onOpenRoom={handleOpenRoom}
-            onNavigateToProfile={() => handleTabChange("profile")}
-            isDashboard={true}
-          />
+          <div ref={campaignSectionRef}>
+            {showOnlyCampaignRooms && isBlackFridayActive ? (
+              /* PÁGINA 100% PRETA DAS SALAS DA CAMPANHA (PARA PROFISSIONAL LOGADO) */
+              <div className="w-full min-h-[80vh] bg-[#050507] text-white">
+                <div className="max-w-[1360px] mx-auto px-4 sm:px-6 lg:px-10 pt-5 sm:pt-8 pb-12 animate-in fade-in duration-300">
+                  <div className="bg-[#0D0D11] text-white rounded-3xl p-5 sm:p-7 border border-amber-400/35 shadow-[0_20px_50px_rgba(0,0,0,0.85)] mb-7">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-zinc-800/90">
+                      <div className="space-y-2">
+                        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-400/15 border border-amber-400/40 text-[#FBBF24] text-[10px] font-black uppercase tracking-wider">
+                          <Flame className="w-3.5 h-3.5 fill-[#FBBF24]" />
+                          {activeBlackCampaign?.campaignName} • Horários em
+                          Oferta
+                        </div>
+                        <h2 className="text-xl sm:text-3xl font-black text-white tracking-tight leading-tight">
+                          Salas participantes com{" "}
+                          <span className="text-[#FBBF24]">
+                            {campaignDiscountLabel}
+                          </span>{" "}
+                          nos horários selecionados
+                        </h2>
+                        <p className="text-xs sm:text-sm text-zinc-400">
+                          Escolha uma das salas abaixo e toque nos dias em preto
+                          no calendário para reservar seu horário com desconto.
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2.5 self-start lg:self-center shrink-0">
+                        {activeBlackCampaign?.rulesText && (
+                          <button
+                            type="button"
+                            onClick={() => setIsCampaignRulesOpen(true)}
+                            className="px-4 py-2.5 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-[#FBBF24] text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            <ScrollText className="w-4 h-4" />
+                            Ver regulamento
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => setShowOnlyCampaignRooms(false)}
+                          className="px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <X className="w-4 h-4 text-[#FBBF24]" />
+                          Ver todas as salas
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex flex-col md:flex-row items-stretch md:items-center gap-3">
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 text-[#FBBF24] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={campaignSearchQuery}
+                          onChange={(e) =>
+                            setCampaignSearchQuery(e.target.value)
+                          }
+                          placeholder="Pesquisar sala participante por nome, bairro ou especialidade..."
+                          className="w-full h-11 pl-10 pr-4 rounded-xl bg-[#16161C] border border-zinc-800 focus:border-[#FBBF24] text-white placeholder:text-zinc-500 text-xs sm:text-sm font-semibold outline-none transition-colors"
+                        />
+                      </div>
+
+                      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 md:pb-0">
+                        {[
+                          "Todas",
+                          "Psicologia",
+                          "Nutrição",
+                          "Odontologia",
+                          "Estética",
+                          "Multiuso",
+                        ].map((spec) => (
+                          <button
+                            key={spec}
+                            type="button"
+                            onClick={() => setCampaignSpecialtyFilter(spec)}
+                            className={`px-3.5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap border transition-all cursor-pointer ${
+                              campaignSpecialtyFilter === spec
+                                ? "bg-[#FBBF24] text-stone-950 border-[#FBBF24] shadow-[0_0_15px_rgba(251,191,36,0.3)]"
+                                : "bg-[#16161C] text-zinc-300 border-zinc-800 hover:border-zinc-700 hover:text-white"
+                            }`}
+                          >
+                            {spec}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {filteredCampaignRooms.length === 0 ? (
+                    <div className="bg-[#0D0D11] rounded-3xl border border-zinc-800 p-12 text-center space-y-3">
+                      <p className="text-base font-bold text-white">
+                        Nenhuma sala participante encontrada para esta busca.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCampaignSearchQuery("");
+                          setCampaignSpecialtyFilter("Todas");
+                        }}
+                        className="px-4 py-2 rounded-xl bg-[#FBBF24] text-stone-950 text-xs font-black cursor-pointer"
+                      >
+                        Limpar filtros da campanha
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                      {filteredCampaignRooms.map((room: any) => {
+                        let addr = room.address_details || {};
+                        if (typeof addr === "string") {
+                          try {
+                            addr = JSON.parse(addr);
+                          } catch {
+                            addr = {};
+                          }
+                        }
+                        const baseHourly = Number(addr?.pricing?.hourly || 45);
+                        const cInfo = room.campaignInfo;
+                        const finalHourly =
+                          cInfo?.type === "percentage"
+                            ? Math.max(
+                                0,
+                                baseHourly * (1 - cInfo.discountValue / 100),
+                              )
+                            : Math.max(0, baseHourly - cInfo.discountValue);
+
+                        const badgeLabel =
+                          cInfo?.type === "percentage"
+                            ? `-${cInfo.discountValue}% OFF`
+                            : `-R$ ${cInfo?.discountValue} OFF`;
+
+                        return (
+                          <div
+                            key={room.id}
+                            onClick={() => handleOpenRoom(room)}
+                            className="group bg-[#0F0F14] rounded-3xl border-2 border-zinc-800/90 hover:border-[#FBBF24] overflow-hidden shadow-[0_14px_35px_rgba(0,0,0,0.8)] hover:shadow-[0_14px_40px_rgba(251,191,36,0.15)] transition-all duration-300 flex flex-col cursor-pointer"
+                          >
+                            <div className="relative h-52 w-full bg-zinc-900 overflow-hidden">
+                              <img
+                                src={room.image_url || "/placeholder.jpg"}
+                                alt={room.name}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                              />
+                              <div
+                                className="absolute inset-x-0 bottom-0 h-16 pointer-events-none"
+                                style={{
+                                  background:
+                                    "linear-gradient(180deg, rgba(15,15,20,0) 0%, #0F0F14 100%)",
+                                }}
+                              />
+                              <div className="absolute top-3 left-3 bg-[#050507]/95 text-[#FBBF24] border border-amber-400/60 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider flex items-center gap-1 shadow-lg">
+                                <Flame className="w-3.5 h-3.5 fill-[#FBBF24]" />
+                                {badgeLabel}
+                              </div>
+                            </div>
+
+                            <div className="p-5 flex-1 flex flex-col justify-between space-y-4">
+                              <div>
+                                <div className="flex items-center justify-between gap-2 text-xs text-zinc-400 mb-1.5">
+                                  <span className="font-semibold flex items-center gap-1 truncate">
+                                    <MapPin className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                                    {addr.neighborhood || addr.city || "Natal"}
+                                  </span>
+                                  <span className="flex items-center gap-1 shrink-0">
+                                    <Users className="w-3.5 h-3.5 text-zinc-500" />
+                                    Até {addr.capacity || 4}
+                                  </span>
+                                </div>
+
+                                <h3 className="text-lg font-black text-white group-hover:text-[#FBBF24] transition-colors line-clamp-1">
+                                  {room.name}
+                                </h3>
+
+                                <div className="mt-2.5 px-3 py-2 rounded-xl bg-[#181820] border border-zinc-800 text-zinc-200 text-[11px] font-semibold flex items-center gap-1.5">
+                                  <Clock className="w-3.5 h-3.5 text-[#FBBF24] shrink-0" />
+                                  <span className="truncate">
+                                    Dias em oferta: {cInfo?.daysLabel}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="pt-3.5 border-t border-zinc-800/90 flex items-center justify-between">
+                                <div>
+                                  <span className="text-[11px] text-zinc-500 line-through block">
+                                    De R${" "}
+                                    {baseHourly.toFixed(2).replace(".", ",")}/h
+                                  </span>
+                                  <span className="text-xl font-black text-[#FBBF24]">
+                                    R${" "}
+                                    {finalHourly.toFixed(2).replace(".", ",")}
+                                    <span className="text-xs font-semibold text-zinc-400">
+                                      /hora
+                                    </span>
+                                  </span>
+                                </div>
+
+                                <span className="px-4 py-2.5 rounded-xl bg-[#FBBF24] group-hover:bg-amber-400 text-stone-950 text-xs font-black flex items-center gap-1 transition-colors shadow-sm">
+                                  Reservar
+                                  <ChevronRight className="w-3.5 h-3.5 stroke-[2.8]" />
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <SearchTab
+                onOpenRoom={handleOpenRoom}
+                onNavigateToProfile={() => handleTabChange("profile")}
+                isDashboard={true}
+              />
+            )}
+          </div>
         );
       case "favorites":
         return <FavoritesTab onOpenRoom={handleOpenRoom} />;
@@ -534,7 +1044,22 @@ function DashboardContent() {
   const nextUpgradeTierName = formatTierLabel(nextUpgradeTier);
 
   return (
-    <div className="flex min-h-svh flex-col bg-[#FAF7F4] font-sans">
+    <div
+      className={`flex min-h-svh flex-col font-sans transition-colors duration-300 ${
+        isFullDarkCampaignPage
+          ? "bg-[#050507] text-white"
+          : "bg-[#FAF7F4] text-stone-900"
+      }`}
+    >
+      {/* Modal de Regulamento da Campanha */}
+      <CampaignRulesModal
+        isOpen={isCampaignRulesOpen}
+        onClose={() => setIsCampaignRulesOpen(false)}
+        campaignName={activeBlackCampaign?.campaignName}
+        rulesText={activeBlackCampaign?.rulesText}
+        badgeText={campaignDiscountLabel}
+      />
+
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -566,7 +1091,6 @@ function DashboardContent() {
         }}
       />
 
-      {/* O Pop-up do Fusion Pass+ fica suspenso enquanto a verificação de avaliação roda ou se o modal de avaliação estiver aberto */}
       {!isDoorScanSession && (
         <>
           <FusionPassPromoPopup
@@ -580,11 +1104,40 @@ function DashboardContent() {
         </>
       )}
 
-      {/* 1. TOP BAR DINÂMICA */}
+      {/* 1. TOP BAR DINÂMICA (PRIORIZA A CAMPANHA BLACK QUANDO ATIVA) */}
       {!selectedRoom && !isDoorScanSession && (
-        <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50">
+        <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/10">
           <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-2.5 lg:gap-4">
-            {walletState.isSubscriber ? (
+            {isBlackFridayActive ? (
+              <>
+                <div className="flex items-center gap-2 lg:gap-3 min-w-0">
+                  <span className="inline-flex items-center gap-1 bg-[#EAB308] text-stone-950 text-[9px] lg:text-[10px] font-extrabold uppercase tracking-wider px-2 lg:px-2.5 py-0.5 rounded-full shrink-0 shadow-2xs">
+                    <Flame className="w-2.5 h-2.5 lg:w-3 lg:h-3 fill-stone-950 stroke-[2.5]" />
+                    <span className="hidden sm:inline">
+                      {activeBlackCampaign?.campaignName}
+                    </span>
+                    <span className="sm:hidden">BLACK</span>
+                  </span>
+                  <p className="text-[11px] lg:text-xs font-bold text-[#FBBF24] truncate">
+                    <span className="sm:hidden">
+                      Horários avulsos com {campaignDiscountLabel}
+                    </span>
+                    <span className="hidden sm:inline">
+                      Horários selecionados com {campaignDiscountLabel} nas
+                      salas participantes da campanha
+                    </span>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className="px-3 lg:px-4 py-1 rounded-full border border-amber-400/80 hover:border-amber-300 hover:bg-amber-400/15 text-[#FBBF24] font-bold text-[11px] lg:text-xs shrink-0 flex items-center gap-0.5 lg:gap-1 transition-all active:scale-95 cursor-pointer"
+                >
+                  <span>Ver Salas em Oferta</span>
+                  <ChevronRight className="w-3 h-3 lg:w-3.5 lg:h-3.5" />
+                </button>
+              </>
+            ) : walletState.isSubscriber ? (
               <>
                 <div className="flex items-center gap-2 lg:gap-3 min-w-0">
                   <span className="inline-flex items-center gap-1 bg-gradient-to-r from-[#BF4B24] to-[#EAB308] text-white text-[9px] lg:text-[10px] font-extrabold uppercase tracking-wider px-2 lg:px-2.5 py-0.5 rounded-full shrink-0">
@@ -647,7 +1200,13 @@ function DashboardContent() {
 
       {/* 2. HEADER DESKTOP */}
       {!selectedRoom && (
-        <header className="hidden lg:block sticky top-0 z-40 bg-white border-b border-stone-200/70">
+        <header
+          className={`hidden lg:block sticky top-0 z-40 border-b transition-colors duration-300 ${
+            isFullDarkCampaignPage
+              ? "bg-[#09090B] border-zinc-800"
+              : "bg-white border-stone-200/70"
+          }`}
+        >
           <div className="max-w-[1360px] mx-auto px-6 xl:px-8 h-20 flex items-center justify-between gap-4">
             <button
               type="button"
@@ -659,10 +1218,16 @@ function DashboardContent() {
                   src="/logo-fusion-orange.png"
                   alt="Fusion Clinic"
                   onError={() => setLogoError(true)}
-                  className="h-9 xl:h-10 w-auto object-contain"
+                  className={`h-9 xl:h-10 w-auto object-contain ${
+                    isFullDarkCampaignPage ? "brightness-110" : ""
+                  }`}
                 />
               ) : (
-                <span className="text-xl font-black text-stone-900 tracking-tight">
+                <span
+                  className={`text-xl font-black tracking-tight ${
+                    isFullDarkCampaignPage ? "text-white" : "text-stone-900"
+                  }`}
+                >
                   Fusion<span className="text-[#BF4B24]">.</span>
                 </span>
               )}
@@ -671,13 +1236,48 @@ function DashboardContent() {
             <nav className="flex items-center gap-5 xl:gap-7 min-w-0">
               <DesktopNavLink
                 label="Explorar Salas"
-                isActive={activeTab === "search"}
+                isActive={activeTab === "search" && !showOnlyCampaignRooms}
+                darkMode={isFullDarkCampaignPage}
                 onClick={() => handleTabChange("search")}
               />
+
+              {isBlackFridayActive && (
+                <button
+                  type="button"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className={`relative py-2.5 text-[14px] xl:text-[15px] font-bold whitespace-nowrap flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    showOnlyCampaignRooms
+                      ? isFullDarkCampaignPage
+                        ? "text-[#FBBF24]"
+                        : "text-stone-950"
+                      : isFullDarkCampaignPage
+                        ? "text-zinc-300 hover:text-white"
+                        : "text-stone-700 hover:text-stone-950"
+                  }`}
+                >
+                  <span>Salas na Black</span>
+                  <span className="text-[10px] xl:text-[11px] font-black text-[#FBBF24] bg-stone-950 border border-amber-400/50 px-2 py-0.5 rounded-full shadow-2xs flex items-center gap-1">
+                    <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />-
+                    {activeBlackCampaign?.discountValue}%
+                  </span>
+                  {showOnlyCampaignRooms && (
+                    <span
+                      className={`absolute bottom-0 inset-x-0 h-[3px] rounded-full ${
+                        isFullDarkCampaignPage ? "bg-[#FBBF24]" : "bg-stone-950"
+                      }`}
+                    />
+                  )}
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => handleOpenFusionPassShowcase(nextUpgradeTier)}
-                className="py-2.5 text-[14px] xl:text-[15px] font-medium text-stone-700 hover:text-stone-900 whitespace-nowrap flex items-center gap-1.5 transition-colors cursor-pointer"
+                className={`py-2.5 text-[14px] xl:text-[15px] font-medium whitespace-nowrap flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  isFullDarkCampaignPage
+                    ? "text-zinc-300 hover:text-white"
+                    : "text-stone-700 hover:text-stone-900"
+                }`}
               >
                 <span>
                   {walletState.isSubscriber
@@ -692,26 +1292,31 @@ function DashboardContent() {
                     : "Até -41%"}
                 </span>
               </button>
+
               <DesktopNavLink
                 label="Favoritos"
                 isActive={activeTab === "favorites"}
+                darkMode={isFullDarkCampaignPage}
                 onClick={() => handleTabChange("favorites")}
               />
               <DesktopNavLink
                 label="Reservas"
                 isActive={activeTab === "bookings"}
+                darkMode={isFullDarkCampaignPage}
                 onClick={() => handleTabChange("bookings")}
               />
               {isCohost && (
                 <DesktopNavLink
                   label="Minha Sala"
                   isActive={activeTab === "cohost"}
+                  darkMode={isFullDarkCampaignPage}
                   onClick={() => handleTabChange("cohost")}
                 />
               )}
               <DesktopNavLink
                 label="Mensagens"
                 isActive={activeTab === "chat"}
+                darkMode={isFullDarkCampaignPage}
                 onClick={() => handleTabChange("chat")}
               />
             </nav>
@@ -724,26 +1329,44 @@ function DashboardContent() {
                 type="button"
                 onClick={() => handleTabChange("profile")}
                 className={`flex items-center gap-2.5 pl-3.5 pr-1.5 py-1.5 rounded-full border transition-all cursor-pointer shrink-0 ${
-                  walletState.isSubscriber
-                    ? "border-[#BF4B24]/45 bg-gradient-to-r from-[#FAF7F5] to-orange-50/60 shadow-2xs"
-                    : activeTab === "profile"
-                      ? "border-[#BF4B24] bg-[#FAF7F5]"
-                      : "border-stone-200 bg-white hover:border-stone-300 shadow-2xs"
+                  isFullDarkCampaignPage
+                    ? "border-zinc-700 bg-zinc-900 text-white hover:border-amber-400/50"
+                    : walletState.isSubscriber
+                      ? "border-[#BF4B24]/45 bg-gradient-to-r from-[#FAF7F5] to-orange-50/60 shadow-2xs"
+                      : activeTab === "profile"
+                        ? "border-[#BF4B24] bg-[#FAF7F5]"
+                        : "border-stone-200 bg-white hover:border-stone-300 shadow-2xs"
                 }`}
               >
                 <div className="text-right">
-                  <span className="text-xs font-bold text-stone-900 whitespace-nowrap block leading-none">
+                  <span
+                    className={`text-xs font-bold whitespace-nowrap block leading-none ${
+                      isFullDarkCampaignPage ? "text-white" : "text-stone-900"
+                    }`}
+                  >
                     Dr(a). {firstName}
                   </span>
                   {walletState.isSubscriber ? (
-                    <span className="text-[10px] font-extrabold text-[#BF4B24] whitespace-nowrap flex items-center justify-end gap-1 mt-0.5">
-                      <Crown className="w-2.5 h-2.5 fill-[#BF4B24] shrink-0" />
+                    <span
+                      className={`text-[10px] font-extrabold whitespace-nowrap flex items-center justify-end gap-1 mt-0.5 ${
+                        isFullDarkCampaignPage
+                          ? "text-[#FBBF24]"
+                          : "text-[#BF4B24]"
+                      }`}
+                    >
+                      <Crown className="w-2.5 h-2.5 fill-current shrink-0" />
                       <span>
                         {currentTierName} • {walletState.totalCredits}h
                       </span>
                     </span>
                   ) : (
-                    <span className="text-[10px] font-medium text-stone-400 whitespace-nowrap block mt-0.5">
+                    <span
+                      className={`text-[10px] font-medium whitespace-nowrap block mt-0.5 ${
+                        isFullDarkCampaignPage
+                          ? "text-zinc-400"
+                          : "text-stone-400"
+                      }`}
+                    >
                       Minha Conta
                     </span>
                   )}
@@ -765,9 +1388,13 @@ function DashboardContent() {
         </header>
       )}
 
-      {/* 3. HERO BANNER DESKTOP */}
-      {!selectedRoom && activeTab === "search" && (
-        <section className="hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden bg-[#B83B10]">
+      {/* 3. HERO BANNER DESKTOP (FICA PRETO NA BLACK COM A FOTO DO CONSULTÓRIO /hero.png) */}
+      {!selectedRoom && activeTab === "search" && !showOnlyCampaignRooms && (
+        <section
+          className={`hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden transition-colors duration-500 ${
+            isBlackFridayActive ? "bg-[#09090B]" : "bg-[#B83B10]"
+          }`}
+        >
           <div className="absolute inset-y-0 right-0 w-[65%] z-0">
             <img
               src="/hero.png"
@@ -777,8 +1404,9 @@ function DashboardContent() {
             <div
               className="absolute inset-0"
               style={{
-                background:
-                  "linear-gradient(90deg, #B83B10 0%, #B83B10 12%, rgba(184,59,16,0.90) 28%, rgba(184,59,16,0.22) 52%, rgba(184,59,16,0) 72%)",
+                background: isBlackFridayActive
+                  ? "linear-gradient(90deg, #09090B 0%, #09090B 15%, rgba(9,9,11,0.92) 32%, rgba(9,9,11,0.38) 56%, rgba(9,9,11,0.05) 78%)"
+                  : "linear-gradient(90deg, #B83B10 0%, #B83B10 12%, rgba(184,59,16,0.90) 28%, rgba(184,59,16,0.22) 52%, rgba(184,59,16,0) 72%)",
               }}
             />
           </div>
@@ -786,16 +1414,48 @@ function DashboardContent() {
           <div
             className="absolute inset-x-0 bottom-0 h-28 z-10 pointer-events-none"
             style={{
-              background:
-                "linear-gradient(180deg, rgba(184,59,16,0) 0%, rgba(250,247,244,0.65) 65%, #FAF7F4 100%)",
+              background: isBlackFridayActive
+                ? "linear-gradient(180deg, rgba(9,9,11,0) 0%, rgba(250,247,244,0.72) 68%, #FAF7F4 100%)"
+                : "linear-gradient(180deg, rgba(184,59,16,0) 0%, rgba(250,247,244,0.65) 65%, #FAF7F4 100%)",
             }}
           />
 
           <div className="relative z-20 max-w-[1360px] mx-auto px-10 pt-16 pb-32 flex items-end justify-between gap-8">
-            <div className="max-w-[590px] space-y-4 text-white">
+            <div className="max-w-[610px] space-y-4 text-white">
+              {isBlackFridayActive && (
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleActivateCampaignRoomsSearch}
+                    className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 backdrop-blur-xs transition-colors cursor-pointer"
+                  >
+                    <Flame className="w-3.5 h-3.5 text-[#FBBF24] fill-[#FBBF24]" />
+                    <span className="text-[11px] font-black uppercase tracking-widest text-[#FBBF24]">
+                      {activeBlackCampaign?.campaignName} • Horários das Salas
+                      em Oferta
+                    </span>
+                  </button>
+
+                  {activeBlackCampaign?.rulesText && (
+                    <button
+                      type="button"
+                      onClick={() => setIsCampaignRulesOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-[11px] font-bold text-stone-200 hover:text-white transition-colors cursor-pointer"
+                    >
+                      <ScrollText className="w-3.5 h-3.5 text-[#FBBF24]" />
+                      <span>Ver regulamento</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               <h1 className="text-[42px] xl:text-[50px] font-extrabold tracking-tight text-white leading-[1.1]">
                 Olá, Dr(a). {firstName}.<br />
-                <span className="font-serif italic font-normal text-white">
+                <span
+                  className={`font-serif italic font-normal ${
+                    isBlackFridayActive ? "text-[#FBBF24]" : "text-white"
+                  }`}
+                >
                   Estrutura pronta para você.
                 </span>
               </h1>
@@ -805,42 +1465,88 @@ function DashboardContent() {
                   : "Escolha seu próximo consultório por hora, turno ou ative um pacote Fusion Pass+ para economizar até 41% em cada atendimento."}
               </p>
             </div>
-            {!walletState.isSubscriber && (
+
+            {isBlackFridayActive ? (
               <div className="shrink-0">
                 <button
                   type="button"
-                  onClick={() => handleOpenFusionPassShowcase("vip")}
-                  className="group relative flex items-center gap-3.5 bg-stone-950/90 hover:bg-stone-950 backdrop-blur-md text-white p-2.5 pr-5 rounded-2xl border border-white/15 shadow-[0_16px_40px_rgba(0,0,0,0.28)] transition-all duration-300 hover:-translate-y-0.5 cursor-pointer text-left"
+                  onClick={handleActivateCampaignRoomsSearch}
+                  className="group relative w-[235px] rounded-[22px] bg-stone-950/95 hover:bg-stone-900 backdrop-blur-md border border-amber-400/40 p-4 text-left shadow-[0_18px_40px_rgba(0,0,0,0.45)] transition-all duration-300 hover:-translate-y-1 cursor-pointer"
                 >
-                  <div className="relative overflow-hidden bg-[#FACC15] text-stone-950 rounded-xl px-3 py-2 text-center shrink-0 shadow-xs">
-                    <span className="text-[9px] font-extrabold uppercase tracking-wider block leading-none">
-                      PASS+
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider text-[#FBBF24]">
+                      <Flame className="w-3 h-3 fill-[#FBBF24] text-[#FBBF24]" />
+                      {activeBlackCampaign?.campaignName || "BLACK FUSION"}
                     </span>
-                    <span className="text-xl font-black tracking-tighter leading-none block mt-0.5">
-                      -41%
-                    </span>
-                    <span className="text-[9px] font-black uppercase tracking-wider block leading-none mt-0.5">
-                      NA HORA
+                    <span className="w-6 h-6 rounded-full bg-amber-400/15 text-[#FBBF24] flex items-center justify-center">
+                      <Percent className="w-3 h-3 stroke-[2.5]" />
                     </span>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-1.5 text-[11px] text-stone-300 font-medium">
-                      <span>Hora avulsa</span>
-                      <span className="line-through text-stone-400">R$ 45</span>
-                      <span className="text-[#FACC15] font-bold">
-                        → a partir de R$ 26/h
-                      </span>
-                    </div>
-                    <p className="text-xs font-bold text-white mt-0.5">
-                      Recarregue sua carteira pagando menos
-                    </p>
-                    <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-[#FACC15] group-hover:underline">
-                      <span>Ver pacotes com desconto</span>
-                      <ChevronRight className="w-3.5 h-3.5 stroke-[2.5] transition-transform group-hover:translate-x-0.5" />
+
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-black tracking-tight text-white leading-none">
+                      {campaignDiscountLabel}
                     </span>
                   </div>
+                  <p className="text-[11px] font-medium text-stone-400 mt-0.5">
+                    nos horários das salas em campanha
+                  </p>
+
+                  <div className="mt-2.5 px-2.5 py-1.5 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between text-[11px]">
+                    <span className="text-stone-300 font-medium">
+                      {campaignRooms.length}{" "}
+                      {campaignRooms.length === 1
+                        ? "sala participante"
+                        : "salas participantes"}
+                    </span>
+                  </div>
+
+                  <span className="mt-2.5 inline-flex items-center gap-1 text-xs font-bold text-[#FBBF24] group-hover:translate-x-0.5 transition-transform">
+                    <span>Ver salas da campanha</span>
+                    <ChevronRight className="w-3.5 h-3.5 stroke-[2.5]" />
+                  </span>
                 </button>
               </div>
+            ) : (
+              !walletState.isSubscriber && (
+                <div className="shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenFusionPassShowcase("vip")}
+                    className="group relative flex items-center gap-3.5 bg-stone-950/90 hover:bg-stone-950 backdrop-blur-md text-white p-2.5 pr-5 rounded-2xl border border-white/15 shadow-[0_16px_40px_rgba(0,0,0,0.28)] transition-all duration-300 hover:-translate-y-0.5 cursor-pointer text-left"
+                  >
+                    <div className="relative overflow-hidden bg-[#FACC15] text-stone-950 rounded-xl px-3 py-2 text-center shrink-0 shadow-xs">
+                      <span className="text-[9px] font-extrabold uppercase tracking-wider block leading-none">
+                        PASS+
+                      </span>
+                      <span className="text-xl font-black tracking-tighter leading-none block mt-0.5">
+                        -41%
+                      </span>
+                      <span className="text-[9px] font-black uppercase tracking-wider block leading-none mt-0.5">
+                        NA HORA
+                      </span>
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5 text-[11px] text-stone-300 font-medium">
+                        <span>Hora avulsa</span>
+                        <span className="line-through text-stone-400">
+                          R$ 45
+                        </span>
+                        <span className="text-[#FACC15] font-bold">
+                          → a partir de R$ 26/h
+                        </span>
+                      </div>
+                      <p className="text-xs font-bold text-white mt-0.5">
+                        Recarregue sua carteira pagando menos
+                      </p>
+                      <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-[#FACC15] group-hover:underline">
+                        <span>Ver pacotes com desconto</span>
+                        <ChevronRight className="w-3.5 h-3.5 stroke-[2.5] transition-transform group-hover:translate-x-0.5" />
+                      </span>
+                    </div>
+                  </button>
+                </div>
+              )
             )}
           </div>
         </section>
@@ -852,7 +1558,7 @@ function DashboardContent() {
           !selectedRoom ? "pb-20 lg:pb-12" : ""
         }`}
       >
-        {!selectedRoom && !isDoorScanSession && (
+        {!selectedRoom && !isDoorScanSession && !isFullDarkCampaignPage && (
           <div className="lg:hidden absolute top-3.5 right-4 z-40">
             <NotificationBell />
           </div>
@@ -860,7 +1566,7 @@ function DashboardContent() {
 
         <div
           className={
-            activeTab === "search" && !selectedRoom
+            activeTab === "search" && !selectedRoom && !showOnlyCampaignRooms
               ? "fusion-logged-hero-bridge"
               : ""
           }
@@ -871,24 +1577,33 @@ function DashboardContent() {
 
       {/* 5. BARRA INFERIOR MOBILE */}
       {!selectedRoom && (
-        <nav className="fixed inset-x-0 bottom-0 z-50 flex lg:hidden items-stretch justify-around border-t border-stone-200/90 bg-white/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] shadow-[0_-6px_25px_rgba(28,25,23,0.06)]">
+        <nav
+          className={`fixed inset-x-0 bottom-0 z-50 flex lg:hidden items-stretch justify-around border-t backdrop-blur-md pb-[env(safe-area-inset-bottom)] transition-colors duration-300 ${
+            isFullDarkCampaignPage
+              ? "bg-[#09090B]/95 border-zinc-800 shadow-[0_-6px_25px_rgba(0,0,0,0.6)]"
+              : "bg-white/95 border-stone-200/90 shadow-[0_-6px_25px_rgba(28,25,23,0.06)]"
+          }`}
+        >
           <ul className="flex justify-between items-stretch w-full max-w-md mx-auto px-1">
             <MobileNavItem
               icon={Search}
               label="Buscar"
               isActive={activeTab === "search"}
+              darkMode={isFullDarkCampaignPage}
               onClick={() => handleTabChange("search")}
             />
             <MobileNavItem
               icon={Heart}
               label="Favoritos"
               isActive={activeTab === "favorites"}
+              darkMode={isFullDarkCampaignPage}
               onClick={() => handleTabChange("favorites")}
             />
             <MobileNavItem
               icon={Calendar}
               label="Reservas"
               isActive={activeTab === "bookings"}
+              darkMode={isFullDarkCampaignPage}
               onClick={() => handleTabChange("bookings")}
             />
             {isCohost && (
@@ -896,6 +1611,7 @@ function DashboardContent() {
                 icon={Building2}
                 label="Minha Sala"
                 isActive={activeTab === "cohost"}
+                darkMode={isFullDarkCampaignPage}
                 onClick={() => handleTabChange("cohost")}
               />
             )}
@@ -903,6 +1619,7 @@ function DashboardContent() {
               icon={MessageSquare}
               label="Mensagens"
               isActive={activeTab === "chat"}
+              darkMode={isFullDarkCampaignPage}
               onClick={() => handleTabChange("chat")}
             />
             <MobileNavItem
@@ -914,6 +1631,7 @@ function DashboardContent() {
               }
               isActive={activeTab === "profile"}
               isSubscriber={walletState.isSubscriber}
+              darkMode={isFullDarkCampaignPage}
               onClick={() => handleTabChange("profile")}
             />
           </ul>
@@ -947,15 +1665,19 @@ function DashboardContent() {
   );
 }
 
-function DesktopNavLink({ label, badge, isActive, onClick }: any) {
+function DesktopNavLink({ label, badge, isActive, darkMode, onClick }: any) {
   return (
     <button
       type="button"
       onClick={onClick}
       className={`relative py-2.5 text-[14px] xl:text-[15px] font-medium whitespace-nowrap flex items-center gap-1.5 transition-colors cursor-pointer ${
         isActive
-          ? "text-stone-900 font-semibold"
-          : "text-stone-700 hover:text-stone-900"
+          ? darkMode
+            ? "text-white font-semibold"
+            : "text-stone-900 font-semibold"
+          : darkMode
+            ? "text-zinc-400 hover:text-white"
+            : "text-stone-700 hover:text-stone-900"
       }`}
     >
       <span>{label}</span>
@@ -965,7 +1687,11 @@ function DesktopNavLink({ label, badge, isActive, onClick }: any) {
         </span>
       )}
       {isActive && (
-        <span className="absolute bottom-0 inset-x-0 h-[3px] bg-[#C84B20] rounded-full" />
+        <span
+          className={`absolute bottom-0 inset-x-0 h-[3px] rounded-full ${
+            darkMode ? "bg-[#FBBF24]" : "bg-[#C84B20]"
+          }`}
+        />
       )}
     </button>
   );
@@ -976,6 +1702,7 @@ function MobileNavItem({
   label,
   isActive,
   isSubscriber,
+  darkMode,
   onClick,
 }: any) {
   return (
@@ -985,12 +1712,20 @@ function MobileNavItem({
         onClick={onClick}
         className={`relative flex w-full flex-col items-center justify-center gap-1 py-2.5 transition-colors cursor-pointer ${
           isActive
-            ? "text-[#BF4B24]"
-            : "text-stone-400 hover:text-stone-700 active:scale-95"
+            ? darkMode
+              ? "text-[#FBBF24]"
+              : "text-[#BF4B24]"
+            : darkMode
+              ? "text-zinc-500 hover:text-zinc-200 active:scale-95"
+              : "text-stone-400 hover:text-stone-700 active:scale-95"
         }`}
       >
         {isActive && (
-          <span className="absolute top-0 w-6 h-[2.5px] bg-[#BF4B24] rounded-full" />
+          <span
+            className={`absolute top-0 w-6 h-[2.5px] rounded-full ${
+              darkMode ? "bg-[#FBBF24]" : "bg-[#BF4B24]"
+            }`}
+          />
         )}
         <div className="relative flex items-center justify-center">
           <Icon
@@ -1006,10 +1741,16 @@ function MobileNavItem({
         <span
           className={`text-[10px] leading-none tracking-tight truncate max-w-[64px] ${
             isActive
-              ? "font-bold text-[#BF4B24]"
+              ? darkMode
+                ? "font-bold text-[#FBBF24]"
+                : "font-bold text-[#BF4B24]"
               : isSubscriber
-                ? "font-semibold text-stone-700"
-                : "font-medium text-stone-500"
+                ? darkMode
+                  ? "font-semibold text-zinc-300"
+                  : "font-semibold text-stone-700"
+                : darkMode
+                  ? "font-medium text-zinc-400"
+                  : "font-medium text-stone-500"
           }`}
         >
           {label}
