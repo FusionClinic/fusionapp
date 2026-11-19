@@ -28,7 +28,7 @@ import {
   Copy,
   XCircle,
   AlertCircle,
-  ScrollText,
+  FileText,
   Flame,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -1212,7 +1212,7 @@ export function CheckoutModal({
                           }}
                           className="font-extrabold text-[#BF4B24] hover:text-[#9A3C1D] underline underline-offset-2 inline-flex items-center gap-1 cursor-pointer"
                         >
-                          <ScrollText className="w-3 h-3 inline" />
+                          <FileText className="w-3 h-3 inline" />
                           regulamento da campanha ({effectiveCampaignName})
                         </button>
                         , incluindo prazos de uso, remarcação e reembolso.

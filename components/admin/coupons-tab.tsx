@@ -35,7 +35,7 @@ import {
   Copy,
   SlidersHorizontal,
   Flame,
-  ScrollText,
+  FileText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1715,7 +1715,7 @@ export function AdminCouponsTab() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
                   <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
-                    <ScrollText className="w-4 h-4 text-[#BF4B24]" /> 3.
+                    <FileText className="w-4 h-4 text-[#BF4B24]" /> 3.
                     Regulamento / Regras da Campanha (Opcional)
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
@@ -1903,7 +1903,7 @@ export function AdminCouponsTab() {
           <div className="bg-white border border-slate-200 rounded-2xl p-6 mb-6">
             <div className="flex items-center justify-between gap-3 mb-3">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <ScrollText className="w-4 h-4 text-[#BF4B24]" />
+                <FileText className="w-4 h-4 text-[#BF4B24]" />
                 Regulamento Cadastrado (Exibido ao Profissional)
               </h3>
               <Button
@@ -2420,7 +2420,7 @@ export function AdminCouponsTab() {
                             </span>
                             {rules.rules_text && (
                               <Badge className="bg-amber-50 text-amber-800 border border-amber-200 text-[9px] font-bold px-1.5 py-0">
-                                <ScrollText className="w-2.5 h-2.5 mr-1" />
+                                <FileText className="w-2.5 h-2.5 mr-1" />
                                 Regulamento ativo
                               </Badge>
                             )}

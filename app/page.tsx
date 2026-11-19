@@ -29,7 +29,7 @@ import {
   MapPin,
   Users,
   X,
-  ScrollText,
+  FileText,
 } from "lucide-react";
 
 const navItems = [
@@ -811,7 +811,7 @@ export default function AppPage() {
                       onClick={() => setIsCampaignRulesOpen(true)}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-[11px] font-bold text-stone-200 hover:text-white transition-colors cursor-pointer"
                     >
-                      <ScrollText className="w-3.5 h-3.5 text-[#FBBF24]" />
+                      <FileText className="w-3.5 h-3.5 text-[#FBBF24]" />
                       <span>Ver regulamento</span>
                     </button>
                   )}
@@ -978,7 +978,7 @@ export default function AppPage() {
                                 onClick={() => setIsCampaignRulesOpen(true)}
                                 className="px-4 py-2.5 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-[#FBBF24] text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
                               >
-                                <ScrollText className="w-4 h-4" />
+                                <FileText className="w-4 h-4" />
                                 Ver regulamento
                               </button>
                             )}

@@ -26,7 +26,7 @@ import {
   Flame,
   Clock,
   Building2,
-  ScrollText,
+  FileText,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -784,7 +784,7 @@ export function FusionPassPromoPopup({
                         }}
                         className="py-1 text-xs font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-4 inline-flex items-center gap-1 transition-colors cursor-pointer"
                       >
-                        <ScrollText className="w-3.5 h-3.5" />
+                        <FileText className="w-3.5 h-3.5" />
                         <span>Ver regulamento</span>
                       </button>
                     )}

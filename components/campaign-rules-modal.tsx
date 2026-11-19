@@ -1,7 +1,7 @@
 // components/campaign-rules-modal.tsx
 "use client";
 
-import { X, ScrollText, ShieldCheck, Flame } from "lucide-react";
+import { X, FileText, ShieldCheck, Flame } from "lucide-react";
 
 export interface CampaignRulesModalProps {
   isOpen: boolean;
@@ -75,7 +75,7 @@ export function CampaignRulesModal({
               )}
             </div>
             <h2 className="text-base sm:text-lg font-black text-white flex items-center gap-2">
-              <ScrollText className="w-4 h-4 text-[#FBBF24] shrink-0" />
+              <FileText className="w-4 h-4 text-[#FBBF24] shrink-0" />
               Regulamento da Campanha
             </h2>
           </div>
