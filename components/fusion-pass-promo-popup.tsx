@@ -5,6 +5,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import {
+  CampaignRulesModal,
+  extractCampaignRulesText,
+} from "@/components/campaign-rules-modal";
+import {
   X,
   ChevronRight,
   ChevronDown,
@@ -22,6 +26,7 @@ import {
   Flame,
   Clock,
   Building2,
+  ScrollText,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -89,6 +94,7 @@ export function FusionPassPromoPopup({
   const [isClosing, setIsClosing] = useState(false);
   const [step, setStep] = useState<"banner" | "plans" | "checkout">("banner");
   const [showRulesDetails, setShowRulesDetails] = useState(false);
+  const [isCampaignRulesOpen, setIsCampaignRulesOpen] = useState(false);
 
   // Estado da campanha de horários (Black Friday)
   const [activeCampaign, setActiveCampaign] = useState<{
@@ -96,6 +102,7 @@ export function FusionPassPromoPopup({
     name: string;
     discountValue: number;
     discountType: string;
+    rulesText: string | null;
   } | null>(null);
   const [blackImgError, setBlackImgError] = useState(false);
 
@@ -183,6 +190,7 @@ export function FusionPassPromoPopup({
       sessionStorage.setItem(storageKey, "true");
     } catch {}
 
+    setIsCampaignRulesOpen(false);
     setIsClosing(true);
     setTimeout(() => {
       setIsOpen(false);
@@ -209,6 +217,7 @@ export function FusionPassPromoPopup({
       sessionStorage.setItem(storageKey, "true");
     } catch {}
 
+    setIsCampaignRulesOpen(false);
     setIsClosing(true);
     setTimeout(() => {
       setIsOpen(false);
@@ -315,6 +324,7 @@ export function FusionPassPromoPopup({
                 "BLACK FUSION",
               discountValue: Number(validCamp.discount_value || 50),
               discountType: validCamp.type || "percentage",
+              rulesText: extractCampaignRulesText(validCamp),
             });
           } else {
             setActiveCampaign(null);
@@ -620,6 +630,12 @@ export function FusionPassPromoPopup({
   const bannerPhotoUrl =
     isBlackCampaignBanner && !blackImgError ? "/black.jpeg" : imageSrc;
 
+  const activeCampaignBadge = activeCampaign
+    ? activeCampaign.discountType === "percentage"
+      ? `-${activeCampaign.discountValue}% OFF`
+      : `-R$ ${activeCampaign.discountValue} OFF`
+    : null;
+
   const tierPackages = packages.filter(
     (p) => normalizeTier(p.tier) === selectedTier,
   );
@@ -645,6 +661,15 @@ export function FusionPassPromoPopup({
           transform: translateY(100%) !important;
         }
       `}</style>
+
+      {/* Modal de Regulamento da Campanha */}
+      <CampaignRulesModal
+        isOpen={isCampaignRulesOpen}
+        onClose={() => setIsCampaignRulesOpen(false)}
+        campaignName={activeCampaign?.name}
+        rulesText={activeCampaign?.rulesText}
+        badgeText={activeCampaignBadge}
+      />
 
       <div
         role="dialog"
@@ -694,7 +719,7 @@ export function FusionPassPromoPopup({
 
           {step === "banner" && (
             <div className="flex flex-col">
-              {/* Quando há campanha ativa, usa /black.png e ao clicar abre a pesquisa de salas da campanha */}
+              {/* Quando há campanha ativa, usa /black.jpeg e ao clicar abre a pesquisa de salas da campanha */}
               <div
                 onClick={() => {
                   if (activeCampaign) {
@@ -749,16 +774,36 @@ export function FusionPassPromoPopup({
                     <ChevronRight className="w-4 h-4 stroke-[2.5]" />
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleClose();
-                    }}
-                    className="w-full py-1.5 text-xs font-semibold text-stone-400 hover:text-white transition-colors cursor-pointer"
-                  >
-                    Continuar navegando
-                  </button>
+                  <div className="flex items-center justify-center gap-4 pt-0.5">
+                    {activeCampaign.rulesText && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsCampaignRulesOpen(true);
+                        }}
+                        className="py-1 text-xs font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-4 inline-flex items-center gap-1 transition-colors cursor-pointer"
+                      >
+                        <ScrollText className="w-3.5 h-3.5" />
+                        <span>Ver regulamento</span>
+                      </button>
+                    )}
+
+                    {activeCampaign.rulesText && (
+                      <span className="text-stone-700 text-xs">•</span>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleClose();
+                      }}
+                      className="py-1 text-xs font-semibold text-stone-400 hover:text-white transition-colors cursor-pointer"
+                    >
+                      Continuar navegando
+                    </button>
+                  </div>
                 </div>
               ) : (
                 /* RODAPÉ PADRÃO DO FUSION PASS+ (QUANDO NÃO HÁ CAMPANHA BLACK ATIVA) */

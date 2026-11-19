@@ -4,6 +4,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import { CampaignRulesModal } from "@/components/campaign-rules-modal";
 import {
   format,
   parseISO,
@@ -21,8 +22,6 @@ import {
   Gift,
   Users,
   CalendarClock,
-  CheckCircle2,
-  XCircle,
   Eye,
   Loader2,
   Trash2,
@@ -31,17 +30,18 @@ import {
   UserCheck,
   Building2,
   Clock,
-  Calendar as CalendarIcon,
   Power,
   Pencil,
   Copy,
   SlidersHorizontal,
   Flame,
+  ScrollText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 
 const WEEKDAYS_LIST = [
   { id: 1, short: "Seg", full: "Segunda-feira" },
@@ -79,6 +79,7 @@ export interface CouponScheduleRules {
   auto_apply: boolean;
   campaign_name?: string;
   start_date?: string | null;
+  rules_text?: string | null;
   day_hours: DayHoursMap;
   days_of_week: number[];
   allowed_hours: number[];
@@ -175,6 +176,10 @@ export function extractCouponRules(coupon: any): CouponScheduleRules {
     campaign_name:
       coupon?.campaign_name || parsed?.campaign_name || coupon?.code || "",
     start_date: parsed?.start_date || null,
+    rules_text:
+      typeof parsed?.rules_text === "string" && parsed.rules_text.trim()
+        ? parsed.rules_text
+        : null,
     day_hours: dayHours,
     days_of_week: activeDays,
     allowed_hours: unionHours,
@@ -200,11 +205,11 @@ export function AdminCouponsTab() {
   const [rooms, setRooms] = useState<any[]>([]);
   const [roomSearch, setRoomSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
-
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [recordUses, setRecordUses] = useState<any[]>([]);
-
   const [isAllRooms, setIsAllRooms] = useState(true);
+  const [isPreviewRulesOpen, setIsPreviewRulesOpen] = useState(false);
+
   const [formData, setFormData] = useState({
     code: "",
     campaign_name: "",
@@ -217,6 +222,7 @@ export function AdminCouponsTab() {
     valid_room_ids: [] as string[],
     show_on_calendar: true,
     auto_apply: true,
+    rules_text: "",
     day_hours: createDefaultDayHours(),
   });
 
@@ -240,7 +246,6 @@ export function AdminCouponsTab() {
       `,
       )
       .order("created_at", { ascending: false });
-
     if (!error) setAllRecords(data || []);
     setLoading(false);
   };
@@ -251,7 +256,6 @@ export function AdminCouponsTab() {
       .select("id, name, tier, availability, profiles:host_id(full_name)")
       .eq("is_active", true)
       .order("name");
-
     if (!error) setRooms(data || []);
   };
 
@@ -277,7 +281,6 @@ export function AdminCouponsTab() {
       )
       .eq("coupon_id", id)
       .order("used_at", { ascending: false });
-
     if (!error) setRecordUses(data || []);
     setActionLoading(false);
   };
@@ -320,6 +323,7 @@ export function AdminCouponsTab() {
     setIsAllRooms(true);
     setRoomSearch("");
     setSelectedAffiliate(null);
+    setIsPreviewRulesOpen(false);
     setFormData({
       code: "",
       campaign_name: "",
@@ -332,6 +336,7 @@ export function AdminCouponsTab() {
       valid_room_ids: [],
       show_on_calendar: true,
       auto_apply: true,
+      rules_text: "",
       day_hours: createDefaultDayHours(),
     });
   };
@@ -340,7 +345,6 @@ export function AdminCouponsTab() {
     const rules = extractCouponRules(item);
     const hasRooms =
       Array.isArray(item.valid_room_ids) && item.valid_room_ids.length > 0;
-
     const totalSavedSlots = Object.values(rules.day_hours).reduce(
       (acc, arr) => acc + arr.length,
       0,
@@ -349,7 +353,6 @@ export function AdminCouponsTab() {
     setEditingId(item.id);
     setIsAllRooms(!hasRooms);
     setSelectedAffiliate(item.profiles || null);
-
     setFormData({
       code: item.code || "",
       campaign_name: rules.campaign_name || "",
@@ -364,10 +367,10 @@ export function AdminCouponsTab() {
       valid_room_ids: hasRooms ? item.valid_room_ids : [],
       show_on_calendar: rules.show_on_calendar,
       auto_apply: rules.auto_apply,
+      rules_text: rules.rules_text || "",
       day_hours:
         totalSavedSlots > 0 ? rules.day_hours : createDefaultDayHours(),
     });
-
     setView(rules.is_campaign ? "create_campaign" : "create_coupon");
   };
 
@@ -379,7 +382,6 @@ export function AdminCouponsTab() {
       const nextArr = exists
         ? currentArr.filter((h) => h !== hour)
         : [...currentArr, hour].sort((a, b) => a - b);
-
       return {
         ...prev,
         day_hours: {
@@ -411,19 +413,16 @@ export function AdminCouponsTab() {
           },
         };
       }
-
       const targetShiftHours = ALL_SLOTS_LIST.filter(
         (s) => s.shift === preset,
       ).map((s) => s.hour);
       const currentArr = prev.day_hours[key] || [];
       const allPresent = targetShiftHours.every((h) => currentArr.includes(h));
-
       const nextArr = allPresent
         ? currentArr.filter((h) => !targetShiftHours.includes(h))
         : Array.from(new Set([...currentArr, ...targetShiftHours])).sort(
             (a, b) => a - b,
           );
-
       return {
         ...prev,
         day_hours: { ...prev.day_hours, [key]: nextArr },
@@ -463,7 +462,6 @@ export function AdminCouponsTab() {
       const targetRooms = isAllRooms
         ? rooms
         : rooms.filter((r) => formData.valid_room_ids.includes(r.id));
-
       if (targetRooms.length === 0) {
         toast({
           variant: "destructive",
@@ -495,7 +493,6 @@ export function AdminCouponsTab() {
 
       const recentBookings = bookingsRes.data || [];
       const activeContracts = contractsRes.data || [];
-
       const daysInterval = eachDayOfInterval({ start: start30d, end: now });
       const dowOccurrences: Record<number, number> = {
         0: 0,
@@ -526,7 +523,6 @@ export function AdminCouponsTab() {
         const endD = b.end_time ? parseISO(b.end_time) : null;
         const endH =
           endD && getHours(endD) > startH ? getHours(endD) : startH + 1;
-
         for (let h = startH; h < endH; h++) {
           if (occupiedMatrix[dow] && occupiedMatrix[dow][h] !== undefined) {
             occupiedMatrix[dow][h] += 1;
@@ -544,7 +540,6 @@ export function AdminCouponsTab() {
             sched = null;
           }
         }
-
         const contractDays: number[] = Array.isArray(sched?.days)
           ? sched.days.map(Number)
           : Array.isArray(sched?.weekdays)
@@ -569,7 +564,6 @@ export function AdminCouponsTab() {
         contractDays.forEach((d) => {
           if (!occupiedMatrix[d]) return;
           const weight = dowOccurrences[d] || 4;
-
           if (Array.isArray(sched?.hours)) {
             sched.hours.forEach((hRaw: any) => {
               const h = parseInt(String(hRaw).split(/[:h-]/)[0], 10);
@@ -578,7 +572,6 @@ export function AdminCouponsTab() {
               }
             });
           }
-
           shifts.forEach((sh: string) => {
             const s = sh.toLowerCase();
             if (s.includes("morn") || s.includes("manh")) {
@@ -605,7 +598,6 @@ export function AdminCouponsTab() {
         "5": [],
         "6": [],
       };
-
       let totalFound = 0;
 
       [1, 2, 3, 4, 5].forEach((dow) => {
@@ -614,7 +606,6 @@ export function AdminCouponsTab() {
           targetRooms.length * (dowOccurrences[dow] || 4),
         );
         const lowOccHours: number[] = [];
-
         ALL_SLOTS_LIST.forEach((slot) => {
           const used = occupiedMatrix[dow][slot.hour] || 0;
           const occPct = (used / maxCapForDaySlot) * 100;
@@ -623,7 +614,6 @@ export function AdminCouponsTab() {
             totalFound += 1;
           }
         });
-
         mappedDayHours[String(dow)] = lowOccHours;
       });
 
@@ -631,7 +621,6 @@ export function AdminCouponsTab() {
         ...prev,
         day_hours: mappedDayHours,
       }));
-
       toast({
         title: "Horários sugeridos preenchidos",
         description: `Foram selecionados ${totalFound} horários com ocupação abaixo de 35% nos últimos 30 dias.`,
@@ -685,7 +674,6 @@ export function AdminCouponsTab() {
           auto_apply: false,
         },
       };
-
       if (!editingId) {
         payload.is_active = true;
       }
@@ -702,7 +690,6 @@ export function AdminCouponsTab() {
           ? "Cupom atualizado com sucesso"
           : "Cupom criado com sucesso",
       });
-
       resetForm();
       setActiveSection("coupons");
       setView("list");
@@ -758,6 +745,8 @@ export function AdminCouponsTab() {
         new Set(Object.values(formData.day_hours).flat()),
       ).sort((a, b) => a - b);
 
+      const cleanedRulesText = formData.rules_text.trim() || null;
+
       const scheduleRulesObj: CouponScheduleRules = {
         is_campaign: true,
         enabled: true,
@@ -765,6 +754,7 @@ export function AdminCouponsTab() {
         auto_apply: formData.auto_apply,
         campaign_name: formData.campaign_name.trim(),
         start_date: formData.start_date || null,
+        rules_text: cleanedRulesText,
         day_hours: formData.day_hours,
         days_of_week: activeDays,
         allowed_hours: unionHours,
@@ -785,7 +775,6 @@ export function AdminCouponsTab() {
         auto_apply: formData.auto_apply,
         schedule_rules: scheduleRulesObj,
       };
-
       if (!editingId) {
         payload.is_active = true;
       }
@@ -801,8 +790,10 @@ export function AdminCouponsTab() {
         title: editingId
           ? "Campanha de horário atualizada"
           : "Campanha de horário publicada",
+        description: cleanedRulesText
+          ? "O regulamento já está visível para os profissionais e obrigatório no checkout."
+          : undefined,
       });
-
       resetForm();
       setActiveSection("campaigns");
       setView("list");
@@ -848,7 +839,6 @@ export function AdminCouponsTab() {
   const handleToggleCalendarDisplay = async (campaign: any) => {
     const currentRules = extractCouponRules(campaign);
     const nextShow = !currentRules.show_on_calendar;
-
     const updatedRules: CouponScheduleRules = {
       ...currentRules,
       is_campaign: true,
@@ -877,7 +867,6 @@ export function AdminCouponsTab() {
         ? "Campanha exibida no calendário das salas"
         : "Campanha ocultada do calendário",
     });
-
     fetchRecords();
   };
 
@@ -969,6 +958,9 @@ export function AdminCouponsTab() {
       </div>
     );
 
+  // ==========================================================================
+  // FORMULÁRIO: CRIAR / EDITAR CUPOM DE CÓDIGO
+  // ==========================================================================
   if (view === "create_coupon") {
     return (
       <div className="p-6 lg:p-8 max-w-4xl mx-auto animate-in fade-in pb-32">
@@ -1198,7 +1190,6 @@ export function AdminCouponsTab() {
                 <Users className="w-4 h-4 text-slate-500" /> Afiliado ou
                 Parceiro (Opcional)
               </h3>
-
               {!selectedAffiliate ? (
                 <div className="relative">
                   <Search className="absolute left-3 top-3 w-4 h-4 text-slate-400" />
@@ -1275,9 +1266,26 @@ export function AdminCouponsTab() {
     );
   }
 
+  // ==========================================================================
+  // FORMULÁRIO: CRIAR / EDITAR CAMPANHA DE HORÁRIOS (COM REGULAMENTO)
+  // ==========================================================================
   if (view === "create_campaign") {
+    const previewBadge = formData.discount_value
+      ? formData.type === "percentage"
+        ? `-${formData.discount_value}% OFF`
+        : `-R$ ${formData.discount_value} OFF`
+      : null;
+
     return (
       <div className="p-6 lg:p-8 max-w-5xl mx-auto animate-in fade-in pb-32">
+        <CampaignRulesModal
+          isOpen={isPreviewRulesOpen}
+          onClose={() => setIsPreviewRulesOpen(false)}
+          campaignName={formData.campaign_name || "Prévia da Campanha"}
+          rulesText={formData.rules_text}
+          badgeText={previewBadge}
+        />
+
         <Button
           variant="ghost"
           onClick={() => {
@@ -1302,8 +1310,8 @@ export function AdminCouponsTab() {
                     : "Nova Campanha de Horários"}
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Defina tarifas reduzidas para dias e horários específicos e
-                  destaque no calendário de reserva das salas.
+                  Defina tarifas reduzidas para dias e horários específicos,
+                  destaque no calendário e adicione o regulamento da oferta.
                 </p>
               </div>
             </div>
@@ -1334,7 +1342,7 @@ export function AdminCouponsTab() {
                 </Label>
                 <Input
                   required
-                  placeholder="Ex: Semana Black Friday • Horários Selecionados"
+                  placeholder="Ex: BLACK FUSION 2026"
                   value={formData.campaign_name}
                   onChange={(e) =>
                     setFormData({
@@ -1387,7 +1395,7 @@ export function AdminCouponsTab() {
                   required
                   type="number"
                   placeholder={
-                    formData.type === "percentage" ? "Ex: 25" : "Ex: 15"
+                    formData.type === "percentage" ? "Ex: 50" : "Ex: 15"
                   }
                   value={formData.discount_value}
                   onChange={(e) =>
@@ -1444,6 +1452,7 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
+            {/* 1. SALAS PARTICIPANTES */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-slate-500" /> 1. Salas
@@ -1513,7 +1522,6 @@ export function AdminCouponsTab() {
                       className="h-9 pl-9 bg-white border-slate-200 rounded-xl text-xs"
                     />
                   </div>
-
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-52 overflow-y-auto p-3 bg-white border border-slate-200 rounded-xl">
                     {filteredRooms.map((room) => (
                       <label
@@ -1545,6 +1553,7 @@ export function AdminCouponsTab() {
               )}
             </div>
 
+            {/* 2. DIAS E HORÁRIOS */}
             <div className="p-5 bg-stone-50 rounded-2xl border border-stone-200 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
@@ -1582,7 +1591,6 @@ export function AdminCouponsTab() {
                     const dayKey = String(dayItem.id);
                     const daySelectedHours = formData.day_hours[dayKey] || [];
                     const hasAnyOnDay = daySelectedHours.length > 0;
-
                     return (
                       <div
                         key={dayItem.id}
@@ -1702,6 +1710,46 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
+            {/* 3. REGULAMENTO / REGRAS DA CAMPANHA (OPCIONAL) */}
+            <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/90 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                    <ScrollText className="w-4 h-4 text-[#BF4B24]" /> 3.
+                    Regulamento / Regras da Campanha (Opcional)
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Cole as regras numeradas (1., 2., 3...). Elas aparecerão no
+                    botão “Ver regulamento” do pop-up, da vitrine, da sala e
+                    exigirão confirmação obrigatória no checkout.
+                  </p>
+                </div>
+
+                {formData.rules_text.trim().length > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setIsPreviewRulesOpen(true)}
+                    className="h-9 rounded-xl border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold text-xs shrink-0 cursor-pointer"
+                  >
+                    <Eye className="w-3.5 h-3.5 mr-1.5 text-[#BF4B24]" />
+                    Pré-visualizar como cliente
+                  </Button>
+                )}
+              </div>
+
+              <Textarea
+                rows={9}
+                value={formData.rules_text}
+                onChange={(e) =>
+                  setFormData({ ...formData, rules_text: e.target.value })
+                }
+                placeholder={`BLACK FUSION 2026\n\nRegulamento da Campanha\n\n1. Oferta: desconto de 50% nas horas avulsas selecionadas...\n2. Período de compra: ...\n3. Prazo de utilização: ...`}
+                className="bg-white border-slate-200 rounded-xl text-xs sm:text-sm leading-relaxed font-medium text-slate-800 resize-y min-h-[180px]"
+              />
+            </div>
+
             <Button
               disabled={actionLoading}
               type="submit"
@@ -1722,7 +1770,7 @@ export function AdminCouponsTab() {
   }
 
   // ==========================================================================
-  // VISÃO DETALHADA DO RAIO-X (CUPOM OU CAMPANHA COMPLETA COM SALAS)
+  // VISÃO DETALHADA DO RAIO-X (CUPOM OU CAMPANHA COMPLETA COM SALAS E REGRAS)
   // ==========================================================================
   if (view === "details" && selectedRecord) {
     const rules = extractCouponRules(selectedRecord);
@@ -1738,6 +1786,18 @@ export function AdminCouponsTab() {
 
     return (
       <div className="p-6 lg:p-8 max-w-5xl mx-auto animate-in fade-in pb-32">
+        <CampaignRulesModal
+          isOpen={isPreviewRulesOpen}
+          onClose={() => setIsPreviewRulesOpen(false)}
+          campaignName={rules.campaign_name || selectedRecord.code}
+          rulesText={rules.rules_text}
+          badgeText={
+            selectedRecord.type === "percentage"
+              ? `-${selectedRecord.discount_value}% OFF`
+              : `-R$ ${selectedRecord.discount_value} OFF`
+          }
+        />
+
         <Button
           variant="ghost"
           onClick={() => setView("list")}
@@ -1838,8 +1898,32 @@ export function AdminCouponsTab() {
           </div>
         </div>
 
+        {/* BLOCO DO REGULAMENTO CADASTRADO NA CAMPANHA */}
+        {rules.is_campaign && rules.rules_text && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 mb-6">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <ScrollText className="w-4 h-4 text-[#BF4B24]" />
+                Regulamento Cadastrado (Exibido ao Profissional)
+              </h3>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setIsPreviewRulesOpen(true)}
+                className="h-8 rounded-xl text-xs font-semibold border-slate-200 cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5 mr-1.5 text-[#BF4B24]" />
+                Abrir Modal de Leitura
+              </Button>
+            </div>
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-700 whitespace-pre-line leading-relaxed max-h-56 overflow-y-auto">
+              {rules.rules_text}
+            </div>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-          {/* BLOCO DE SALAS VINCULADAS */}
           <div className="bg-white border border-slate-200 rounded-2xl p-6">
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-4">
               <Building2 className="w-4 h-4 text-slate-500" />
@@ -1877,7 +1961,6 @@ export function AdminCouponsTab() {
             )}
           </div>
 
-          {/* BLOCO DE HORÁRIOS CONFIGURADOS */}
           {rules.is_campaign && (
             <div className="bg-white border border-slate-200 rounded-2xl p-6">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-4">
@@ -1920,7 +2003,6 @@ export function AdminCouponsTab() {
               Profissionais que utilizaram ({recordUses.length})
             </h3>
           </div>
-
           {actionLoading ? (
             <div className="p-12 flex justify-center">
               <Loader2 className="w-7 h-7 animate-spin text-slate-300" />
@@ -2170,7 +2252,6 @@ export function AdminCouponsTab() {
                       new Date(coupon.valid_until) < new Date();
                     const isEsgotado =
                       coupon.max_uses && coupon.current_uses >= coupon.max_uses;
-
                     return (
                       <tr
                         key={coupon.id}
@@ -2181,7 +2262,6 @@ export function AdminCouponsTab() {
                             {coupon.code}
                           </span>
                         </td>
-
                         <td className="px-6 py-4">
                           {getTypeDisplay(coupon.type, coupon.discount_value)}
                           <span className="block text-[11px] text-slate-500 mt-1">
@@ -2190,11 +2270,9 @@ export function AdminCouponsTab() {
                               : "Todas as salas"}
                           </span>
                         </td>
-
                         <td className="px-6 py-4 font-medium text-slate-700">
                           {coupon.profiles?.full_name || "Institucional"}
                         </td>
-
                         <td className="px-6 py-4">
                           <span className="font-bold text-slate-900">
                             {coupon.current_uses || 0}
@@ -2205,13 +2283,11 @@ export function AdminCouponsTab() {
                               : " usos"}
                           </span>
                         </td>
-
                         <td className="px-6 py-4 text-slate-500">
                           {coupon.valid_until
                             ? format(parseISO(coupon.valid_until), "dd/MM/yyyy")
                             : "Vitalício"}
                         </td>
-
                         <td className="px-6 py-4">
                           {isExpired ? (
                             <Badge className="bg-red-50 text-red-700 border-0 font-semibold">
@@ -2231,7 +2307,6 @@ export function AdminCouponsTab() {
                             </Badge>
                           )}
                         </td>
-
                         <td className="px-6 py-4 flex items-center justify-end gap-1.5">
                           <Button
                             variant="outline"
@@ -2330,7 +2405,6 @@ export function AdminCouponsTab() {
                       (acc, arr) => acc + arr.length,
                       0,
                     );
-
                     return (
                       <tr
                         key={camp.id}
@@ -2340,11 +2414,18 @@ export function AdminCouponsTab() {
                           <span className="font-bold text-slate-900 text-sm block">
                             {rules.campaign_name || camp.code}
                           </span>
-                          <span className="text-[11px] font-mono text-slate-400">
-                            Ref: {camp.code}
-                          </span>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <span className="text-[11px] font-mono text-slate-400">
+                              Ref: {camp.code}
+                            </span>
+                            {rules.rules_text && (
+                              <Badge className="bg-amber-50 text-amber-800 border border-amber-200 text-[9px] font-bold px-1.5 py-0">
+                                <ScrollText className="w-2.5 h-2.5 mr-1" />
+                                Regulamento ativo
+                              </Badge>
+                            )}
+                          </div>
                         </td>
-
                         <td className="px-6 py-4">
                           {getTypeDisplay(camp.type, camp.discount_value)}
                           <span className="block text-[11px] text-slate-500 mt-1">
@@ -2353,7 +2434,6 @@ export function AdminCouponsTab() {
                               : "Todas as salas"}
                           </span>
                         </td>
-
                         <td className="px-6 py-4">
                           <span className="font-semibold text-slate-800 block">
                             {totalBlocks} horário(s) na semana
@@ -2371,7 +2451,6 @@ export function AdminCouponsTab() {
                               .join(" • ")}
                           </span>
                         </td>
-
                         <td className="px-6 py-4 text-center">
                           <button
                             type="button"
@@ -2394,7 +2473,6 @@ export function AdminCouponsTab() {
                               : "Oculta"}
                           </button>
                         </td>
-
                         <td className="px-6 py-4">
                           <span className="font-bold text-slate-900">
                             {camp.current_uses || 0}
@@ -2405,7 +2483,6 @@ export function AdminCouponsTab() {
                               : " reservas"}
                           </span>
                         </td>
-
                         <td className="px-6 py-4">
                           {isExpired ? (
                             <Badge className="bg-red-50 text-red-700 border-0 font-semibold">
@@ -2421,7 +2498,6 @@ export function AdminCouponsTab() {
                             </Badge>
                           )}
                         </td>
-
                         <td className="px-6 py-4 flex items-center justify-end gap-1.5">
                           <Button
                             variant="outline"
@@ -2436,7 +2512,7 @@ export function AdminCouponsTab() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Editar Horários e Salas"
+                            title="Editar Horários, Salas e Regulamento"
                             onClick={() => handleOpenEdit(camp)}
                             className="h-8 w-8 text-slate-600 hover:bg-slate-100"
                           >
@@ -2445,7 +2521,7 @@ export function AdminCouponsTab() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Ver reservas desta campanha"
+                            title="Ver reservas e regulamento desta campanha"
                             onClick={() => openDetails(camp)}
                             className="h-8 w-8 text-slate-600 hover:bg-slate-100"
                           >

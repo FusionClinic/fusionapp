@@ -1,9 +1,13 @@
 // components/checkout-modal.tsx
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
+import {
+  CampaignRulesModal,
+  extractCampaignRulesText,
+} from "@/components/campaign-rules-modal";
 import {
   Wallet,
   X,
@@ -24,6 +28,8 @@ import {
   Copy,
   XCircle,
   AlertCircle,
+  ScrollText,
+  Flame,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,7 +37,6 @@ import { Label } from "@/components/ui/label";
 import { format } from "date-fns";
 import { ptBR } from "date-fns/locale";
 import { useToast } from "@/hooks/use-toast";
-import { Badge } from "@/components/ui/badge";
 
 export interface CheckoutSummary {
   durationHours: number;
@@ -56,6 +61,13 @@ export interface CardData {
   isThirdParty?: boolean;
 }
 
+export interface CampaignCheckoutInfo {
+  name: string;
+  rulesText: string | null;
+  badgeText?: string | null;
+  discountBRL?: number;
+}
+
 interface CheckoutModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -74,6 +86,7 @@ interface CheckoutModalProps {
   pixCopyPaste?: string | null;
   activeBookingId?: string | null;
   onSuccess?: () => void;
+  campaignInfo?: CampaignCheckoutInfo | null;
 }
 
 type CheckoutStep = "confirm" | "pix" | "success" | "error";
@@ -123,10 +136,12 @@ export function CheckoutModal({
   pixCopyPaste,
   activeBookingId,
   onSuccess,
+  campaignInfo,
 }: CheckoutModalProps) {
   const { toast } = useToast();
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
   const router = useRouter();
+
   const [step, setStep] = useState<CheckoutStep>("confirm");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [paymentMethod, setPaymentMethod] = useState<"wallet" | "pix" | "card">(
@@ -136,6 +151,10 @@ export function CheckoutModal({
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [copied, setCopied] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // Estados de confirmação obrigatória do regulamento da campanha
+  const [acceptedCampaignRules, setAcceptedCampaignRules] = useState(false);
+  const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
 
   const [couponCode, setCouponCode] = useState("");
   const [isVerifyingCoupon, setIsVerifyingCoupon] = useState(false);
@@ -161,6 +180,10 @@ export function CheckoutModal({
     brand: string;
   } | null>(null);
   const [isMyCard, setIsMyCard] = useState(true);
+
+  const hasAutoCampaignDiscount = Boolean(
+    campaignInfo && (campaignInfo.discountBRL || 0) > 0,
+  );
 
   useEffect(() => {
     setCardData((prev) => ({ ...prev, isThirdParty: !isMyCard }));
@@ -200,7 +223,9 @@ export function CheckoutModal({
       setCouponFeedback(null);
       setErrorMessage("");
       setShowCloseConfirm(false);
-      setPaymentMethod("wallet");
+      setAcceptedCampaignRules(false);
+      setIsRulesModalOpen(false);
+      setPaymentMethod(hasAutoCampaignDiscount ? "pix" : "wallet");
       setIsMyCard(true);
       setCardData({
         number: "",
@@ -214,7 +239,7 @@ export function CheckoutModal({
         isThirdParty: false,
       });
     }
-  }, [isOpen, savedCardInfo]);
+  }, [isOpen, savedCardInfo, hasAutoCampaignDiscount]);
 
   useEffect(() => {
     if (pixQrCode && pixCopyPaste && activeBookingId) {
@@ -226,7 +251,6 @@ export function CheckoutModal({
   // MOTOR DE BUSCA ATIVA E RECONCILIAÇÃO
   useEffect(() => {
     if (step !== "pix" || !activeBookingId) return;
-
     let isChecking = false;
 
     const checkPaymentStatus = async () => {
@@ -280,11 +304,9 @@ export function CheckoutModal({
       .subscribe();
 
     const interval = setInterval(checkPaymentStatus, 3000);
-
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") checkPaymentStatus();
     };
-
     window.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("focus", checkPaymentStatus);
 
@@ -302,7 +324,6 @@ export function CheckoutModal({
       const now = Date.now();
       const remaining = Math.max(0, Math.floor((expiresAt - now) / 1000));
       setTimeLeft(remaining);
-
       if (remaining === 0) {
         setErrorMessage(
           "O código PIX expirou. Por favor, inicie a reserva novamente.",
@@ -326,7 +347,6 @@ export function CheckoutModal({
     setIsVerifyingCoupon(true);
     setCouponFeedback(null);
     setAppliedCoupon(null);
-
     try {
       const codeToApply = couponCode.toUpperCase().replace(/\s/g, "");
       const { data: coupon, error } = await supabase
@@ -335,36 +355,30 @@ export function CheckoutModal({
         .eq("code", codeToApply)
         .eq("is_active", true)
         .single();
-
       if (error || !coupon)
-        throw new Error("Cupão inválido ou não encontrado.");
-
+        throw new Error("Cupom inválido ou não encontrado.");
       if (coupon.valid_until && new Date(coupon.valid_until) < new Date())
-        throw new Error("Este cupão já expirou.");
-
+        throw new Error("Este cupom já expirou.");
       if (coupon.max_uses && coupon.current_uses >= coupon.max_uses)
-        throw new Error("Este cupão atingiu o limite de utilizações.");
-
+        throw new Error("Este cupom atingiu o limite de utilizações.");
       if (coupon.valid_room_ids && coupon.valid_room_ids.length > 0) {
         if (!coupon.valid_room_ids.includes(room.id))
-          throw new Error("Este cupão não é válido para esta sala.");
+          throw new Error("Este cupom não é válido para esta sala.");
       }
-
       if (coupon.type === "bogo" && selectedSlots.length < 2)
-        throw new Error("O cupão 'Leve 2' exige no mínimo 2 horas.");
-
+        throw new Error("O cupom 'Leve 2' exige no mínimo 2 horas.");
       setAppliedCoupon(coupon);
+      setAcceptedCampaignRules(false);
       setCouponFeedback({
         message: "Desconto aplicado com sucesso!",
         type: "success",
       });
-
       if (paymentMethod === "wallet") {
         setPaymentMethod("pix");
         toast({
           title: "Pagamento Alterado",
           description:
-            "Cupões são válidos apenas para dinheiro. Selecionámos o Pix.",
+            "Cupons são válidos apenas para pagamento em dinheiro. Selecionamos o Pix.",
         });
       }
     } catch (err: any) {
@@ -384,14 +398,50 @@ export function CheckoutModal({
     if (method === "wallet" && appliedCoupon) {
       removeCoupon();
       toast({
-        title: "Cupão Removido",
-        description: "Não é possível aplicar cupões com Créditos.",
+        title: "Cupom Removido",
+        description: "Não é possível aplicar cupons com Créditos.",
       });
     }
     setPaymentMethod(method);
   };
 
+  if (!isOpen || !summary || !room) return null;
+
+  const isMoneyMode = paymentMethod === "pix" || paymentMethod === "card";
+
+  // Verifica se há regulamento da campanha (automática ou cupom manual) exigindo aceite
+  const appliedCouponRulesText = appliedCoupon
+    ? extractCampaignRulesText(appliedCoupon)
+    : null;
+  const effectiveCampaignRulesText =
+    campaignInfo?.rulesText || appliedCouponRulesText || null;
+  const effectiveCampaignName =
+    campaignInfo?.name ||
+    appliedCoupon?.campaign_name ||
+    appliedCoupon?.code ||
+    "Campanha Promocional";
+  const effectiveCampaignBadge =
+    campaignInfo?.badgeText ||
+    (appliedCoupon
+      ? appliedCoupon.type === "percentage"
+        ? `-${appliedCoupon.discount_value}% OFF`
+        : `-R$ ${appliedCoupon.discount_value} OFF`
+      : null);
+
+  const requiresCampaignAcceptance = Boolean(
+    effectiveCampaignRulesText && isMoneyMode,
+  );
+
   const handleSubmitWrapper = async () => {
+    if (requiresCampaignAcceptance && !acceptedCampaignRules) {
+      return toast({
+        variant: "destructive",
+        title: "Confirmação obrigatória",
+        description:
+          "Leia e marque a caixa de concordância com o regulamento da campanha para concluir.",
+      });
+    }
+
     if (paymentMethod === "card" && !cardData.useSavedCard) {
       if (
         !cardData.number ||
@@ -413,7 +463,6 @@ export function CheckoutModal({
         });
       }
     }
-
     try {
       await onConfirm(
         paymentMethod,
@@ -464,8 +513,6 @@ export function CheckoutModal({
     }
   };
 
-  if (!isOpen || !summary || !room) return null;
-
   const getTierWeight = (tier: string) => {
     const t = tier.toLowerCase();
     if (t === "master") return 3;
@@ -476,22 +523,18 @@ export function CheckoutModal({
   const roomTier = room.tier || "start";
   const usedTier = summary.usedTier || "start";
   const isCascading = getTierWeight(usedTier) > getTierWeight(roomTier);
-
   const finalCredits = summary.creditsRequired;
-  const isMoneyMode = paymentMethod === "pix" || paymentMethod === "card";
 
-  let subtotalBRL = totalBaseBRL + summary.upgradeFeeBRL;
+  const subtotalBRL = totalBaseBRL + summary.upgradeFeeBRL;
   let finalBRL = subtotalBRL;
   let discountBRL = 0;
-
-  if (appliedCoupon && isMoneyMode) {
+  if (appliedCoupon && isMoneyMode && !hasAutoCampaignDiscount) {
     if (appliedCoupon.type === "percentage")
       discountBRL = subtotalBRL * (appliedCoupon.discount_value / 100);
     else if (appliedCoupon.type === "fixed")
       discountBRL = appliedCoupon.discount_value;
     else if (appliedCoupon.type === "bogo")
       discountBRL = subtotalBRL / summary.durationHours;
-
     if (discountBRL > subtotalBRL) discountBRL = subtotalBRL;
     finalBRL = subtotalBRL - discountBRL;
   }
@@ -500,16 +543,28 @@ export function CheckoutModal({
   const dateFormatted = format(selectedDate, "dd 'de' MMMM, yyyy", {
     locale: ptBR,
   });
-
   const minutes = Math.floor(timeLeft / 60);
   const seconds = timeLeft % 60;
   const timeFormatted = `${minutes}:${seconds.toString().padStart(2, "0")}`;
 
   return (
     <>
+      {/* Modal de leitura do regulamento da campanha */}
+      <CampaignRulesModal
+        isOpen={isRulesModalOpen}
+        onClose={() => setIsRulesModalOpen(false)}
+        campaignName={effectiveCampaignName}
+        rulesText={effectiveCampaignRulesText}
+        badgeText={effectiveCampaignBadge}
+      />
+
       <div className="fixed inset-0 z-[300] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm md:p-4 animate-in fade-in duration-200">
         <div
-          className={`bg-white w-full max-w-4xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300 max-h-[100dvh] md:max-h-[95vh] ${step === "pix" || step === "success" || step === "error" ? "h-full md:h-auto md:rounded-2xl" : "rounded-2xl"}`}
+          className={`bg-white w-full max-w-4xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-300 max-h-[100dvh] md:max-h-[95vh] ${
+            step === "pix" || step === "success" || step === "error"
+              ? "h-full md:h-auto md:rounded-2xl"
+              : "rounded-2xl"
+          }`}
         >
           {step === "confirm" && (
             <div className="px-6 py-2.5 flex items-center justify-center gap-2 bg-slate-100 border-b border-slate-200">
@@ -530,7 +585,7 @@ export function CheckoutModal({
               </h2>
               <button
                 onClick={handleAttemptClose}
-                className="p-2 hover:bg-slate-100 text-slate-500 rounded-full transition-colors"
+                className="p-2 hover:bg-slate-100 text-slate-500 rounded-full transition-colors cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -580,7 +635,7 @@ export function CheckoutModal({
                     <h4 className="text-xs font-bold text-slate-900 flex items-center justify-between mb-3">
                       <span className="flex items-center gap-1.5">
                         <Ticket className="w-4 h-4 text-indigo-500" /> Possui um
-                        Cupão?
+                        Cupom?
                       </span>
                       {!isMoneyMode && (
                         <span className="text-[9px] uppercase tracking-widest text-slate-400 font-bold bg-slate-100 px-2 py-0.5 rounded">
@@ -588,7 +643,6 @@ export function CheckoutModal({
                         </span>
                       )}
                     </h4>
-
                     {!appliedCoupon ? (
                       <>
                         <div className="flex gap-2">
@@ -614,7 +668,11 @@ export function CheckoutModal({
                         </div>
                         {couponFeedback && (
                           <p
-                            className={`text-xs font-bold mt-2 ${couponFeedback.type === "error" ? "text-red-500" : "text-emerald-500"}`}
+                            className={`text-xs font-bold mt-2 ${
+                              couponFeedback.type === "error"
+                                ? "text-red-500"
+                                : "text-emerald-500"
+                            }`}
                           >
                             {couponFeedback.message}
                           </p>
@@ -631,7 +689,7 @@ export function CheckoutModal({
                               {appliedCoupon.code}
                             </p>
                             <p className="text-[10px] font-bold text-emerald-600">
-                              Cupão Aplicado!
+                              Cupom Aplicado!
                             </p>
                           </div>
                         </div>
@@ -655,7 +713,7 @@ export function CheckoutModal({
                       </div>
                       <button
                         onClick={onClose}
-                        className="text-xs font-bold text-[#BF4B24] hover:underline underline-offset-2"
+                        className="text-xs font-bold text-[#BF4B24] hover:underline underline-offset-2 cursor-pointer"
                       >
                         Alterar Horas
                       </button>
@@ -692,7 +750,7 @@ export function CheckoutModal({
                   Resumo de Compra
                 </h3>
 
-                <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 mb-8">
+                <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 mb-6">
                   {!isMoneyMode ? (
                     <div className="flex justify-between items-center">
                       <span className="text-sm font-medium text-slate-600">
@@ -704,6 +762,21 @@ export function CheckoutModal({
                     </div>
                   ) : (
                     <>
+                      {hasAutoCampaignDiscount && campaignInfo && (
+                        <div className="flex justify-between items-center pb-3 border-b border-slate-200 mb-3 text-slate-900">
+                          <span className="text-xs font-extrabold flex items-center gap-1.5">
+                            <Flame className="w-3.5 h-3.5 text-[#BF4B24] fill-[#BF4B24]" />
+                            Campanha {campaignInfo.name}
+                          </span>
+                          <span className="text-xs font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                            - R${" "}
+                            {(campaignInfo.discountBRL || 0)
+                              .toFixed(2)
+                              .replace(".", ",")}
+                          </span>
+                        </div>
+                      )}
+
                       <div className="flex justify-between items-center pb-3 border-b border-slate-200 mb-3">
                         <span className="text-sm font-medium text-slate-600">
                           Subtotal da Locação
@@ -712,6 +785,7 @@ export function CheckoutModal({
                           R$ {totalBaseBRL.toFixed(2).replace(".", ",")}
                         </span>
                       </div>
+
                       {summary.upgradeFeeBRL > 0 && (
                         <div className="flex justify-between items-center pb-3 border-b border-slate-200 mb-3">
                           <span className="text-xs font-bold text-amber-600">
@@ -723,7 +797,8 @@ export function CheckoutModal({
                           </span>
                         </div>
                       )}
-                      {appliedCoupon && (
+
+                      {appliedCoupon && !hasAutoCampaignDiscount && (
                         <div className="flex justify-between items-center pb-3 border-b border-slate-200 mb-3 text-emerald-600">
                           <span className="text-sm font-bold flex items-center gap-1.5">
                             <Ticket className="w-4 h-4" /> Desconto (
@@ -734,6 +809,7 @@ export function CheckoutModal({
                           </span>
                         </div>
                       )}
+
                       <div className="flex justify-between items-center pt-1">
                         <span className="text-sm font-black text-slate-900">
                           Total a Pagar
@@ -746,23 +822,35 @@ export function CheckoutModal({
                   )}
                 </div>
 
-                <div className="mb-8 space-y-3 flex-1 overflow-y-auto pr-1">
+                <div className="mb-6 space-y-3 flex-1 overflow-y-auto pr-1">
                   <p className="text-sm font-bold text-slate-900">
                     Como você deseja pagar?
                   </p>
 
                   <div
                     onClick={() => handlePaymentSelect("wallet")}
-                    className={`p-4 rounded-xl border-2 cursor-pointer flex flex-col gap-2 transition-all ${paymentMethod === "wallet" ? "bg-orange-50 border-[#BF4B24]" : "bg-white border-slate-200 hover:border-slate-300"}`}
+                    className={`p-4 rounded-xl border-2 cursor-pointer flex flex-col gap-2 transition-all ${
+                      paymentMethod === "wallet"
+                        ? "bg-orange-50 border-[#BF4B24]"
+                        : "bg-white border-slate-200 hover:border-slate-300"
+                    }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
                         <Wallet
-                          className={`w-5 h-5 ${paymentMethod === "wallet" ? "text-[#BF4B24]" : "text-slate-500"}`}
+                          className={`w-5 h-5 ${
+                            paymentMethod === "wallet"
+                              ? "text-[#BF4B24]"
+                              : "text-slate-500"
+                          }`}
                         />
                         <div>
                           <p
-                            className={`text-sm font-bold ${paymentMethod === "wallet" ? "text-[#BF4B24]" : "text-slate-700"}`}
+                            className={`text-sm font-bold ${
+                              paymentMethod === "wallet"
+                                ? "text-[#BF4B24]"
+                                : "text-slate-700"
+                            }`}
                           >
                             Usar Créditos da Carteira
                           </p>
@@ -772,7 +860,11 @@ export function CheckoutModal({
                         </div>
                       </div>
                       <div
-                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${paymentMethod === "wallet" ? "border-[#BF4B24]" : "border-slate-300"}`}
+                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                          paymentMethod === "wallet"
+                            ? "border-[#BF4B24]"
+                            : "border-slate-300"
+                        }`}
                       >
                         {paymentMethod === "wallet" && (
                           <div className="w-2.5 h-2.5 bg-[#BF4B24] rounded-full" />
@@ -793,15 +885,27 @@ export function CheckoutModal({
 
                   <div
                     onClick={() => handlePaymentSelect("pix")}
-                    className={`p-4 rounded-xl border-2 cursor-pointer flex items-center justify-between transition-all ${paymentMethod === "pix" ? "bg-orange-50 border-[#BF4B24]" : "bg-white border-slate-200 hover:border-slate-300"}`}
+                    className={`p-4 rounded-xl border-2 cursor-pointer flex items-center justify-between transition-all ${
+                      paymentMethod === "pix"
+                        ? "bg-orange-50 border-[#BF4B24]"
+                        : "bg-white border-slate-200 hover:border-slate-300"
+                    }`}
                   >
                     <div className="flex items-center gap-3">
                       <QrCode
-                        className={`w-5 h-5 ${paymentMethod === "pix" ? "text-[#BF4B24]" : "text-slate-500"}`}
+                        className={`w-5 h-5 ${
+                          paymentMethod === "pix"
+                            ? "text-[#BF4B24]"
+                            : "text-slate-500"
+                        }`}
                       />
                       <div>
                         <p
-                          className={`text-sm font-bold ${paymentMethod === "pix" ? "text-[#BF4B24]" : "text-slate-700"}`}
+                          className={`text-sm font-bold ${
+                            paymentMethod === "pix"
+                              ? "text-[#BF4B24]"
+                              : "text-slate-700"
+                          }`}
                         >
                           Pix
                         </p>
@@ -811,7 +915,11 @@ export function CheckoutModal({
                       </div>
                     </div>
                     <div
-                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${paymentMethod === "pix" ? "border-[#BF4B24]" : "border-slate-300"}`}
+                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                        paymentMethod === "pix"
+                          ? "border-[#BF4B24]"
+                          : "border-slate-300"
+                      }`}
                     >
                       {paymentMethod === "pix" && (
                         <div className="w-2.5 h-2.5 bg-[#BF4B24] rounded-full" />
@@ -820,7 +928,11 @@ export function CheckoutModal({
                   </div>
 
                   <div
-                    className={`border-2 rounded-xl transition-all overflow-hidden ${paymentMethod === "card" ? "bg-orange-50/30 border-[#BF4B24]" : "bg-white border-slate-200 hover:border-slate-300"}`}
+                    className={`border-2 rounded-xl transition-all overflow-hidden ${
+                      paymentMethod === "card"
+                        ? "bg-orange-50/30 border-[#BF4B24]"
+                        : "bg-white border-slate-200 hover:border-slate-300"
+                    }`}
                   >
                     <div
                       onClick={() => handlePaymentSelect("card")}
@@ -828,11 +940,19 @@ export function CheckoutModal({
                     >
                       <div className="flex items-center gap-3">
                         <CreditCard
-                          className={`w-5 h-5 ${paymentMethod === "card" ? "text-[#BF4B24]" : "text-slate-500"}`}
+                          className={`w-5 h-5 ${
+                            paymentMethod === "card"
+                              ? "text-[#BF4B24]"
+                              : "text-slate-500"
+                          }`}
                         />
                         <div>
                           <p
-                            className={`text-sm font-bold ${paymentMethod === "card" ? "text-[#BF4B24]" : "text-slate-700"}`}
+                            className={`text-sm font-bold ${
+                              paymentMethod === "card"
+                                ? "text-[#BF4B24]"
+                                : "text-slate-700"
+                            }`}
                           >
                             Cartão de Crédito
                           </p>
@@ -842,7 +962,11 @@ export function CheckoutModal({
                         </div>
                       </div>
                       <div
-                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${paymentMethod === "card" ? "border-[#BF4B24]" : "border-slate-300"}`}
+                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
+                          paymentMethod === "card"
+                            ? "border-[#BF4B24]"
+                            : "border-slate-300"
+                        }`}
                       >
                         {paymentMethod === "card" && (
                           <div className="w-2.5 h-2.5 bg-[#BF4B24] rounded-full" />
@@ -853,7 +977,6 @@ export function CheckoutModal({
                     {paymentMethod === "card" && (
                       <div className="px-4 pb-4 animate-in slide-in-from-top-2">
                         {savedCardInfo ? (
-                          // TELA DE CARTÃO SALVO (1-Click)
                           <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-3">
                             <div
                               className="flex items-center justify-between bg-slate-50 p-3 rounded-lg border border-slate-200 cursor-pointer"
@@ -876,7 +999,11 @@ export function CheckoutModal({
                                 </div>
                               </div>
                               <div
-                                className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${cardData.useSavedCard ? "border-[#BF4B24]" : "border-slate-300"}`}
+                                className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                                  cardData.useSavedCard
+                                    ? "border-[#BF4B24]"
+                                    : "border-slate-300"
+                                }`}
                               >
                                 {cardData.useSavedCard && (
                                   <div className="w-2 h-2 bg-[#BF4B24] rounded-full" />
@@ -897,7 +1024,6 @@ export function CheckoutModal({
                             </button>
                           </div>
                         ) : (
-                          // TELA DE NOVO CARTÃO (MÁSCARAS ATIVAS)
                           <div className="bg-white border border-[#BF4B24]/30 rounded-xl p-4 space-y-3">
                             <div className="space-y-1">
                               <Label className="text-xs font-bold text-slate-700">
@@ -970,7 +1096,6 @@ export function CheckoutModal({
                               </div>
                             </div>
 
-                            {/* TOGGLE DE TITULARIDADE */}
                             <div className="flex items-center gap-2 mt-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
                               <input
                                 type="checkbox"
@@ -987,7 +1112,6 @@ export function CheckoutModal({
                               </Label>
                             </div>
 
-                            {/* CAMPOS DINÂMICOS PARA CARTÃO DE TERCEIROS */}
                             {!isMyCard && (
                               <div className="grid grid-cols-2 gap-3 p-3 bg-orange-50/50 border border-orange-100 rounded-lg animate-in fade-in zoom-in-95">
                                 <div className="space-y-1 col-span-2 sm:col-span-1">
@@ -1027,7 +1151,6 @@ export function CheckoutModal({
                               </div>
                             )}
 
-                            {/* OPÇÃO SALVAR CARTÃO */}
                             <div className="flex items-center gap-2 mt-2 bg-slate-50 p-3 rounded-lg border border-slate-100">
                               <input
                                 type="checkbox"
@@ -1060,7 +1183,45 @@ export function CheckoutModal({
                   </div>
                 </div>
 
-                <div className="mt-auto shrink-0 pt-4">
+                {/* CHECKBOX OBRIGATÓRIO DE ACEITE DO REGULAMENTO DA CAMPANHA */}
+                {requiresCampaignAcceptance && (
+                  <div
+                    className={`mb-4 p-3.5 rounded-xl border transition-colors ${
+                      acceptedCampaignRules
+                        ? "bg-emerald-50/70 border-emerald-200"
+                        : "bg-amber-50/80 border-amber-300/90"
+                    }`}
+                  >
+                    <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={acceptedCampaignRules}
+                        onChange={(e) =>
+                          setAcceptedCampaignRules(e.target.checked)
+                        }
+                        className="mt-0.5 w-4 h-4 rounded accent-slate-900 shrink-0 cursor-pointer"
+                      />
+                      <span className="text-xs font-semibold text-slate-800 leading-snug">
+                        Li e concordo com o{" "}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setIsRulesModalOpen(true);
+                          }}
+                          className="font-extrabold text-[#BF4B24] hover:text-[#9A3C1D] underline underline-offset-2 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <ScrollText className="w-3 h-3 inline" />
+                          regulamento da campanha ({effectiveCampaignName})
+                        </button>
+                        , incluindo prazos de uso, remarcação e reembolso.
+                      </span>
+                    </label>
+                  </div>
+                )}
+
+                <div className="mt-auto shrink-0 pt-2">
                   {paymentMethod === "wallet" && !hasEnoughCreditsNow ? (
                     <div className="space-y-3">
                       <p className="text-xs font-bold text-red-600 text-center bg-red-50 py-2 rounded-lg">
@@ -1075,32 +1236,45 @@ export function CheckoutModal({
                       </Button>
                     </div>
                   ) : (
-                    <Button
-                      onClick={handleSubmitWrapper}
-                      disabled={loading || timeLeft === 0}
-                      className="w-full h-14 rounded-xl font-black bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-md transition-all text-base disabled:opacity-50"
-                    >
-                      {loading ? (
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                      ) : paymentMethod === "wallet" ? (
-                        <>
-                          Confirmar Reserva{" "}
-                          <CheckCircle2 className="w-5 h-5 ml-2" />
-                        </>
-                      ) : paymentMethod === "pix" ? (
-                        <>
-                          Gerar Pix de R${" "}
-                          {finalBRL.toFixed(2).replace(".", ",")}{" "}
-                          <ArrowRight className="w-5 h-5 ml-2" />
-                        </>
-                      ) : (
-                        <>
-                          <Lock className="w-4 h-4 mr-2" /> Pagar R${" "}
-                          {finalBRL.toFixed(2).replace(".", ",")}{" "}
-                          <ArrowRight className="w-5 h-5 ml-2" />
-                        </>
+                    <>
+                      <Button
+                        onClick={handleSubmitWrapper}
+                        disabled={
+                          loading ||
+                          timeLeft === 0 ||
+                          (requiresCampaignAcceptance && !acceptedCampaignRules)
+                        }
+                        className="w-full h-14 rounded-xl font-black bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-md transition-all text-base disabled:opacity-50 cursor-pointer"
+                      >
+                        {loading ? (
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                        ) : paymentMethod === "wallet" ? (
+                          <>
+                            Confirmar Reserva{" "}
+                            <CheckCircle2 className="w-5 h-5 ml-2" />
+                          </>
+                        ) : paymentMethod === "pix" ? (
+                          <>
+                            Gerar Pix de R${" "}
+                            {finalBRL.toFixed(2).replace(".", ",")}{" "}
+                            <ArrowRight className="w-5 h-5 ml-2" />
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-4 h-4 mr-2" /> Pagar R${" "}
+                            {finalBRL.toFixed(2).replace(".", ",")}{" "}
+                            <ArrowRight className="w-5 h-5 ml-2" />
+                          </>
+                        )}
+                      </Button>
+
+                      {requiresCampaignAcceptance && !acceptedCampaignRules && (
+                        <p className="text-[11px] font-semibold text-amber-800 text-center mt-2">
+                          Marque o aceite do regulamento da campanha acima para
+                          liberar o pagamento.
+                        </p>
                       )}
-                    </Button>
+                    </>
                   )}
                 </div>
               </div>
@@ -1127,7 +1301,6 @@ export function CheckoutModal({
                     Copie e cole o código abaixo para pagar com o aplicativo do
                     seu banco.
                   </p>
-
                   <div className="w-full relative mb-4">
                     <input
                       readOnly
@@ -1166,7 +1339,6 @@ export function CheckoutModal({
                 >
                   <X className="w-6 h-6" />
                 </button>
-
                 <h2 className="text-3xl font-black text-slate-900 mb-2">
                   Pague com PIX
                 </h2>
@@ -1174,7 +1346,6 @@ export function CheckoutModal({
                   Escaneie o QR Code abaixo com o aplicativo do seu banco para
                   liberar a sua reserva agora mesmo.
                 </p>
-
                 <div className="bg-white p-6 rounded-3xl shadow-lg border-2 border-slate-100 mb-8 relative overflow-hidden">
                   <div className="absolute top-0 left-0 w-full h-2 bg-[#BF4B24]"></div>
                   {pixQrCode && (
@@ -1185,7 +1356,6 @@ export function CheckoutModal({
                     />
                   )}
                 </div>
-
                 <div className="w-full max-w-md mb-8">
                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2 text-left ml-1">
                     PIX Copia e Cola
@@ -1280,8 +1450,6 @@ export function CheckoutModal({
                 Pagamento confirmado. O seu horário já está bloqueado no sistema
                 e garantido para você.
               </p>
-
-              {/* Recibo da Reserva */}
               <div className="w-full max-w-sm bg-slate-50 border border-slate-200 rounded-2xl p-5 mb-8 shadow-sm">
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-4">
                   Comprovante de Reserva
@@ -1318,7 +1486,6 @@ export function CheckoutModal({
                   </div>
                 </div>
               </div>
-
               <Button
                 onClick={() => {
                   onClose();

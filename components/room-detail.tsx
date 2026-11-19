@@ -15,6 +15,10 @@ import {
   resolveCreditHourlyValueBRL,
   normalizeCreditTier,
 } from "@/utils/wallet-ledger";
+import {
+  CampaignRulesModal,
+  extractCampaignRulesText,
+} from "@/components/campaign-rules-modal";
 import { ptBR } from "date-fns/locale";
 import {
   format,
@@ -67,6 +71,7 @@ import {
   ArrowLeftRight,
   Sparkles,
   Flame,
+  ScrollText,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
@@ -74,6 +79,7 @@ import {
   CheckoutModal,
   CheckoutSummary,
   CardData,
+  CampaignCheckoutInfo,
 } from "@/components/checkout-modal";
 import { useMobileBack } from "@/hooks/use-mobile-back";
 
@@ -102,9 +108,7 @@ const normalizeSlotLabel = (h: string): string => {
   const parts = h.split("-");
   const rawStart = parts[0].trim().replace("h", ":");
   const hourNumber = parseInt(rawStart.split(":")[0], 10);
-
   if (isNaN(hourNumber)) return "";
-
   const formattedHour = hourNumber.toString().padStart(2, "0");
   return `${formattedHour}:00 - ${formattedHour}:50`;
 };
@@ -116,7 +120,6 @@ const parseSlotDateHelper = (dateStr: string, timeStr: string): Date => {
   const mm = parts[1] ? parseInt(parts[1].substring(0, 2), 10) : 0;
   const [year, month, day] = dateStr.split("-").map(Number);
   const dateObj = new Date(year, month - 1, day, hh, mm, 0);
-
   if (isNaN(dateObj.getTime())) {
     throw new Error(`Data inválida gerada: ${timeStr} em ${dateStr}`);
   }
@@ -144,7 +147,6 @@ function isDateAndHourBlockedByContract(
 
     const startIso = c.start_date ? String(c.start_date).slice(0, 10) : null;
     const endIso = c.end_date ? String(c.end_date).slice(0, 10) : null;
-
     if (startIso && dateStr < startIso) continue;
     if (endIso && dateStr > endIso) continue;
 
@@ -246,6 +248,11 @@ export function RoomDetail(props: RoomDetailProps) {
   );
 
   const [roomCampaigns, setRoomCampaigns] = useState<any[]>([]);
+  const [rulesModalData, setRulesModalData] = useState<{
+    name: string;
+    rulesText: string;
+    badgeText?: string | null;
+  } | null>(null);
 
   const hasAppliedPreselectedSlotRef = useRef<boolean>(false);
   const bookingConfirmedRef = useRef<boolean>(false);
@@ -266,7 +273,6 @@ export function RoomDetail(props: RoomDetailProps) {
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [checkoutSummary, setCheckoutSummary] =
     useState<CheckoutSummary | null>(null);
-
   const [pixQrCode, setPixQrCode] = useState<string | null>(null);
   const [pixCopyPaste, setPixCopyPaste] = useState<string | null>(null);
   const [activeBookingId, setActiveBookingId] = useState<string | null>(null);
@@ -274,7 +280,6 @@ export function RoomDetail(props: RoomDetailProps) {
   const [isFavorited, setIsFavorited] = useState(false);
   const [isFavoriteLoading, setIsFavoriteLoading] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
-
   const [isAllPhotosOpen, setIsAllPhotosOpen] = useState(false);
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
@@ -286,7 +291,6 @@ export function RoomDetail(props: RoomDetailProps) {
   const [packages, setPackages] = useState<any[]>([]);
   const [selectedPkgHours, setSelectedPkgHours] = useState<number | null>(null);
   const [isPassDetailsExpanded, setIsPassDetailsExpanded] = useState(false);
-
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
 
@@ -327,7 +331,6 @@ export function RoomDetail(props: RoomDetailProps) {
         .eq("room_id", roomData.id)
         .in("status", ["active", "pending_signature"]),
     ]);
-
     if (!bookingsRes.error && bookingsRes.data) {
       setRoomBookings(bookingsRes.data);
     }
@@ -338,7 +341,6 @@ export function RoomDetail(props: RoomDetailProps) {
 
   const handleCheckoutClose = useCallback(async () => {
     setIsCheckoutOpen(false);
-
     if (bookingConfirmedRef.current) {
       setCheckoutSummary(null);
       setSelectedSlots([]);
@@ -353,7 +355,6 @@ export function RoomDetail(props: RoomDetailProps) {
     if (summary && summary.lockIds) {
       const lockIds = summary.lockIds;
       const supabaseClient = createClient();
-
       const { data: checkBookings } = await supabaseClient
         .from("bookings")
         .select("id, status, asaas_payment_id")
@@ -373,7 +374,6 @@ export function RoomDetail(props: RoomDetailProps) {
         await supabaseClient.from("bookings").delete().in("id", pendingIds);
       }
     }
-
     setCheckoutSummary(null);
     await fetchRoomBookings();
   }, [fetchRoomBookings]);
@@ -419,7 +419,6 @@ export function RoomDetail(props: RoomDetailProps) {
         .from("coupons")
         .select("*")
         .eq("is_active", true);
-
       if (!data) return;
 
       const now = new Date();
@@ -427,7 +426,6 @@ export function RoomDetail(props: RoomDetailProps) {
         if (c.valid_until && new Date(c.valid_until) < now) return false;
         if (c.max_uses && Number(c.current_uses || 0) >= Number(c.max_uses))
           return false;
-
         if (
           Array.isArray(c.valid_room_ids) &&
           c.valid_room_ids.length > 0 &&
@@ -435,7 +433,6 @@ export function RoomDetail(props: RoomDetailProps) {
         ) {
           return false;
         }
-
         let rules = c.schedule_rules;
         if (typeof rules === "string") {
           try {
@@ -444,15 +441,12 @@ export function RoomDetail(props: RoomDetailProps) {
             rules = null;
           }
         }
-
         const showOnCal =
           typeof c.show_on_calendar === "boolean"
             ? c.show_on_calendar
             : Boolean(rules?.show_on_calendar);
-
         return showOnCal;
       });
-
       setRoomCampaigns(validCampaigns);
     } catch (e) {
       console.error("Erro ao buscar campanhas da sala:", e);
@@ -466,7 +460,6 @@ export function RoomDetail(props: RoomDetailProps) {
   const getCampaignForDateAndHour = useCallback(
     (dateObj: Date, hourNum?: number) => {
       if (roomCampaigns.length === 0) return null;
-
       const dateIso = format(dateObj, "yyyy-MM-dd");
       const dow = dateObj.getDay();
       const dowKey = String(dow);
@@ -478,7 +471,6 @@ export function RoomDetail(props: RoomDetailProps) {
         ) {
           continue;
         }
-
         let rules = camp.schedule_rules;
         if (typeof rules === "string") {
           try {
@@ -487,7 +479,6 @@ export function RoomDetail(props: RoomDetailProps) {
             rules = null;
           }
         }
-
         if (
           rules?.start_date &&
           dateIso < String(rules.start_date).slice(0, 10)
@@ -496,18 +487,15 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         let eligibleHoursForDay: number[] = [];
-
         if (rules?.enabled) {
           if (rules.day_hours && typeof rules.day_hours === "object") {
             const rawDayArr = rules.day_hours[dowKey];
             eligibleHoursForDay = Array.isArray(rawDayArr)
               ? rawDayArr.map(Number).filter((n: number) => !isNaN(n))
               : [];
-
             if (eligibleHoursForDay.length === 0) {
               continue;
             }
-
             if (
               hourNum !== undefined &&
               !eligibleHoursForDay.includes(hourNum)
@@ -553,17 +541,48 @@ export function RoomDetail(props: RoomDetailProps) {
           discountValue: discountVal,
           badgeText,
           eligibleHoursForDay,
+          rulesText: extractCampaignRulesText(camp),
           autoApply:
             typeof camp.auto_apply === "boolean"
               ? camp.auto_apply
               : rules?.auto_apply !== false,
         };
       }
-
       return null;
     },
     [roomCampaigns],
   );
+
+  // Primeiro regulamento disponível dentre as campanhas ativas nesta sala
+  const firstRoomCampaignWithRules = useMemo(() => {
+    for (const camp of roomCampaigns) {
+      const rulesText = extractCampaignRulesText(camp);
+      if (rulesText) {
+        let parsed = camp.schedule_rules;
+        if (typeof parsed === "string") {
+          try {
+            parsed = JSON.parse(parsed);
+          } catch {
+            parsed = null;
+          }
+        }
+        const discountVal = Number(camp.discount_value || 0);
+        const badgeText =
+          camp.type === "percentage"
+            ? `-${discountVal}% OFF`
+            : camp.type === "fixed"
+              ? `-R$ ${discountVal} OFF`
+              : null;
+        return {
+          name:
+            camp.campaign_name || parsed?.campaign_name || `Cupom ${camp.code}`,
+          rulesText,
+          badgeText,
+        };
+      }
+    }
+    return null;
+  }, [roomCampaigns]);
 
   const isSlotBooked = useCallback(
     (slotKey: string) => {
@@ -572,13 +591,11 @@ export function RoomDetail(props: RoomDetailProps) {
         const parts = timeStr.split(" - ");
         const startSlotStr = parts[0];
         const endSlotStr = parts[1] || parts[0];
-
         const slotStartObj = parseSlotDateHelper(dateStr, startSlotStr);
         const slotStart = slotStartObj.getTime();
         const rawSlotEnd = parseSlotDateHelper(dateStr, endSlotStr).getTime();
         const slotEnd =
           rawSlotEnd > slotStart ? rawSlotEnd : slotStart + 50 * 60 * 1000;
-
         const slotHour = slotStartObj.getHours();
         const slotDow = slotStartObj.getDay();
 
@@ -595,13 +612,11 @@ export function RoomDetail(props: RoomDetailProps) {
 
         return roomBookings.some((b: any) => {
           if (b.status === "cancelled" || b.status === "rejected") return false;
-
           const isFromContract = Boolean(
             b.contract_id ||
             (b.booking_origin &&
               String(b.booking_origin).startsWith("contract")),
           );
-
           if (
             !isFromContract &&
             (b.status === "pending_payment" || b.status === "pending") &&
@@ -609,20 +624,16 @@ export function RoomDetail(props: RoomDetailProps) {
           ) {
             const lockTime = new Date(b.created_at).getTime();
             const now = currentTime;
-
             if (!b.asaas_payment_id && now - lockTime > 6 * 60 * 1000) {
               return false;
             }
-
             if (b.asaas_payment_id && now - lockTime > 30 * 60 * 1000) {
               return false;
             }
           }
-
           const bStart = new Date(b.start_time).getTime();
           const rawBEnd = new Date(b.end_time).getTime();
           const bEnd = rawBEnd > bStart ? rawBEnd : bStart + 50 * 60 * 1000;
-
           return slotStart < bEnd && slotEnd > bStart;
         });
       } catch {
@@ -648,7 +659,6 @@ export function RoomDetail(props: RoomDetailProps) {
 
   const availableSlots = useMemo<string[]>(() => {
     if (!roomData || activeTab !== "hora") return [];
-
     const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
     if (
       Array.isArray(roomData.blocked_dates) &&
@@ -715,7 +725,6 @@ export function RoomDetail(props: RoomDetailProps) {
           const shifts: string[] = Array.isArray(configForDay.selectedShifts)
             ? configForDay.selectedShifts
             : [];
-
           if (shifts.includes("morning"))
             baseSlots.push(
               "08:00 - 08:50",
@@ -776,27 +785,22 @@ export function RoomDetail(props: RoomDetailProps) {
 
   useEffect(() => {
     let isMounted = true;
-
     async function fetchRoomDetails() {
       if (!targetRoomId) {
         if (isMounted) setLoading(false);
         return;
       }
       if (isMounted) setLoading(true);
-
       try {
         const { data, error } = await supabase
           .from("rooms")
           .select("*, profiles:host_id(full_name)")
           .eq("id", targetRoomId)
           .single();
-
         if (error) throw error;
-
         if (isMounted) {
           setRoomData(data);
           const mods = data.modalities || [];
-
           if (preselectedSlotStr && mods.includes("hora")) {
             setActiveTab("hora");
           } else if (mods.includes(initialModality)) {
@@ -813,7 +817,6 @@ export function RoomDetail(props: RoomDetailProps) {
             .select("*")
             .eq("active", true)
             .order("hours", { ascending: true });
-
           const matchingPkgs = (allActivePkgs || []).filter(
             (p: any) => normalizeCreditTier(p.tier) === normalizedRoomTier,
           );
@@ -849,7 +852,6 @@ export function RoomDetail(props: RoomDetailProps) {
         if (isMounted) setLoading(false);
       }
     }
-
     fetchRoomDetails();
     return () => {
       isMounted = false;
@@ -858,11 +860,8 @@ export function RoomDetail(props: RoomDetailProps) {
 
   useEffect(() => {
     if (!roomData?.id) return;
-
     fetchRoomBookings();
-
     const pollInterval = setInterval(fetchRoomBookings, 8000);
-
     const channel = supabase
       .channel(`room_bookings_and_contracts_${roomData.id}`)
       .on(
@@ -890,7 +889,6 @@ export function RoomDetail(props: RoomDetailProps) {
         },
       )
       .subscribe();
-
     return () => {
       clearInterval(pollInterval);
       supabase.removeChannel(channel);
@@ -900,7 +898,6 @@ export function RoomDetail(props: RoomDetailProps) {
   useEffect(() => {
     async function fetchReviews() {
       if (!targetRoomId) return;
-
       setLoadingReviews(true);
       try {
         const { data, error } = await supabase
@@ -908,7 +905,6 @@ export function RoomDetail(props: RoomDetailProps) {
           .select("*, profiles:guest_id(full_name, avatar_url)")
           .eq("room_id", targetRoomId)
           .order("created_at", { ascending: false });
-
         if (error) throw error;
         setReviews(data || []);
       } catch (error) {
@@ -923,19 +919,16 @@ export function RoomDetail(props: RoomDetailProps) {
   useEffect(() => {
     async function checkFavoriteStatus() {
       if (!targetRoomId) return;
-
       const {
         data: { user },
       } = await supabase.auth.getUser();
       if (!user) return;
-
       const { data } = await supabase
         .from("favorites")
         .select("id")
         .eq("user_id", user.id)
         .eq("room_id", targetRoomId)
         .maybeSingle();
-
       if (data) setIsFavorited(true);
     }
     checkFavoriteStatus();
@@ -950,22 +943,17 @@ export function RoomDetail(props: RoomDetailProps) {
     ) {
       return;
     }
-
     hasAppliedPreselectedSlotRef.current = true;
-
     const normalizedPreSlot = normalizeSlotLabel(preselectedSlotStr);
     if (!normalizedPreSlot) return;
-
     if (!availableSlots.includes(normalizedPreSlot)) return;
 
     const dateStr = format(initialTargetDate, "yyyy-MM-dd");
     const targetSlotKey = `${dateStr}|${normalizedPreSlot}`;
-
     if (!isSlotBooked(targetSlotKey) && !isSlotPast(targetSlotKey)) {
       setSelectedSlots([targetSlotKey]);
       setHighlightSchedule(true);
       setTimeout(() => setHighlightSchedule(false), 2000);
-
       setTimeout(() => {
         if (bookingSectionRef.current) {
           bookingSectionRef.current.scrollIntoView({
@@ -984,6 +972,128 @@ export function RoomDetail(props: RoomDetailProps) {
     isSlotBooked,
     isSlotPast,
   ]);
+
+  // Cálculos de preço e campanha (memoizados para evitar re-renders desnecessários no CheckoutModal)
+  const parsedAddress = useMemo(() => {
+    let addr = roomData?.address_details || {};
+    if (typeof addr === "string") {
+      try {
+        addr = JSON.parse(addr);
+      } catch {
+        addr = {};
+      }
+    }
+    return addr;
+  }, [roomData?.address_details]);
+
+  const pricingData = parsedAddress.pricing || {};
+
+  const getBasePrice = useCallback(() => {
+    return Number(pricingData.hourly || 45);
+  }, [pricingData.hourly]);
+
+  const getSlotBasePrice = useCallback(
+    (slotKey: string) => {
+      const commercialRate = Number(pricingData.hourly || 45);
+      const afterHoursRate = pricingData.afterHours
+        ? Number(pricingData.afterHours)
+        : commercialRate;
+      const weekendRate = pricingData.weekend
+        ? Number(pricingData.weekend)
+        : commercialRate;
+      if (!slotKey.includes("|")) return commercialRate;
+      const [dateStr, slotTime] = slotKey.split("|");
+      const dateObj = new Date(`${dateStr}T12:00:00`);
+      const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
+      const startHour = parseInt(slotTime.substring(0, 2), 10);
+      const isAfterHours = startHour >= 18 || startHour < 8;
+      if (isWeekend) return weekendRate;
+      if (isAfterHours) return afterHoursRate;
+      return commercialRate;
+    },
+    [pricingData.hourly, pricingData.afterHours, pricingData.weekend],
+  );
+
+  const getSlotPricingDetails = useCallback(
+    (slotKey: string) => {
+      const basePrice = getSlotBasePrice(slotKey);
+      if (!slotKey.includes("|")) {
+        return {
+          basePrice,
+          finalPrice: basePrice,
+          discountAmount: 0,
+          campaign: null,
+        };
+      }
+      const [dateStr, slotTime] = slotKey.split("|");
+      const dateObj = new Date(`${dateStr}T12:00:00`);
+      const startHour = parseInt(slotTime.substring(0, 2), 10);
+      const campaign = getCampaignForDateAndHour(dateObj, startHour);
+      if (!campaign) {
+        return {
+          basePrice,
+          finalPrice: basePrice,
+          discountAmount: 0,
+          campaign: null,
+        };
+      }
+      let finalPrice = basePrice;
+      if (campaign.type === "percentage") {
+        finalPrice = Math.max(
+          0,
+          basePrice * (1 - campaign.discountValue / 100),
+        );
+      } else if (campaign.type === "fixed") {
+        finalPrice = Math.max(0, basePrice - campaign.discountValue);
+      }
+      return {
+        basePrice,
+        finalPrice: Number(finalPrice.toFixed(2)),
+        discountAmount: Number((basePrice - finalPrice).toFixed(2)),
+        campaign,
+      };
+    },
+    [getSlotBasePrice, getCampaignForDateAndHour],
+  );
+
+  const selectedSlotsBreakdown = useMemo(
+    () => selectedSlots.map((slotKey) => getSlotPricingDetails(slotKey)),
+    [selectedSlots, getSlotPricingDetails],
+  );
+
+  const totalBaseHourlyCost = useMemo(
+    () => selectedSlotsBreakdown.reduce((acc, item) => acc + item.basePrice, 0),
+    [selectedSlotsBreakdown],
+  );
+
+  const totalHourlyCost = useMemo(
+    () =>
+      selectedSlotsBreakdown.reduce((acc, item) => acc + item.finalPrice, 0),
+    [selectedSlotsBreakdown],
+  );
+
+  const totalCampaignDiscountBRL = useMemo(
+    () =>
+      Math.max(0, Number((totalBaseHourlyCost - totalHourlyCost).toFixed(2))),
+    [totalBaseHourlyCost, totalHourlyCost],
+  );
+
+  const matchedAutoCampaign = useMemo(
+    () =>
+      selectedSlotsBreakdown.find((item) => item.campaign?.autoApply)
+        ?.campaign || null,
+    [selectedSlotsBreakdown],
+  );
+
+  const checkoutCampaignInfo = useMemo<CampaignCheckoutInfo | null>(() => {
+    if (!matchedAutoCampaign) return null;
+    return {
+      name: matchedAutoCampaign.campaignName,
+      rulesText: matchedAutoCampaign.rulesText,
+      badgeText: `${matchedAutoCampaign.badgeText} OFF`,
+      discountBRL: totalCampaignDiscountBRL,
+    };
+  }, [matchedAutoCampaign, totalCampaignDiscountBRL]);
 
   if (loading) {
     return (
@@ -1013,83 +1123,7 @@ export function RoomDetail(props: RoomDetailProps) {
     );
   }
 
-  let address = roomData.address_details || {};
-  if (typeof address === "string") {
-    try {
-      address = JSON.parse(address);
-    } catch {
-      address = {};
-    }
-  }
-
-  const pricingData = address.pricing || {};
-
-  const getBasePrice = () => {
-    return Number(pricingData.hourly || 45);
-  };
-
-  const getSlotBasePrice = (slotKey: string) => {
-    const commercialRate = Number(pricingData.hourly || 45);
-    const afterHoursRate = pricingData.afterHours
-      ? Number(pricingData.afterHours)
-      : commercialRate;
-    const weekendRate = pricingData.weekend
-      ? Number(pricingData.weekend)
-      : commercialRate;
-
-    if (!slotKey.includes("|")) return commercialRate;
-
-    const [dateStr, slotTime] = slotKey.split("|");
-    const dateObj = new Date(`${dateStr}T12:00:00`);
-
-    const isWeekend = dateObj.getDay() === 0 || dateObj.getDay() === 6;
-    const startHour = parseInt(slotTime.substring(0, 2), 10);
-    const isAfterHours = startHour >= 18 || startHour < 8;
-
-    if (isWeekend) return weekendRate;
-    if (isAfterHours) return afterHoursRate;
-    return commercialRate;
-  };
-
-  const getSlotPricingDetails = (slotKey: string) => {
-    const basePrice = getSlotBasePrice(slotKey);
-    if (!slotKey.includes("|")) {
-      return {
-        basePrice,
-        finalPrice: basePrice,
-        discountAmount: 0,
-        campaign: null,
-      };
-    }
-
-    const [dateStr, slotTime] = slotKey.split("|");
-    const dateObj = new Date(`${dateStr}T12:00:00`);
-    const startHour = parseInt(slotTime.substring(0, 2), 10);
-
-    const campaign = getCampaignForDateAndHour(dateObj, startHour);
-    if (!campaign) {
-      return {
-        basePrice,
-        finalPrice: basePrice,
-        discountAmount: 0,
-        campaign: null,
-      };
-    }
-
-    let finalPrice = basePrice;
-    if (campaign.type === "percentage") {
-      finalPrice = Math.max(0, basePrice * (1 - campaign.discountValue / 100));
-    } else if (campaign.type === "fixed") {
-      finalPrice = Math.max(0, basePrice - campaign.discountValue);
-    }
-
-    return {
-      basePrice,
-      finalPrice: Number(finalPrice.toFixed(2)),
-      discountAmount: Number((basePrice - finalPrice).toFixed(2)),
-      campaign,
-    };
-  };
+  const address = parsedAddress;
 
   const scrollToBookingSection = () => {
     if (bookingSectionRef.current) {
@@ -1122,9 +1156,7 @@ export function RoomDetail(props: RoomDetailProps) {
         : rawTier.includes("vip")
           ? "vip"
           : "start";
-
     const targetHours = selectedPkgHours ? Number(selectedPkgHours) : null;
-
     try {
       sessionStorage.setItem(
         "fusion_preselect_pass",
@@ -1135,12 +1167,10 @@ export function RoomDetail(props: RoomDetailProps) {
         }),
       );
     } catch {}
-
     if (onOpenFusionPass) {
       onOpenFusionPass(targetTier, targetHours);
       return;
     }
-
     if (typeof window !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("open-fusion-pass", {
@@ -1149,29 +1179,6 @@ export function RoomDetail(props: RoomDetailProps) {
       );
     }
   };
-
-  const selectedSlotsBreakdown = selectedSlots.map((slotKey) =>
-    getSlotPricingDetails(slotKey),
-  );
-
-  const totalBaseHourlyCost = selectedSlotsBreakdown.reduce(
-    (acc, item) => acc + item.basePrice,
-    0,
-  );
-
-  const totalHourlyCost = selectedSlotsBreakdown.reduce(
-    (acc, item) => acc + item.finalPrice,
-    0,
-  );
-
-  const totalCampaignDiscountBRL = Math.max(
-    0,
-    Number((totalBaseHourlyCost - totalHourlyCost).toFixed(2)),
-  );
-
-  const matchedAutoCampaign =
-    selectedSlotsBreakdown.find((item) => item.campaign?.autoApply)?.campaign ||
-    null;
 
   const shiftPrice = selectedShift
     ? Number(pricingData[selectedShift] || 0)
@@ -1200,7 +1207,6 @@ export function RoomDetail(props: RoomDetailProps) {
         data: { user },
         error: authError,
       } = await supabase.auth.getUser();
-
       if (authError || !user) {
         toast({
           title: "Acesso restrito",
@@ -1223,7 +1229,6 @@ export function RoomDetail(props: RoomDetailProps) {
         profile?.address_street &&
         profile?.address_number,
       );
-
       if (!isProfileComplete) {
         setShowProfileModal(true);
         setActionLoading(false);
@@ -1236,9 +1241,7 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         await fetchRoomBookings();
-
         const sortedSlots = [...selectedSlots].sort();
-
         for (const slotKey of sortedSlots) {
           if (isSlotBooked(slotKey)) {
             setSelectedSlots([]);
@@ -1252,11 +1255,9 @@ export function RoomDetail(props: RoomDetailProps) {
           const [dateStr, slotTime] = slotKey.split("|");
           const startSlotStr = slotTime.split(" - ")[0];
           const endSlotStr = slotTime.split(" - ")[1];
-
           const startTime = parseSlotDateHelper(dateStr, startSlotStr);
           const endTime = parseSlotDateHelper(dateStr, endSlotStr);
           const slotPricing = getSlotPricingDetails(slotKey);
-
           return {
             user_id: user.id,
             room_id: roomData.id,
@@ -1269,7 +1270,6 @@ export function RoomDetail(props: RoomDetailProps) {
         });
 
         bookingConfirmedRef.current = false;
-
         const { data: lockedData, error: lockError } = await supabase
           .from("bookings")
           .insert(bookingPayloads)
@@ -1334,7 +1334,6 @@ export function RoomDetail(props: RoomDetailProps) {
         const required = Number(
           summaryData.creditsRequired || selectedSlots.length,
         );
-
         const tierSelection = selectCreditTierForBooking(
           roomData.tier,
           required,
@@ -1344,11 +1343,11 @@ export function RoomDetail(props: RoomDetailProps) {
         setCheckoutSummary({
           ...summaryData,
           usedTier: tierSelection.usedTier,
-          userBalance: tierSelection.availableInChosenTier,
+          currentBalance: tierSelection.availableInChosenTier,
           hasEnoughCredits: tierSelection.hasEnoughCredits,
-          upgradeFee: tierSelection.hasEnoughCredits
+          upgradeFeeBRL: tierSelection.hasEnoughCredits
             ? 0
-            : summaryData.upgradeFee,
+            : summaryData.upgradeFeeBRL,
           lockIds: createdLockIds,
         });
         setIsCheckoutOpen(true);
@@ -1357,7 +1356,6 @@ export function RoomDetail(props: RoomDetailProps) {
           title: "Iniciando negociação...",
           description: "Criando canal seguro com a clínica e a Fusion...",
         });
-
         const { data: existingChat } = await supabase
           .from("chats")
           .select("id")
@@ -1374,15 +1372,12 @@ export function RoomDetail(props: RoomDetailProps) {
             guest_id: user.id,
             host_id: roomData.host_id,
           });
-
           if (insertError) throw insertError;
         }
-
         toast({
           title: "Canal aberto!",
           description: "Redirecionando para as mensagens...",
         });
-
         if (onNavigateToChat) {
           onNavigateToChat();
         } else {
@@ -1408,7 +1403,6 @@ export function RoomDetail(props: RoomDetailProps) {
   ) => {
     if (!checkoutSummary) return;
     setActionLoading(true);
-
     try {
       const {
         data: { user },
@@ -1416,7 +1410,6 @@ export function RoomDetail(props: RoomDetailProps) {
       if (!user) throw new Error("Usuário não autenticado.");
 
       const lockIds: string[] = (checkoutSummary as any).lockIds || [];
-
       let finalCreditsRequired = checkoutSummary.creditsRequired;
       let finalHourlyCost = totalHourlyCost;
 
@@ -1489,7 +1482,6 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         bookingConfirmedRef.current = true;
-
         const { error: walletError } = await supabase
           .from("wallet_transactions")
           .insert({
@@ -1524,7 +1516,6 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         await fetchRoomBookings();
-
         toast({
           title: "Reserva Confirmada!",
           description: "A sala foi agendada e os créditos consumidos.",
@@ -1540,14 +1531,12 @@ export function RoomDetail(props: RoomDetailProps) {
         });
 
         const paymentRef = lockIds[0];
-
         const { error: updateError } = await supabase
           .from("bookings")
           .update({
             status: "pending_payment",
           })
           .in("id", lockIds);
-
         if (updateError) throw updateError;
 
         if (effectiveCouponRecord) {
@@ -1555,7 +1544,6 @@ export function RoomDetail(props: RoomDetailProps) {
             totalCampaignDiscountBRL > 0
               ? totalCampaignDiscountBRL
               : Math.max(0, totalBaseHourlyCost - finalHourlyCost);
-
           if (appliedDiscountValue > 0) {
             await supabase
               .from("coupons")
@@ -1575,12 +1563,10 @@ export function RoomDetail(props: RoomDetailProps) {
 
         let formattedCard = undefined;
         let holderInfo = undefined;
-
         if (method === "card" && cardData) {
           const [expMonth, expYear] = cardData.expiry.split("/");
           const yearFormatted =
             expYear?.length === 2 ? `20${expYear}` : expYear;
-
           formattedCard = {
             holderName: cardData.name.toUpperCase(),
             number: cardData.number.replace(/\D/g, ""),
@@ -1588,13 +1574,11 @@ export function RoomDetail(props: RoomDetailProps) {
             expiryYear: yearFormatted?.trim(),
             ccv: cardData.cvv,
           };
-
           const { data: userProfile } = await supabase
             .from("profiles")
             .select("*")
             .eq("id", user.id)
             .single();
-
           holderInfo = {
             name: cardData.name.toUpperCase(),
             email: user.email || "medico@fusionclinic.com.br",
@@ -1634,7 +1618,6 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         bookingConfirmedRef.current = true;
-
         if (lockIds && lockIds[0]) {
           await Promise.allSettled([
             sendBookingNotificationEmails(lockIds[0]),
@@ -1649,7 +1632,6 @@ export function RoomDetail(props: RoomDetailProps) {
         }
 
         await fetchRoomBookings();
-
         toast({
           title: "Pagamento Aprovado!",
           description: "Sua reserva foi confirmada com sucesso.",
@@ -1674,12 +1656,10 @@ export function RoomDetail(props: RoomDetailProps) {
 
   const handleFavoriteToggle = async () => {
     if (isFavoriteLoading || !roomData) return;
-
     const {
       data: { user },
       error: authError,
     } = await supabase.auth.getUser();
-
     if (authError || !user) {
       toast({
         title: "Acesso restrito",
@@ -1688,7 +1668,6 @@ export function RoomDetail(props: RoomDetailProps) {
       router.push("/login");
       return;
     }
-
     setIsFavoriteLoading(true);
     try {
       if (isFavorited) {
@@ -1811,7 +1790,6 @@ export function RoomDetail(props: RoomDetailProps) {
     start: startOfWeek(monthStart),
     end: endOfWeek(monthEnd),
   });
-
   const canGoPrevMonth = !isBefore(
     startOfMonth(currentMonthView),
     startOfMonth(today),
@@ -1823,11 +1801,11 @@ export function RoomDetail(props: RoomDetailProps) {
   );
   const imagesToShow: string[] = allImages.slice(0, 5);
   const totalImages = imagesToShow.length;
+
   const isPartner = roomData.is_partner === true;
   const roomModalities: string[] = Array.isArray(roomData.modalities)
     ? roomData.modalities
     : [];
-
   const displayAmenities: string[] =
     Array.isArray(address.amenities) && address.amenities.length > 0
       ? address.amenities
@@ -1850,9 +1828,7 @@ export function RoomDetail(props: RoomDetailProps) {
   const mapSearchQuery = encodeURIComponent(
     `${address.neighborhood || ""}, ${address.city || ""}`,
   );
-
   const clinicHostName = roomData.profiles?.full_name || "Equipe Fusion Clinic";
-
   const avgRating =
     reviews.length > 0
       ? (
@@ -1908,26 +1884,35 @@ export function RoomDetail(props: RoomDetailProps) {
 
   return (
     <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-in slide-in-from-bottom-4 duration-300">
+      {/* Modal de Regulamento da Campanha */}
+      <CampaignRulesModal
+        isOpen={Boolean(rulesModalData)}
+        onClose={() => setRulesModalData(null)}
+        campaignName={rulesModalData?.name}
+        rulesText={rulesModalData?.rulesText}
+        badgeText={rulesModalData?.badgeText}
+      />
+
       {/* TOP BAR LIMPA */}
       <div className="flex-none bg-white z-30 border-b border-slate-100 md:border-transparent">
         <div className="max-w-5xl mx-auto pt-5 px-5 flex justify-between items-center pb-3.5">
           <button
             onClick={onBack}
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 text-slate-900 transition-colors hover:bg-slate-50"
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 text-slate-900 transition-colors hover:bg-slate-50 cursor-pointer"
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex items-center gap-2.5">
             <button
               onClick={handleShare}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50"
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50 cursor-pointer"
             >
               <Share className="w-4 h-4 text-slate-900" />
             </button>
             <button
               onClick={handleFavoriteToggle}
               disabled={isFavoriteLoading}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50 disabled:opacity-50"
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-white border border-slate-200 transition-colors hover:bg-slate-50 disabled:opacity-50 cursor-pointer"
             >
               <Heart
                 className={`w-5 h-5 transition-colors ${
@@ -1948,7 +1933,6 @@ export function RoomDetail(props: RoomDetailProps) {
               Espaço Verificado • Fusion Partner
             </div>
           )}
-
           <div className="flex justify-between items-start gap-4 mb-2">
             <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight leading-tight">
               {roomData.name || "Consultório"}
@@ -1963,7 +1947,6 @@ export function RoomDetail(props: RoomDetailProps) {
               </span>
             </div>
           </div>
-
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs md:text-sm text-slate-600">
             <div className="flex items-center gap-1 font-semibold text-slate-700">
               <MapPin className="w-3.5 h-3.5 text-[#BF4B24]" />
@@ -2054,7 +2037,6 @@ export function RoomDetail(props: RoomDetailProps) {
                     const slotKey = `${format(selectedDate, "yyyy-MM-dd")}|${slotTime}`;
                     const isSelected = selectedSlots.includes(slotKey);
                     const pricing = getSlotPricingDetails(slotKey);
-
                     return (
                       <button
                         key={slotKey}
@@ -2168,7 +2150,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         Economize até {maxDiscountPct}% nesta sala
                       </span>
                     </div>
-
                     <h3 className="text-sm sm:text-base font-bold text-stone-900 pt-0.5">
                       Atenda aqui por{" "}
                       <span className="text-[#BF4B24] font-black">
@@ -2181,13 +2162,11 @@ export function RoomDetail(props: RoomDetailProps) {
                         avulso)
                       </span>
                     </h3>
-
                     <p className="text-xs text-stone-500">
                       Toque para simular seu pacote de horas e ver como funciona
                       o desconto
                     </p>
                   </div>
-
                   <button
                     type="button"
                     className="px-3.5 py-2 rounded-xl bg-white border border-stone-200/90 text-xs font-bold text-[#BF4B24] shrink-0 flex items-center gap-1 shadow-2xs"
@@ -2218,7 +2197,6 @@ export function RoomDetail(props: RoomDetailProps) {
                           const pr = Number(pkg.price) || 0;
                           const total = h > 1 && pr <= 120 ? pr * h : pr;
                           const hrRate = total / h;
-
                           return (
                             <button
                               key={pkg.id || pkg.hours}
@@ -2256,7 +2234,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         0,
                         avulsoTotalBRL - pkgTotalBRL,
                       );
-
                       return (
                         <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                           <div className="space-y-0.5">
@@ -2280,7 +2257,6 @@ export function RoomDetail(props: RoomDetailProps) {
                               })}
                             </p>
                           </div>
-
                           {savingsBRL > 0 && (
                             <div className="bg-emerald-50 border border-emerald-200/70 px-3 py-2 rounded-xl text-left sm:text-right shrink-0">
                               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 block">
@@ -2311,7 +2287,6 @@ export function RoomDetail(props: RoomDetailProps) {
                           Sem fidelidade e sem multa.
                         </span>
                       </div>
-
                       <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#FAF7F5]/60 border border-stone-200/60">
                         <CalendarClock className="w-3.5 h-3.5 text-[#BF4B24] shrink-0 mt-0.5" />
                         <span>
@@ -2321,7 +2296,6 @@ export function RoomDetail(props: RoomDetailProps) {
                           Créditos liberados na hora na carteira.
                         </span>
                       </div>
-
                       <div className="flex items-start gap-2 p-2.5 rounded-xl bg-[#FAF7F5]/60 border border-stone-200/60">
                         <ArrowLeftRight className="w-3.5 h-3.5 text-[#BF4B24] shrink-0 mt-0.5" />
                         <span>
@@ -2421,7 +2395,6 @@ export function RoomDetail(props: RoomDetailProps) {
                   </div>
                 </div>
               </div>
-
               <div className="bg-stone-50 rounded-xl p-3.5 mt-3 border border-stone-200/70 flex items-start gap-3">
                 <Lock className="w-4 h-4 text-slate-600 shrink-0 mt-0.5" />
                 <p className="text-xs text-slate-600 leading-relaxed">
@@ -2506,38 +2479,80 @@ export function RoomDetail(props: RoomDetailProps) {
                     </div>
                   </div>
 
+                  {/* BANNER DA CAMPANHA COM BOTÃO "LER REGRAS" */}
                   {selectedDayCampaign ? (
-                    <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 flex items-center justify-between gap-2 shadow-md">
-                      <div className="flex items-center gap-2">
-                        <Flame className="w-4 h-4 text-amber-400 fill-amber-400 shrink-0" />
-                        <div>
-                          <span className="text-[11px] font-black text-white block uppercase tracking-wide">
-                            {selectedDayCampaign.campaignName}
-                          </span>
-                          <span className="text-[10px] font-medium text-slate-300 block">
-                            {selectedDayCampaign.eligibleHoursForDay.length > 0
-                              ? `Horários em oferta hoje: ${selectedDayCampaign.eligibleHoursForDay
-                                  .map((h) => `${String(h).padStart(2, "0")}h`)
-                                  .join(", ")}`
-                              : "Horários selecionados com desconto especial!"}
-                          </span>
+                    <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 space-y-2 shadow-md">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Flame className="w-4 h-4 text-amber-400 fill-amber-400 shrink-0" />
+                          <div className="min-w-0">
+                            <span className="text-[11px] font-black text-white block uppercase tracking-wide truncate">
+                              {selectedDayCampaign.campaignName}
+                            </span>
+                            <span className="text-[10px] font-medium text-slate-300 block">
+                              {selectedDayCampaign.eligibleHoursForDay.length >
+                              0
+                                ? `Horários em oferta hoje: ${selectedDayCampaign.eligibleHoursForDay
+                                    .map(
+                                      (h) => `${String(h).padStart(2, "0")}h`,
+                                    )
+                                    .join(", ")}`
+                                : "Horários selecionados com desconto especial!"}
+                            </span>
+                          </div>
                         </div>
+                        <span className="px-2 py-0.5 rounded-md bg-white text-slate-900 text-[10px] font-black shrink-0">
+                          {selectedDayCampaign.badgeText} OFF
+                        </span>
                       </div>
-                      <span className="px-2 py-0.5 rounded-md bg-white text-slate-900 text-[10px] font-black shrink-0">
-                        {selectedDayCampaign.badgeText} OFF
-                      </span>
+
+                      {selectedDayCampaign.rulesText && (
+                        <div className="pt-1.5 border-t border-white/10 flex items-center justify-between">
+                          <span className="text-[10px] text-slate-400">
+                            Consulte prazo de uso e remarcação:
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setRulesModalData({
+                                name: selectedDayCampaign.campaignName,
+                                rulesText: selectedDayCampaign.rulesText!,
+                                badgeText: `${selectedDayCampaign.badgeText} OFF`,
+                              })
+                            }
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-2 cursor-pointer shrink-0"
+                          >
+                            <ScrollText className="w-3 h-3" />
+                            <span>Ler regras</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     roomCampaigns.length > 0 && (
-                      <div className="mb-3 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-950 text-[11px] font-medium text-white flex items-center gap-2 shadow-sm">
-                        <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span>
-                          Toque nos{" "}
-                          <strong className="text-amber-400">
-                            dias em preto
-                          </strong>{" "}
-                          no calendário para ver horários com desconto!
-                        </span>
+                      <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 text-[11px] font-medium text-white flex items-center justify-between gap-2 shadow-sm">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Flame className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          <span>
+                            Toque nos{" "}
+                            <strong className="text-amber-400">
+                              dias em preto
+                            </strong>{" "}
+                            no calendário para ver horários com desconto!
+                          </span>
+                        </div>
+                        {firstRoomCampaignWithRules && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setRulesModalData(firstRoomCampaignWithRules)
+                            }
+                            className="inline-flex items-center gap-1 text-[10px] font-bold text-[#FBBF24] hover:text-amber-300 underline underline-offset-2 cursor-pointer shrink-0"
+                          >
+                            <ScrollText className="w-3 h-3" />
+                            <span>Regras</span>
+                          </button>
+                        )}
                       </div>
                     )
                   )}
@@ -2601,7 +2616,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         <ChevronRight className="w-4 h-4" />
                       </button>
                     </div>
-
                     <div className="grid grid-cols-7 text-center mb-1.5">
                       {["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"].map(
                         (d: string) => (
@@ -2614,7 +2628,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         ),
                       )}
                     </div>
-
                     <div className="grid grid-cols-7 gap-y-1.5 gap-x-1">
                       {calendarDays.map((day: Date) => {
                         const dateStr = format(day, "yyyy-MM-dd");
@@ -2628,12 +2641,10 @@ export function RoomDetail(props: RoomDetailProps) {
                         const hasSelection = selectedSlots.some(
                           (slotKey: string) => slotKey.startsWith(dateStr),
                         );
-
                         const dayCampaign =
                           !isPast && isCurrentMonth
                             ? getCampaignForDateAndHour(day)
                             : null;
-
                         return (
                           <button
                             key={day.toISOString()}
@@ -2663,7 +2674,6 @@ export function RoomDetail(props: RoomDetailProps) {
                             <span className="relative z-10 leading-none">
                               {format(day, "d")}
                             </span>
-
                             {dayCampaign && !hasSelection && (
                               <span
                                 className={`text-[8px] font-black leading-none mt-0.5 ${
@@ -2675,7 +2685,6 @@ export function RoomDetail(props: RoomDetailProps) {
                                 {dayCampaign.badgeText}
                               </span>
                             )}
-
                             {hasSelection && (
                               <span className="absolute bottom-1 w-1.5 h-1.5 rounded-full bg-white" />
                             )}
@@ -2683,7 +2692,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         );
                       })}
                     </div>
-
                     {roomCampaigns.length > 0 && (
                       <div className="mt-2.5 pt-2 border-t border-stone-200/70 flex items-center justify-center gap-2 text-[10px] font-bold text-slate-800">
                         <span className="w-2 h-2 rounded-full bg-slate-900" />
@@ -2728,7 +2736,6 @@ export function RoomDetail(props: RoomDetailProps) {
                         const pricing = getSlotPricingDetails(slotKey);
                         const hasPromo =
                           !isUnavailable && Boolean(pricing.campaign);
-
                         return (
                           <button
                             key={slotKey}
@@ -2752,7 +2759,6 @@ export function RoomDetail(props: RoomDetailProps) {
                                 {pricing.campaign?.badgeText} OFF
                               </span>
                             )}
-
                             <span
                               className={`text-xs font-bold ${
                                 isUnavailable
@@ -2764,7 +2770,6 @@ export function RoomDetail(props: RoomDetailProps) {
                             >
                               {slotTime}
                             </span>
-
                             {isUnavailable ? (
                               <span className="text-[10px] font-medium text-slate-400 mt-0.5">
                                 Ocupado
@@ -2851,7 +2856,7 @@ export function RoomDetail(props: RoomDetailProps) {
                     <Button
                       onClick={handleAction}
                       disabled={actionLoading}
-                      className="w-full h-12 rounded-xl font-bold transition-all text-sm bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-xs"
+                      className="w-full h-12 rounded-xl font-bold transition-all text-sm bg-[#BF4B24] hover:bg-[#9A3C1D] text-white shadow-xs cursor-pointer"
                     >
                       {actionLoading
                         ? "Processando..."
@@ -3050,7 +3055,7 @@ export function RoomDetail(props: RoomDetailProps) {
                     <button
                       key={star}
                       onClick={() => setReviewFilter(star)}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 flex items-center gap-1 border ${
+                      className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all shrink-0 flex items-center gap-1 border ${
                         reviewFilter === star
                           ? "bg-stone-100 text-slate-900 border-slate-300"
                           : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
@@ -3090,7 +3095,6 @@ export function RoomDetail(props: RoomDetailProps) {
                 {filteredReviews.map((review: any) => {
                   const hasComment =
                     review.comment && review.comment.trim().length > 0;
-
                   return (
                     <div
                       key={review.id}
@@ -3132,13 +3136,11 @@ export function RoomDetail(props: RoomDetailProps) {
                           </span>
                         </div>
                       </div>
-
                       {hasComment && (
                         <p className="text-slate-600 text-sm leading-relaxed">
                           &ldquo;{review.comment}&rdquo;
                         </p>
                       )}
-
                       {review.host_reply && (
                         <div className="mt-3.5 p-3.5 bg-stone-50 rounded-xl border border-stone-200/70">
                           <p className="text-xs font-bold text-slate-800 mb-1 flex items-center gap-1">
@@ -3192,7 +3194,7 @@ export function RoomDetail(props: RoomDetailProps) {
             )}
           </div>
           {activeTab === "hora" && totalCampaignDiscountBRL > 0 ? (
-            <span className="text-[11px] font-bold text-slate-900 block flex items-center gap-1 mt-0.5">
+            <span className="text-[11px] font-bold text-slate-900 flex items-center gap-1 mt-0.5">
               <Flame className="w-3 h-3 text-[#BF4B24]" />
               Economia de R${" "}
               {totalCampaignDiscountBRL.toFixed(2).replace(".", ",")} aplicada
@@ -3429,6 +3431,7 @@ export function RoomDetail(props: RoomDetailProps) {
         pixQrCode={pixQrCode}
         pixCopyPaste={pixCopyPaste}
         activeBookingId={activeBookingId}
+        campaignInfo={checkoutCampaignInfo}
       />
     </div>
   );
