@@ -9,7 +9,6 @@ import {
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-
 const supabaseAdmin = createAdminClient(
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -18,37 +17,28 @@ const supabaseAdmin = createAdminClient(
   },
 );
 
-// ============================================================================
-// RESOLVEDOR INTELIGENTE DE CREDENCIAIS E AMBIENTE DO ASAAS
-// ============================================================================
 function getAsaasConfig() {
   const rawKey =
     process.env.ASAAS_API_KEY ||
     process.env.ASAAS_ACCESS_TOKEN ||
     process.env.ASAAS_TOKEN ||
     "";
-
   let apiKey = rawKey.trim().replace(/^["']|["']$/g, "");
-
   if (!apiKey) {
     throw new Error(
       "A variável ASAAS_API_KEY está vazia no seu ficheiro .env. Adicione ASAAS_API_KEY='$aact_...' e reinicie o servidor.",
     );
   }
-
   if (apiKey.startsWith("::") || apiKey.startsWith(":")) {
     throw new Error(
       "O Next.js cortou o início '$aact' da sua chave no .env! Coloque a chave entre ASPAS SIMPLES no .env (ex: ASAAS_API_KEY='$aact_...') e reinicie o terminal.",
     );
   }
-
   if (apiKey.startsWith("\\$")) {
     apiKey = apiKey.slice(1);
   }
-
   const isSandboxKey = apiKey.toLowerCase().includes("hmlg");
   const envUrl = (process.env.ASAAS_API_URL || "").trim().replace(/\/+$/, "");
-
   let apiUrl = envUrl;
   if (!apiUrl) {
     apiUrl = isSandboxKey
@@ -63,13 +53,123 @@ function getAsaasConfig() {
   ) {
     apiUrl = "https://api.asaas.com/v3";
   }
-
   return { apiKey, apiUrl };
 }
 
-// ============================================================================
-// Helper Idempotente: Ativa a assinatura e injeta as horas
-// ============================================================================
+/**
+ * Grava em `coupon_uses` e atualiza `coupons.current_uses` via Service Role (imune a RLS)
+ * somente para reservas efetivamente confirmadas vinculadas a uma campanha ou cupom.
+ */
+async function syncCouponUsesForConfirmedBookings(bookingIds: string[]) {
+  try {
+    if (!bookingIds || bookingIds.length === 0) return;
+
+    const { data: confirmedBookings } = await supabaseAdmin
+      .from("bookings")
+      .select(
+        "id, user_id, room_id, start_time, total_cost, agreed_value_brl, booking_origin, status, created_at",
+      )
+      .in("id", bookingIds)
+      .in("status", ["confirmed", "in_progress", "completed"]);
+
+    if (!confirmedBookings || confirmedBookings.length === 0) return;
+
+    const taggedBookings = confirmedBookings.filter((b: any) => {
+      const origin = String(b.booking_origin || "");
+      return origin.startsWith("campaign_") || origin.startsWith("coupon_");
+    });
+
+    if (taggedBookings.length === 0) return;
+
+    const roomIds = Array.from(
+      new Set(taggedBookings.map((b: any) => b.room_id).filter(Boolean)),
+    );
+    const { data: roomsData } = await supabaseAdmin
+      .from("rooms")
+      .select("id, address_details")
+      .in("id", roomIds);
+    const roomsMap = new Map<string, any>(
+      (roomsData || []).map((r: any) => [r.id, r]),
+    );
+
+    const affectedCouponIds = new Set<string>();
+
+    for (const b of taggedBookings) {
+      const origin = String(b.booking_origin || "");
+      const couponId = origin.replace(/^campaign_|^coupon_/, "").trim();
+      if (!couponId) continue;
+
+      const { data: existingUse } = await supabaseAdmin
+        .from("coupon_uses")
+        .select("id")
+        .eq("coupon_id", couponId)
+        .eq("booking_id", b.id)
+        .limit(1);
+
+      if (existingUse && existingUse.length > 0) {
+        affectedCouponIds.add(couponId);
+        continue;
+      }
+
+      const room = roomsMap.get(b.room_id);
+      let addr = room?.address_details || {};
+      if (typeof addr === "string") {
+        try {
+          addr = JSON.parse(addr);
+        } catch {
+          addr = {};
+        }
+      }
+      const pricing = addr?.pricing || {};
+      const brDate = new Date(
+        new Date(b.start_time).getTime() - 3 * 60 * 60 * 1000,
+      );
+      const dow = brDate.getUTCDay();
+      const hour = brDate.getUTCHours();
+      const commercial = Number(pricing.hourly || 45);
+      const basePrice =
+        dow === 0 || dow === 6
+          ? Number(pricing.weekend || commercial)
+          : hour >= 18 || hour < 8
+            ? Number(pricing.afterHours || commercial)
+            : commercial;
+
+      const rawTotal = Number(b.total_cost || 0);
+      const rawAgreed = Number(b.agreed_value_brl || 0);
+      const paidBrl = rawTotal >= 10 ? rawTotal : rawAgreed;
+      const discountApplied = Math.max(
+        0,
+        Number((basePrice - paidBrl).toFixed(2)),
+      );
+
+      await supabaseAdmin.from("coupon_uses").insert({
+        coupon_id: couponId,
+        user_id: b.user_id,
+        booking_id: b.id,
+        discount_applied: discountApplied,
+        used_at: b.created_at || new Date().toISOString(),
+      });
+
+      affectedCouponIds.add(couponId);
+    }
+
+    for (const cid of affectedCouponIds) {
+      const { count } = await supabaseAdmin
+        .from("coupon_uses")
+        .select("id", { count: "exact", head: true })
+        .eq("coupon_id", cid);
+
+      if (typeof count === "number") {
+        await supabaseAdmin
+          .from("coupons")
+          .update({ current_uses: count })
+          .eq("id", cid);
+      }
+    }
+  } catch (err) {
+    console.error("[Checkout] Erro ao sincronizar uso de campanha:", err);
+  }
+}
 
 async function activateSubscriptionAndCreditWallet(params: {
   userId: string;
@@ -90,13 +190,11 @@ async function activateSubscriptionAndCreditWallet(params: {
     paymentMethod,
     packageName,
   } = params;
-
   const normalizedTier = String(tier || "start").toLowerCase().trim();
   const numHours = Math.max(1, Number(hours || 1));
   const numPrice = Number(priceBrl || 0);
   const unitHourlyRate =
     numPrice > 0 ? (numPrice / numHours).toFixed(4) : "0.0000";
-
   const idempotencyTag = `[Asaas:${paymentId}]`;
   const paidTag = numPrice > 0 ? `[Paid:${numPrice.toFixed(2)}]` : "";
   const rateTag = Number(unitHourlyRate) > 0 ? `[Rate:${unitHourlyRate}]` : "";
@@ -110,7 +208,6 @@ async function activateSubscriptionAndCreditWallet(params: {
     .eq("user_id", userId)
     .ilike("description", `%${idempotencyTag}%`)
     .limit(1);
-
   if (existingTx && existingTx.length > 0) {
     return { alreadyCredited: true };
   }
@@ -131,7 +228,6 @@ async function activateSubscriptionAndCreditWallet(params: {
   const expiresAt = new Date(
     Date.now() + 30 * 24 * 60 * 60 * 1000,
   ).toISOString();
-
   const description = `Assinatura ${packageName || `Fusion Pass (${normalizedTier.toUpperCase()})`} - +${numHours}h ${viaTag} ${paidTag} ${rateTag} ${idempotencyTag}`;
 
   const { error: walletErr } = await supabaseAdmin
@@ -144,7 +240,6 @@ async function activateSubscriptionAndCreditWallet(params: {
       description,
       expires_at: expiresAt,
     });
-
   if (walletErr) {
     throw new Error(`Erro ao creditar carteira: ${walletErr.message}`);
   }
@@ -172,9 +267,6 @@ async function activateSubscriptionAndCreditWallet(params: {
   return { alreadyCredited: false };
 }
 
-// ============================================================================
-// GET: Polling de Reconciliação Ativa (Suporta Reservas e Assinaturas PIX)
-// ============================================================================
 export async function GET(request: Request) {
   try {
     const { apiKey, apiUrl } = getAsaasConfig();
@@ -183,17 +275,14 @@ export async function GET(request: Request) {
     const bookingId = searchParams.get("bookingId");
     const paymentId = searchParams.get("paymentId");
 
-    // FLUXO A: POLLING DE ASSINATURA / PACOTE (FUSION PASS+)
     if (checkoutType === "package" && paymentId) {
       const supabase = await createClient();
       const {
         data: { user },
       } = await supabase.auth.getUser();
-
       if (!user) {
         return NextResponse.json({ error: "Não autenticado" }, { status: 401 });
       }
-
       const tier = searchParams.get("tier") || "start";
       const hours = Number(searchParams.get("hours") || 8);
       const price = Number(searchParams.get("price") || 0);
@@ -206,10 +295,8 @@ export async function GET(request: Request) {
         },
         cache: "no-store",
       });
-
       if (asaasRes.ok) {
         const paymentData = await asaasRes.json();
-
         if (
           paymentData.status === "RECEIVED" ||
           paymentData.status === "CONFIRMED"
@@ -223,18 +310,15 @@ export async function GET(request: Request) {
             paymentMethod: "PIX",
             packageName,
           });
-
           return NextResponse.json({
             confirmed: true,
             status: "confirmed",
           });
         }
       }
-
       return NextResponse.json({ confirmed: false, status: "pending" });
     }
 
-    // FLUXO B: POLLING DE RESERVA DE SALA
     if (!bookingId) {
       return NextResponse.json(
         { error: "bookingId ou paymentId é obrigatório." },
@@ -273,26 +357,31 @@ export async function GET(request: Request) {
           cache: "no-store",
         },
       );
-
       if (asaasRes.ok) {
         const paymentData = await asaasRes.json();
-
         if (
           paymentData.status === "RECEIVED" ||
           paymentData.status === "CONFIRMED"
         ) {
-          await supabaseAdmin
+          const { data: samePayBookings } = await supabaseAdmin
             .from("bookings")
-            .update({ status: "confirmed" })
+            .select("id")
             .eq("asaas_payment_id", booking.asaas_payment_id);
 
+          const confirmedIds = Array.from(
+            new Set([
+              bookingId,
+              ...(samePayBookings || []).map((x: any) => x.id),
+            ]),
+          );
+
           await supabaseAdmin
             .from("bookings")
             .update({ status: "confirmed" })
-            .eq("id", bookingId);
+            .in("id", confirmedIds);
 
+          await syncCouponUsesForConfirmedBookings(confirmedIds);
           sendBookingNotificationEmails(bookingId).catch(console.error);
-
           return NextResponse.json({ confirmed: true, status: "confirmed" });
         }
       }
@@ -304,9 +393,6 @@ export async function GET(request: Request) {
   }
 }
 
-// ============================================================================
-// Helper: Busca ou Cria Cliente no Asaas garantindo CPF válido
-// ============================================================================
 async function getOrCreateAsaasCustomer(params: {
   apiKey: string;
   apiUrl: string;
@@ -325,7 +411,6 @@ async function getOrCreateAsaasCustomer(params: {
     fallbackCpf,
     fallbackCep,
   } = params;
-
   const cleanCpf = (fallbackCpf || profile?.cpf || "").replace(/\D/g, "");
   const cleanCep = (fallbackCep || profile?.cep || "").replace(/\D/g, "");
 
@@ -346,14 +431,12 @@ async function getOrCreateAsaasCustomer(params: {
   }
 
   let asaasCustomerId = "";
-
   const searchRes = await fetch(`${apiUrl}/customers?cpfCnpj=${cleanCpf}`, {
     headers: {
       access_token: apiKey,
       "User-Agent": "FusionClinic/1.0",
     },
   });
-
   if (searchRes.ok) {
     const searchData = await searchRes.json();
     if (searchData.data && searchData.data.length > 0) {
@@ -387,7 +470,6 @@ async function getOrCreateAsaasCustomer(params: {
           undefined,
       }),
     });
-
     const customerResult = await createCustomerRes.json();
     if (!createCustomerRes.ok) {
       throw new Error(
@@ -401,19 +483,14 @@ async function getOrCreateAsaasCustomer(params: {
   return { asaasCustomerId, cleanCpf, cleanCep };
 }
 
-// ============================================================================
-// POST: Processa Assinaturas Recorrentes (Fusion Pass+) e Reservas Avulsas
-// ============================================================================
 export async function POST(request: Request) {
   try {
     const { apiKey, apiUrl } = getAsaasConfig();
-
     const supabase = await createClient();
     const {
       data: { user },
       error: authError,
     } = await supabase.auth.getUser();
-
     if (authError || !user) {
       return NextResponse.json(
         { error: "Utilizador não autenticado." },
@@ -435,6 +512,7 @@ export async function POST(request: Request) {
       cardData,
       customerCpf,
       customerCep,
+      couponId,
     } = body;
 
     const { data: profile } = await supabaseAdmin
@@ -445,9 +523,6 @@ export async function POST(request: Request) {
       .eq("id", user.id)
       .single();
 
-    // ========================================================================
-    // ROTA 1: ASSINATURA RECORRENTE MENSAL DO FUSION PASS+ (checkoutType === "package")
-    // ========================================================================
     if (checkoutType === "package" || checkoutType === "subscription") {
       const numHours = Number(hours || 0);
       const numPrice = Number(price || 0);
@@ -473,7 +548,6 @@ export async function POST(request: Request) {
         });
 
       const todayIso = new Date().toISOString().split("T")[0];
-      // Todas as faturas futuras geradas pelo Asaas herdam este externalReference!
       const externalRef = `sub_${user.id}_${selectedTier}_${numHours}h_${Date.now()}`;
 
       const subscriptionPayload: Record<string, any> = {
@@ -495,14 +569,12 @@ export async function POST(request: Request) {
             "",
           );
           const finalCpf = (cardData.cpf || cleanCpf).replace(/\D/g, "");
-
           if (!finalCpf) {
             return NextResponse.json(
               { error: "Informe o CPF do titular do cartão." },
               { status: 400 },
             );
           }
-
           subscriptionPayload.creditCard = creditCard;
           subscriptionPayload.creditCardHolderInfo = {
             name: creditCard.holderName,
@@ -526,7 +598,6 @@ export async function POST(request: Request) {
         }
       }
 
-      // 1. Cria a Assinatura Recorrente no Asaas (/v3/subscriptions)
       const subRes = await fetch(`${apiUrl}/subscriptions`, {
         method: "POST",
         headers: {
@@ -536,7 +607,6 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify(subscriptionPayload),
       });
-
       const subResult = await subRes.json();
       if (!subRes.ok) {
         throw new Error(
@@ -560,7 +630,6 @@ export async function POST(request: Request) {
           .eq("id", user.id);
       }
 
-      // 2. Busca a primeira cobrança gerada pela assinatura no Asaas
       const subPaymentsRes = await fetch(
         `${apiUrl}/subscriptions/${subResult.id}/payments`,
         {
@@ -580,7 +649,6 @@ export async function POST(request: Request) {
             "Assinatura criada, mas a fatura PIX inicial não foi localizada.",
           );
         }
-
         const pixRes = await fetch(
           `${apiUrl}/payments/${firstPayment.id}/pixQrCode`,
           {
@@ -597,7 +665,6 @@ export async function POST(request: Request) {
               "Erro ao gerar QR Code PIX da assinatura.",
           );
         }
-
         return NextResponse.json({
           success: true,
           subscriptionId: subResult.id,
@@ -625,9 +692,7 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
-
         const paymentIdForRecord = firstPayment?.id || subResult.id;
-
         await activateSubscriptionAndCreditWallet({
           userId: user.id,
           tier: selectedTier,
@@ -638,7 +703,6 @@ export async function POST(request: Request) {
           paymentMethod: "CREDIT_CARD",
           packageName: packageName || "Fusion Pass+",
         });
-
         return NextResponse.json({
           success: true,
           subscriptionId: subResult.id,
@@ -654,16 +718,13 @@ export async function POST(request: Request) {
       });
     }
 
-    // ========================================================================
     // ROTA 2: RESERVA AVULSA DE SALA
-    // ========================================================================
     const targetIds: string[] =
       Array.isArray(bookingIds) && bookingIds.length > 0
         ? bookingIds
         : paymentRef
           ? [paymentRef]
           : [];
-
     if (targetIds.length === 0 || !price) {
       return NextResponse.json(
         { error: "Dados incompletos para a reserva." },
@@ -672,12 +733,10 @@ export async function POST(request: Request) {
     }
 
     const primaryBookingId = targetIds[0];
-
     const { data: targetBookings, error: bErr } = await supabaseAdmin
       .from("bookings")
-      .select("id, room_id, start_time, end_time, status")
+      .select("id, room_id, start_time, end_time, status, booking_origin")
       .in("id", targetIds);
-
     if (bErr || !targetBookings || targetBookings.length === 0) {
       return NextResponse.json(
         { error: "Reserva base não encontrada." },
@@ -687,7 +746,6 @@ export async function POST(request: Request) {
 
     const booking = targetBookings[0];
     const nowMs = Date.now();
-
     for (const tb of targetBookings) {
       const { data: conflicts } = await supabaseAdmin
         .from("bookings")
@@ -711,7 +769,6 @@ export async function POST(request: Request) {
         }
         return false;
       });
-
       if (isTaken) {
         await supabaseAdmin
           .from("bookings")
@@ -748,7 +805,6 @@ export async function POST(request: Request) {
       .maybeSingle();
 
     let recipientWalletId: string | null = null;
-
     if (activeCohostContract?.specialist_id) {
       const { data: cohostProfile } = await supabaseAdmin
         .from("profiles")
@@ -800,15 +856,12 @@ export async function POST(request: Request) {
         paymentPayload.creditCardToken = profile.cc_token;
       } else if (creditCard && cardData) {
         paymentPayload.creditCard = creditCard;
-
         let finalCpf = cleanCpf;
         let finalCep = cleanCep;
-
         if (cardData.isThirdParty) {
           finalCpf = cardData.cpf?.replace(/\D/g, "") || finalCpf;
           finalCep = cardData.cep?.replace(/\D/g, "") || finalCep;
         }
-
         if (!finalCpf || !finalCep) {
           return NextResponse.json(
             {
@@ -818,7 +871,6 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
-
         paymentPayload.creditCardHolderInfo = {
           name: creditCard.holderName,
           email: profile?.email || user.email,
@@ -845,7 +897,6 @@ export async function POST(request: Request) {
       },
       body: JSON.stringify(paymentPayload),
     });
-
     const paymentResult = await createPaymentRes.json();
     if (!createPaymentRes.ok) {
       throw new Error(
@@ -862,6 +913,19 @@ export async function POST(request: Request) {
       })
       .in("id", targetIds);
 
+    // Se veio um cupom manual aplicado no checkout e o slot ainda não tem tag de campanha, marca com coupon_<id>
+    if (couponId) {
+      const idsWithoutCampaignTag = targetBookings
+        .filter((tb: any) => !String(tb.booking_origin || "").startsWith("campaign_"))
+        .map((tb: any) => tb.id);
+      if (idsWithoutCampaignTag.length > 0) {
+        await supabaseAdmin
+          .from("bookings")
+          .update({ booking_origin: `coupon_${couponId}` })
+          .in("id", idsWithoutCampaignTag);
+      }
+    }
+
     if (billingType === "PIX") {
       const pixRes = await fetch(
         `${apiUrl}/payments/${paymentResult.id}/pixQrCode`,
@@ -874,7 +938,6 @@ export async function POST(request: Request) {
       );
       const pixData = await pixRes.json();
       if (!pixRes.ok) throw new Error("Erro ao buscar QR Code PIX.");
-
       return NextResponse.json({
         success: true,
         paymentId: paymentResult.id,
@@ -897,7 +960,6 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
-
       if (cardData?.saveCard && paymentResult.creditCard?.creditCardToken) {
         await supabaseAdmin
           .from("profiles")
@@ -908,7 +970,6 @@ export async function POST(request: Request) {
           })
           .eq("id", user.id);
       }
-
       if (
         paymentResult.status === "CONFIRMED" ||
         paymentResult.status === "RECEIVED"
@@ -917,6 +978,8 @@ export async function POST(request: Request) {
           .from("bookings")
           .update({ status: "confirmed" })
           .in("id", targetIds);
+
+        await syncCouponUsesForConfirmedBookings(targetIds);
         sendBookingNotificationEmails(primaryBookingId).catch(console.error);
         return NextResponse.json({
           success: true,
@@ -924,7 +987,6 @@ export async function POST(request: Request) {
           status: "CONFIRMED",
         });
       }
-
       if (paymentResult.status === "PENDING") {
         return NextResponse.json({
           success: true,

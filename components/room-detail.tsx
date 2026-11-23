@@ -1,4 +1,3 @@
-// components/room-detail.tsx
 "use client";
 
 import { useEffect, useState, useRef, useMemo, useCallback } from "react";
@@ -1260,6 +1259,9 @@ export function RoomDetail(props: RoomDetailProps) {
             total_cost: slotPricing.finalPrice,
             agreed_value_brl: slotPricing.finalPrice,
             status: "pending_payment",
+            ...(slotPricing.campaign?.coupon?.id
+              ? { booking_origin: `campaign_${slotPricing.campaign.coupon.id}` }
+              : {}),
           };
         });
 
@@ -1426,9 +1428,6 @@ export function RoomDetail(props: RoomDetailProps) {
         finalHourlyCost = Math.max(0, finalHourlyCost);
       }
 
-      const effectiveCouponRecord =
-        appliedCoupon || matchedAutoCampaign?.coupon || null;
-
       if (method === "wallet") {
         const creditCostPerHour = finalCreditsRequired / selectedSlots.length;
         const usedTier = normalizeCreditTier(
@@ -1487,22 +1486,6 @@ export function RoomDetail(props: RoomDetailProps) {
           });
         if (walletError) throw walletError;
 
-        if (effectiveCouponRecord && appliedCoupon) {
-          await supabase
-            .from("coupons")
-            .update({
-              current_uses: Number(effectiveCouponRecord.current_uses || 0) + 1,
-            })
-            .eq("id", effectiveCouponRecord.id);
-          await supabase.from("coupon_uses").insert({
-            coupon_id: effectiveCouponRecord.id,
-            user_id: user.id,
-            booking_id: lockIds[0],
-            discount_applied:
-              checkoutSummary.creditsRequired - finalCreditsRequired,
-          });
-        }
-
         if (lockIds && lockIds[0]) {
           sendBookingNotificationEmails(lockIds[0]).catch((e) =>
             console.error("Erro ao enviar e-mail de reserva:", e),
@@ -1532,28 +1515,6 @@ export function RoomDetail(props: RoomDetailProps) {
           })
           .in("id", lockIds);
         if (updateError) throw updateError;
-
-        if (effectiveCouponRecord) {
-          const appliedDiscountValue =
-            totalCampaignDiscountBRL > 0
-              ? totalCampaignDiscountBRL
-              : Math.max(0, totalBaseHourlyCost - finalHourlyCost);
-          if (appliedDiscountValue > 0) {
-            await supabase
-              .from("coupons")
-              .update({
-                current_uses:
-                  Number(effectiveCouponRecord.current_uses || 0) + 1,
-              })
-              .eq("id", effectiveCouponRecord.id);
-            await supabase.from("coupon_uses").insert({
-              coupon_id: effectiveCouponRecord.id,
-              user_id: user.id,
-              booking_id: lockIds[0],
-              discount_applied: appliedDiscountValue,
-            });
-          }
-        }
 
         let formattedCard = undefined;
         let holderInfo = undefined;
@@ -1595,6 +1556,7 @@ export function RoomDetail(props: RoomDetailProps) {
             creditCard: formattedCard,
             creditCardHolderInfo: holderInfo,
             cardData: cardData,
+            couponId: appliedCoupon?.id || undefined,
           }),
         });
 
@@ -1886,7 +1848,6 @@ export function RoomDetail(props: RoomDetailProps) {
         badgeText={rulesModalData?.badgeText}
       />
 
-      {/* TOP BAR LIMPA */}
       <div className="flex-none bg-white z-30 border-b border-slate-100 md:border-transparent">
         <div className="max-w-5xl mx-auto pt-5 px-5 flex justify-between items-center pb-3.5">
           <button
@@ -1918,7 +1879,6 @@ export function RoomDetail(props: RoomDetailProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto pb-28 md:pb-12 scrollbar-hide">
-        {/* CABEÇALHO EDITORIAL DO ESPAÇO */}
         <div className="max-w-5xl mx-auto px-5 pt-2 pb-5">
           {isPartner && (
             <div className="mb-2.5 inline-flex items-center gap-1.5 bg-stone-100 text-stone-800 border border-stone-200/80 text-[11px] font-bold px-2.5 py-1 rounded-md">
@@ -1957,7 +1917,6 @@ export function RoomDetail(props: RoomDetailProps) {
           </div>
         </div>
 
-        {/* GALERIA MOBILE */}
         <div className="md:hidden relative w-full h-[34vh] bg-slate-100 flex overflow-x-auto snap-x snap-mandatory scrollbar-hide touch-pan-x">
           {allImages.length > 0 ? (
             allImages.map((img: string, idx: number) => (
@@ -1992,7 +1951,6 @@ export function RoomDetail(props: RoomDetailProps) {
           )}
         </div>
 
-        {/* BARRA RÁPIDA DE HORÁRIOS MOBILE */}
         <div className="md:hidden px-5 pt-4">
           <div className="bg-stone-50 border border-stone-200/90 rounded-2xl p-3.5 flex flex-col gap-3">
             <div className="flex items-center justify-between gap-2">
@@ -2072,7 +2030,6 @@ export function RoomDetail(props: RoomDetailProps) {
           </div>
         </div>
 
-        {/* GALERIA DESKTOP */}
         <div className="hidden md:block max-w-5xl mx-auto px-5 mb-8">
           <div className="grid grid-cols-4 grid-rows-2 gap-2 h-[420px] w-full rounded-2xl overflow-hidden relative bg-slate-100">
             {imagesToShow.map((img: string, idx: number) => {
@@ -2398,7 +2355,6 @@ export function RoomDetail(props: RoomDetailProps) {
             </section>
           </div>
 
-          {/* COLUNA DE AGENDAMENTO */}
           <div
             ref={bookingSectionRef}
             className="order-2 lg:order-2 lg:col-span-5 flex flex-col gap-6 scroll-mt-20"
@@ -2472,7 +2428,6 @@ export function RoomDetail(props: RoomDetailProps) {
                     </div>
                   </div>
 
-                  {/* BANNER DA CAMPANHA COM BOTÃO "LER REGRAS" */}
                   {selectedDayCampaign ? (
                     <div className="mb-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-950 space-y-2 shadow-md">
                       <div className="flex items-center justify-between gap-2">
@@ -3010,7 +2965,6 @@ export function RoomDetail(props: RoomDetailProps) {
             </div>
           </div>
 
-          {/* AVALIAÇÕES */}
           <div className="order-3 lg:order-3 lg:col-span-7 lg:col-start-1 pt-6 border-t border-slate-100 lg:border-none lg:pt-0">
             <div className="flex items-center justify-between mb-5">
               <h2 className="text-lg font-bold text-slate-900">
@@ -3154,7 +3108,6 @@ export function RoomDetail(props: RoomDetailProps) {
         </div>
       </div>
 
-      {/* BARRA INFERIOR MOBILE INTELIGENTE */}
       <div className="md:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 px-5 py-3.5 pb-[calc(0.875rem+env(safe-area-inset-bottom))] flex items-center justify-between shadow-[0_-8px_30px_rgba(15,23,42,0.08)] z-50">
         <div onClick={scrollToBookingSection} className="cursor-pointer pr-2">
           <p className="text-[11px] font-semibold text-slate-500">
@@ -3250,7 +3203,6 @@ export function RoomDetail(props: RoomDetailProps) {
         )}
       </div>
 
-      {/* GALERIA DE TODAS AS FOTOS */}
       {isAllPhotosOpen && (
         <div className="fixed inset-0 z-[150] bg-white flex flex-col animate-in fade-in duration-200">
           <div className="flex-none p-4 flex justify-between items-center bg-white border-b border-slate-100 z-10 sticky top-0">
@@ -3300,7 +3252,6 @@ export function RoomDetail(props: RoomDetailProps) {
         </div>
       )}
 
-      {/* LIGHTBOX TELA CHEIA */}
       {isLightboxOpen && (
         <div className="fixed inset-0 z-[200] bg-black text-white flex flex-col animate-in fade-in zoom-in-95 duration-200">
           <div className="flex-none p-4 flex justify-between items-center bg-transparent z-20 absolute top-0 w-full">
@@ -3368,7 +3319,6 @@ export function RoomDetail(props: RoomDetailProps) {
         </div>
       )}
 
-      {/* MODAL DE CADASTRO INCOMPLETO */}
       {showProfileModal && (
         <div className="fixed inset-0 z-[250] bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200">
           <div className="bg-white rounded-2xl p-6 md:p-8 max-w-sm w-full shadow-xl relative">

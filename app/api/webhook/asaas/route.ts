@@ -1,4 +1,4 @@
-// app/api/webhooks/asaas/route.ts
+// app/api/webhook/asaas/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import {
@@ -6,20 +6,128 @@ import {
   sendPaymentNotificationEmails,
 } from "@/app/actions/send-email";
 
-// Instanciação do Supabase com Service Role Key para ignorar RLS em chamadas do Gateway
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey, {
   auth: { persistSession: false },
 });
 
+async function syncCouponUsesForConfirmedBookings(bookingIds: string[]) {
+  try {
+    if (!bookingIds || bookingIds.length === 0) return;
+
+    const { data: confirmedBookings } = await supabaseAdmin
+      .from("bookings")
+      .select(
+        "id, user_id, room_id, start_time, total_cost, agreed_value_brl, booking_origin, status, created_at",
+      )
+      .in("id", bookingIds)
+      .in("status", ["confirmed", "in_progress", "completed"]);
+
+    if (!confirmedBookings || confirmedBookings.length === 0) return;
+
+    const taggedBookings = confirmedBookings.filter((b: any) => {
+      const origin = String(b.booking_origin || "");
+      return origin.startsWith("campaign_") || origin.startsWith("coupon_");
+    });
+
+    if (taggedBookings.length === 0) return;
+
+    const roomIds = Array.from(
+      new Set(taggedBookings.map((b: any) => b.room_id).filter(Boolean)),
+    );
+    const { data: roomsData } = await supabaseAdmin
+      .from("rooms")
+      .select("id, address_details")
+      .in("id", roomIds);
+    const roomsMap = new Map<string, any>(
+      (roomsData || []).map((r: any) => [r.id, r]),
+    );
+
+    const affectedCouponIds = new Set<string>();
+
+    for (const b of taggedBookings) {
+      const origin = String(b.booking_origin || "");
+      const couponId = origin.replace(/^campaign_|^coupon_/, "").trim();
+      if (!couponId) continue;
+
+      const { data: existingUse } = await supabaseAdmin
+        .from("coupon_uses")
+        .select("id")
+        .eq("coupon_id", couponId)
+        .eq("booking_id", b.id)
+        .limit(1);
+
+      if (existingUse && existingUse.length > 0) {
+        affectedCouponIds.add(couponId);
+        continue;
+      }
+
+      const room = roomsMap.get(b.room_id);
+      let addr = room?.address_details || {};
+      if (typeof addr === "string") {
+        try {
+          addr = JSON.parse(addr);
+        } catch {
+          addr = {};
+        }
+      }
+      const pricing = addr?.pricing || {};
+      const brDate = new Date(
+        new Date(b.start_time).getTime() - 3 * 60 * 60 * 1000,
+      );
+      const dow = brDate.getUTCDay();
+      const hour = brDate.getUTCHours();
+      const commercial = Number(pricing.hourly || 45);
+      const basePrice =
+        dow === 0 || dow === 6
+          ? Number(pricing.weekend || commercial)
+          : hour >= 18 || hour < 8
+            ? Number(pricing.afterHours || commercial)
+            : commercial;
+
+      const rawTotal = Number(b.total_cost || 0);
+      const rawAgreed = Number(b.agreed_value_brl || 0);
+      const paidBrl = rawTotal >= 10 ? rawTotal : rawAgreed;
+      const discountApplied = Math.max(
+        0,
+        Number((basePrice - paidBrl).toFixed(2)),
+      );
+
+      await supabaseAdmin.from("coupon_uses").insert({
+        coupon_id: couponId,
+        user_id: b.user_id,
+        booking_id: b.id,
+        discount_applied: discountApplied,
+        used_at: b.created_at || new Date().toISOString(),
+      });
+
+      affectedCouponIds.add(couponId);
+    }
+
+    for (const cid of affectedCouponIds) {
+      const { count } = await supabaseAdmin
+        .from("coupon_uses")
+        .select("id", { count: "exact", head: true })
+        .eq("coupon_id", cid);
+
+      if (typeof count === "number") {
+        await supabaseAdmin
+          .from("coupons")
+          .update({ current_uses: count })
+          .eq("id", cid);
+      }
+    }
+  } catch (err) {
+    console.error("[Asaas Webhook] Erro ao sincronizar uso de campanha:", err);
+  }
+}
+
 export async function POST(request: Request) {
   try {
-    // 1. Validação de Segurança do Token do Webhook do Asaas
     const asaasToken = request.headers.get("asaas-access-token");
     const configuredSecret =
       process.env.ASAAS_WEBHOOK_SECRET || process.env.ASAAS_WEBHOOK_TOKEN;
-
     if (configuredSecret && asaasToken !== configuredSecret) {
       console.error("[Asaas Webhook] Token de webhook inválido ou ausente.");
       return NextResponse.json(
@@ -30,7 +138,6 @@ export async function POST(request: Request) {
 
     const payload = await request.json();
     const { event, payment } = payload;
-
     if (!payment || !payment.id) {
       return NextResponse.json(
         { error: "Payload inválido: objeto payment ausente." },
@@ -47,17 +154,10 @@ export async function POST(request: Request) {
       `[Asaas Webhook] Evento: ${event} | Pagamento: ${paymentId} | Tipo: ${isSubscriptionPayment ? "Assinatura" : "Reserva"}`,
     );
 
-    // ========================================================================
-    // 2. PROCESSAMENTO DE PAGAMENTO CONFIRMADO / RECEBIDO
-    // ========================================================================
     if (event === "PAYMENT_RECEIVED" || event === "PAYMENT_CONFIRMED") {
-      // ----------------------------------------------------------------------
-      // CENÁRIO A: ASSINATURA RECORRENTE FUSION PASS+ (1º MÊS E RENOVAÇÕES)
-      // ----------------------------------------------------------------------
+      // CENÁRIO A: ASSINATURA RECORRENTE FUSION PASS+
       if (isSubscriptionPayment) {
         const idempotencyTag = `[Asaas:${paymentId}]`;
-
-        // 1. Trava de Idempotência: Verifica se esta fatura já foi creditada
         const { data: existingTx } = await supabaseAdmin
           .from("wallet_transactions")
           .select("id")
@@ -80,7 +180,6 @@ export async function POST(request: Request) {
         let tier = "start";
         let hours = 0;
 
-        // 2. Extrai os dados do externalReference herdado da assinatura: sub_<userId>_<tier>_<hours>h_<timestamp>
         if (externalRef.startsWith("sub_")) {
           const parts = externalRef.split("_");
           if (parts.length >= 4) {
@@ -90,14 +189,12 @@ export async function POST(request: Request) {
           }
         }
 
-        // 3. Fallback: Caso seja uma assinatura antiga vinculada por asaas_subscription_id
         if ((!userId || hours <= 0) && payment.subscription) {
           const { data: subRecord } = await supabaseAdmin
             .from("subscriptions")
             .select("user_id, tier, hours")
             .eq("asaas_subscription_id", payment.subscription)
             .maybeSingle();
-
           if (subRecord) {
             userId = subRecord.user_id;
             tier = String(subRecord.tier || "start").toLowerCase().trim();
@@ -120,14 +217,11 @@ export async function POST(request: Request) {
           hours > 0 && priceBrl > 0 ? (priceBrl / hours).toFixed(2) : "0.00";
         const rateTag =
           Number(unitHourlyRate) > 0 ? `[Rate:${unitHourlyRate}]` : "";
-
-        // NOVA TAG DE MÉTODO DE PAGAMENTO
         const viaTag =
           String(payment.billingType || "").toUpperCase() === "PIX"
             ? "[Via:PIX]"
             : "[Via:CARTAO]";
 
-        // 4. Atualiza o status da assinatura na tabela `subscriptions` para ACTIVE
         await supabaseAdmin
           .from("subscriptions")
           .update({ status: "INACTIVE" })
@@ -141,11 +235,9 @@ export async function POST(request: Request) {
           status: "ACTIVE",
         });
 
-        // 5. Injeta as novas horas na carteira com validade de 30 dias e tags
         const expiresAt = new Date(
           Date.now() + 30 * 24 * 60 * 60 * 1000,
         ).toISOString();
-
         const { error: walletErr } = await supabaseAdmin
           .from("wallet_transactions")
           .insert({
@@ -156,7 +248,6 @@ export async function POST(request: Request) {
             description: `Assinatura Fusion Pass (${tier.toUpperCase()}) - +${hours}h ${viaTag} ${rateTag} ${idempotencyTag}`,
             expires_at: expiresAt,
           });
-
         if (walletErr) {
           console.error(
             "[Asaas Webhook] Erro ao inserir créditos da assinatura:",
@@ -165,7 +256,6 @@ export async function POST(request: Request) {
           throw walletErr;
         }
 
-        // 6. Notifica o profissional no sino do app e envia o e-mail de confirmação
         try {
           await supabaseAdmin.from("notifications").insert({
             user_id: userId,
@@ -189,38 +279,31 @@ export async function POST(request: Request) {
         console.log(
           `[Asaas Webhook] +${hours}h (${tier}) creditadas com sucesso para o usuário ${userId}.`,
         );
-
         return NextResponse.json({
           success: true,
           message: "Assinatura processada e horas creditadas com sucesso.",
         });
       }
 
-      // ----------------------------------------------------------------------
       // CENÁRIO B: RESERVA AVULSA DE SALA
-      // ----------------------------------------------------------------------
       let bookingId = externalRef || null;
-
       if (!bookingId) {
         const { data: existingBooking } = await supabaseAdmin
           .from("bookings")
           .select("id, status")
           .eq("asaas_payment_id", paymentId)
           .maybeSingle();
-
         if (existingBooking) {
           bookingId = existingBooking.id;
         }
       }
 
       if (bookingId) {
-        // Verifica o status antes de atualizar para não enviar e-mails duplicados
         const { data: beforeBooking } = await supabaseAdmin
           .from("bookings")
           .select("id, status")
           .eq("id", bookingId)
           .maybeSingle();
-
         const wasAlreadyConfirmed = beforeBooking?.status === "confirmed";
 
         const { data: updatedBooking, error: updateError } = await supabaseAdmin
@@ -232,7 +315,6 @@ export async function POST(request: Request) {
           .eq("id", bookingId)
           .select("id, user_id, room_id, start_time, end_time, status")
           .single();
-
         if (updateError) {
           console.error(
             "[Asaas Webhook] Erro ao confirmar reserva no banco:",
@@ -241,11 +323,24 @@ export async function POST(request: Request) {
           throw updateError;
         }
 
-        // Caso a mesma cobrança PIX/Cartão esteja vinculada a múltiplos horários
+        const { data: samePayBookings } = await supabaseAdmin
+          .from("bookings")
+          .select("id")
+          .eq("asaas_payment_id", paymentId);
+
+        const allConfirmedIds = Array.from(
+          new Set([
+            bookingId,
+            ...(samePayBookings || []).map((x: any) => x.id),
+          ]),
+        );
+
         await supabaseAdmin
           .from("bookings")
           .update({ status: "confirmed" })
-          .eq("asaas_payment_id", paymentId);
+          .in("id", allConfirmedIds);
+
+        await syncCouponUsesForConfirmedBookings(allConfirmedIds);
 
         if (!wasAlreadyConfirmed) {
           if (updatedBooking?.user_id) {
@@ -295,22 +390,16 @@ export async function POST(request: Request) {
       }
     }
 
-    // ========================================================================
-    // 3. PROCESSAMENTO DE PAGAMENTO CANCELADO / VENCIDO / ESTORNADO
-    // ========================================================================
     if (
       event === "PAYMENT_OVERDUE" ||
       event === "PAYMENT_DELETED" ||
       event === "PAYMENT_REFUNDED"
     ) {
-      // Só cancela na tabela `bookings` se NÃO for uma assinatura
       if (!isSubscriptionPayment) {
-        // CANCELA TODAS AS RESERVAS ATRELADAS A ESTE PIX/CARTÃO SIMULTANEAMENTE
         await supabaseAdmin
           .from("bookings")
           .update({ status: "cancelled" })
           .eq("asaas_payment_id", paymentId);
-
         console.log(
           `[Asaas Webhook] Pagamento de reserva ${paymentId} cancelado/vencido. Reservas liberadas.`,
         );

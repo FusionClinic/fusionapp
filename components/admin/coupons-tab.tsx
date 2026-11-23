@@ -1,7 +1,6 @@
-// components/admin/coupons-tab.tsx
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { CampaignRulesModal } from "@/components/campaign-rules-modal";
@@ -13,7 +12,6 @@ import {
   getDay,
   getHours,
 } from "date-fns";
-import { ptBR } from "date-fns/locale";
 import {
   Ticket,
   Plus,
@@ -36,6 +34,8 @@ import {
   SlidersHorizontal,
   Flame,
   FileText,
+  RefreshCw,
+  CalendarDays,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -84,6 +84,47 @@ export interface CouponScheduleRules {
   days_of_week: number[];
   allowed_hours: number[];
 }
+
+interface SyncedUseItem {
+  id: string;
+  coupon_id: string;
+  booking_id: string | null;
+  user_id: string;
+  room_id: string | null;
+  room_name: string;
+  clinic_name: string;
+  start_time: string | null;
+  end_time: string | null;
+  booking_status: string;
+  paid_brl: number;
+  base_price_brl: number;
+  discount_applied: number;
+  used_at: string;
+  is_campaign: boolean;
+  campaign_name: string;
+  specialist_name: string;
+  specialist_email: string;
+  specialist_phone: string;
+  specialist_specialty: string;
+}
+
+const formatBRL = (val: number) =>
+  Number(val || 0).toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+const formatSafeDateTime = (
+  iso?: string | null,
+  pattern = "dd/MM/yyyy 'às' HH:mm",
+) => {
+  if (!iso) return "—";
+  try {
+    return format(parseISO(iso), pattern);
+  } catch {
+    return "—";
+  }
+};
 
 function createDefaultDayHours(): DayHoursMap {
   return {
@@ -191,22 +232,27 @@ export function AdminCouponsTab() {
   const { toast } = useToast();
 
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [detectingColdHours, setDetectingColdHours] = useState(false);
 
   const [activeSection, setActiveSection] = useState<"coupons" | "campaigns">(
-    "coupons",
+    "campaigns",
   );
   const [view, setView] = useState<
     "list" | "create_coupon" | "create_campaign" | "details"
   >("list");
 
   const [allRecords, setAllRecords] = useState<any[]>([]);
+  const [allCampaignUses, setAllCampaignUses] = useState<SyncedUseItem[]>([]);
+  const [usesSearch, setUsesSearch] = useState("");
+  const [usesRoomFilter, setUsesRoomFilter] = useState("all");
+
   const [rooms, setRooms] = useState<any[]>([]);
   const [roomSearch, setRoomSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
-  const [recordUses, setRecordUses] = useState<any[]>([]);
+  const [recordUses, setRecordUses] = useState<SyncedUseItem[]>([]);
   const [isAllRooms, setIsAllRooms] = useState(true);
   const [isPreviewRulesOpen, setIsPreviewRulesOpen] = useState(false);
 
@@ -230,34 +276,81 @@ export function AdminCouponsTab() {
   const [professionals, setProfessionals] = useState<any[]>([]);
   const [selectedAffiliate, setSelectedAffiliate] = useState<any | null>(null);
 
-  useEffect(() => {
-    fetchRecords();
-    loadRooms();
-  }, []);
+  const fetchRecords = useCallback(
+    async (manualSync = false) => {
+      if (manualSync) {
+        setSyncing(true);
+      } else {
+        setLoading(true);
+      }
 
-  const fetchRecords = async () => {
-    setLoading(true);
-    const { data, error } = await supabase
-      .from("coupons")
-      .select(
-        `
-        *,
-        profiles:affiliate_id (id, full_name, email)
-      `,
-      )
-      .order("created_at", { ascending: false });
-    if (!error) setAllRecords(data || []);
-    setLoading(false);
-  };
+      try {
+        const res = await fetch("/api/admin/coupons/sync", {
+          method: "POST",
+          cache: "no-store",
+        });
 
-  const loadRooms = async () => {
+        if (res.ok) {
+          const data = await res.json();
+          const syncedCoupons = data.coupons || [];
+          setAllRecords(syncedCoupons);
+          setAllCampaignUses(data.allCampaignUses || []);
+
+          setSelectedRecord((prev: any) => {
+            if (!prev) return null;
+            const refreshed = syncedCoupons.find((c: any) => c.id === prev.id);
+            if (refreshed) {
+              setRecordUses(refreshed.synced_uses || []);
+              return refreshed;
+            }
+            return prev;
+          });
+
+          if (manualSync) {
+            toast({
+              title: "Campanhas sincronizadas!",
+              description:
+                data.newlySyncedCount > 0
+                  ? `${data.newlySyncedCount} reserva(s) vinculada(s) e contabilizada(s) agora.`
+                  : "Todos os usos e reservas já estão 100% atualizados.",
+            });
+          }
+          return;
+        }
+      } catch (err) {
+        console.error("Erro na rota de sincronização de cupons:", err);
+      } finally {
+        setLoading(false);
+        setSyncing(false);
+      }
+
+      const { data, error } = await supabase
+        .from("coupons")
+        .select(
+          `
+          *,
+          profiles:affiliate_id (id, full_name, email)
+        `,
+        )
+        .order("created_at", { ascending: false });
+      if (!error) setAllRecords(data || []);
+    },
+    [supabase, toast],
+  );
+
+  const loadRooms = useCallback(async () => {
     const { data, error } = await supabase
       .from("rooms")
       .select("id, name, tier, availability, profiles:host_id(full_name)")
       .eq("is_active", true)
       .order("name");
     if (!error) setRooms(data || []);
-  };
+  }, [supabase]);
+
+  useEffect(() => {
+    fetchRecords(false);
+    loadRooms();
+  }, [fetchRecords, loadRooms]);
 
   const loadProfessionals = async (searchStr: string) => {
     if (searchStr.length < 3) return;
@@ -269,19 +362,48 @@ export function AdminCouponsTab() {
     setProfessionals(data || []);
   };
 
-  const loadRecordUses = async (id: string) => {
+  const loadRecordUses = async (record: any) => {
+    if (Array.isArray(record.synced_uses)) {
+      setRecordUses(record.synced_uses);
+      return;
+    }
     setActionLoading(true);
     const { data, error } = await supabase
       .from("coupon_uses")
       .select(
         `
         *,
-        profiles:user_id (full_name, email)
+        profiles:user_id (full_name, email, phone, whatsapp)
       `,
       )
-      .eq("coupon_id", id)
+      .eq("coupon_id", record.id)
       .order("used_at", { ascending: false });
-    if (!error) setRecordUses(data || []);
+
+    if (!error) {
+      const normalized: SyncedUseItem[] = (data || []).map((u: any) => ({
+        id: u.id,
+        coupon_id: u.coupon_id,
+        booking_id: u.booking_id || null,
+        user_id: u.user_id || "",
+        room_id: null,
+        room_name: "—",
+        clinic_name: "Fusion Clinic",
+        start_time: null,
+        end_time: null,
+        booking_status: "confirmed",
+        paid_brl: 0,
+        base_price_brl: 0,
+        discount_applied: Number(u.discount_applied || 0),
+        used_at: u.used_at,
+        is_campaign: false,
+        campaign_name: record.campaign_name || record.code || "",
+        specialist_name: u.profiles?.full_name || "Profissional",
+        specialist_email: u.profiles?.email || "",
+        specialist_phone: u.profiles?.whatsapp || u.profiles?.phone || "",
+        specialist_specialty: "",
+      }));
+      setRecordUses(normalized);
+    }
     setActionLoading(false);
   };
 
@@ -290,6 +412,7 @@ export function AdminCouponsTab() {
     const campList: any[] = [];
     let couponUsesTotal = 0;
     let campaignUsesTotal = 0;
+    let campaignRevenueTotal = 0;
 
     allRecords.forEach((item) => {
       const rules = extractCouponRules(item);
@@ -297,6 +420,7 @@ export function AdminCouponsTab() {
       if (rules.is_campaign) {
         campList.push(item);
         campaignUsesTotal += uses;
+        campaignRevenueTotal += Number(item.synced_revenue_brl || 0);
       } else {
         cList.push(item);
         couponUsesTotal += uses;
@@ -314,9 +438,37 @@ export function AdminCouponsTab() {
           (c) => c.is_active && extractCouponRules(c).show_on_calendar,
         ).length,
         campaignUsesTotal,
+        campaignRevenueTotal,
       },
     };
   }, [allRecords]);
+
+  const campaignRoomsFilterOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    allCampaignUses.forEach((u) => {
+      if (u.room_id && u.room_name) {
+        map.set(u.room_id, u.room_name);
+      }
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [allCampaignUses]);
+
+  const filteredAllCampaignUses = useMemo(() => {
+    const q = usesSearch.toLowerCase().trim();
+    return allCampaignUses.filter((u) => {
+      if (usesRoomFilter !== "all" && u.room_id !== usesRoomFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        u.specialist_name.toLowerCase().includes(q) ||
+        u.specialist_email.toLowerCase().includes(q) ||
+        u.specialist_phone.toLowerCase().includes(q) ||
+        u.room_name.toLowerCase().includes(q) ||
+        u.campaign_name.toLowerCase().includes(q)
+      );
+    });
+  }, [allCampaignUses, usesSearch, usesRoomFilter]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -693,7 +845,7 @@ export function AdminCouponsTab() {
       resetForm();
       setActiveSection("coupons");
       setView("list");
-      fetchRecords();
+      fetchRecords(false);
     } catch (error: any) {
       toast({
         variant: "destructive",
@@ -797,7 +949,7 @@ export function AdminCouponsTab() {
       resetForm();
       setActiveSection("campaigns");
       setView("list");
-      fetchRecords();
+      fetchRecords(false);
     } catch (error: any) {
       toast({
         variant: "destructive",
@@ -832,7 +984,7 @@ export function AdminCouponsTab() {
       toast({
         title: !currentStatus ? "Ativado com sucesso" : "Pausado com sucesso",
       });
-      fetchRecords();
+      fetchRecords(false);
     }
   };
 
@@ -867,7 +1019,7 @@ export function AdminCouponsTab() {
         ? "Campanha exibida no calendário das salas"
         : "Campanha ocultada do calendário",
     });
-    fetchRecords();
+    fetchRecords(false);
   };
 
   const handleToggleAllCalendarCampaigns = async (enableAll: boolean) => {
@@ -893,7 +1045,7 @@ export function AdminCouponsTab() {
           ? "Todas as campanhas foram ativadas no calendário"
           : "Todas as campanhas foram ocultadas do calendário",
       });
-      fetchRecords();
+      fetchRecords(false);
     } catch (err: any) {
       toast({
         variant: "destructive",
@@ -910,13 +1062,13 @@ export function AdminCouponsTab() {
     const { error } = await supabase.from("coupons").delete().eq("id", id);
     if (!error) {
       toast({ title: "Registro excluído" });
-      fetchRecords();
+      fetchRecords(false);
     }
   };
 
   const openDetails = (record: any) => {
     setSelectedRecord(record);
-    loadRecordUses(record.id);
+    loadRecordUses(record);
     setView("details");
   };
 
@@ -940,6 +1092,28 @@ export function AdminCouponsTab() {
         </Badge>
       );
     return null;
+  };
+
+  const getBookingStatusBadge = (status: string) => {
+    if (status === "completed") {
+      return (
+        <Badge className="bg-slate-100 text-slate-700 border-0 font-semibold text-[10px]">
+          Concluída
+        </Badge>
+      );
+    }
+    if (status === "in_progress") {
+      return (
+        <Badge className="bg-amber-50 text-amber-800 border-0 font-semibold text-[10px]">
+          Em andamento
+        </Badge>
+      );
+    }
+    return (
+      <Badge className="bg-emerald-50 text-emerald-700 border-0 font-semibold text-[10px]">
+        Confirmada
+      </Badge>
+    );
   };
 
   const filteredRooms = rooms.filter((room) => {
@@ -1446,7 +1620,6 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
-            {/* 1. SALAS PARTICIPANTES */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-4">
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
                 <Building2 className="w-4 h-4 text-slate-500" /> 1. Salas
@@ -1547,7 +1720,6 @@ export function AdminCouponsTab() {
               )}
             </div>
 
-            {/* 2. DIAS E HORÁRIOS */}
             <div className="p-5 bg-stone-50 rounded-2xl border border-stone-200 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
@@ -1704,7 +1876,6 @@ export function AdminCouponsTab() {
               </div>
             </div>
 
-            {/* 3. REGULAMENTO / REGRAS DA CAMPANHA (OPCIONAL) */}
             <div className="p-5 bg-slate-50 rounded-2xl border border-slate-200/90 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div>
@@ -1714,8 +1885,8 @@ export function AdminCouponsTab() {
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Cole as regras numeradas (1., 2., 3...). Elas aparecerão no
-                    botão &ldquo;Ver regulamento&rdquo; do pop-up, da vitrine,
-                    da sala e exigirão confirmação obrigatória no checkout.
+                    botão “Ver regulamento” do pop-up, da vitrine, da sala e
+                    exigirão confirmação obrigatória no checkout.
                   </p>
                 </div>
 
@@ -1765,18 +1936,19 @@ export function AdminCouponsTab() {
 
   if (view === "details" && selectedRecord) {
     const rules = extractCouponRules(selectedRecord);
-    const creationDate = selectedRecord.created_at
-      ? format(parseISO(selectedRecord.created_at), "dd/MM/yyyy")
-      : "Indisponível";
+    const creationDate = formatSafeDateTime(
+      selectedRecord.created_at,
+      "dd/MM/yyyy",
+    );
     const startDate = rules.start_date
-      ? format(parseISO(rules.start_date), "dd/MM/yyyy")
+      ? formatSafeDateTime(rules.start_date, "dd/MM/yyyy")
       : "Imediato";
     const validUntil = selectedRecord.valid_until
-      ? format(parseISO(selectedRecord.valid_until), "dd/MM/yyyy")
+      ? formatSafeDateTime(selectedRecord.valid_until, "dd/MM/yyyy")
       : "Vitalício";
 
     return (
-      <div className="p-6 lg:p-8 max-w-5xl mx-auto animate-in fade-in pb-32">
+      <div className="p-6 lg:p-8 max-w-6xl mx-auto animate-in fade-in pb-32">
         <CampaignRulesModal
           isOpen={isPreviewRulesOpen}
           onClose={() => setIsPreviewRulesOpen(false)}
@@ -1789,13 +1961,30 @@ export function AdminCouponsTab() {
           }
         />
 
-        <Button
-          variant="ghost"
-          onClick={() => setView("list")}
-          className="mb-6 text-slate-500 font-semibold cursor-pointer"
-        >
-          <ArrowLeft className="w-4 h-4 mr-2" /> Voltar para a listagem
-        </Button>
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <Button
+            variant="ghost"
+            onClick={() => setView("list")}
+            className="text-slate-500 font-semibold cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4 mr-2" /> Voltar para a listagem
+          </Button>
+
+          <Button
+            type="button"
+            variant="outline"
+            disabled={syncing}
+            onClick={() => fetchRecords(true)}
+            className="h-9 rounded-xl text-xs font-semibold border-slate-200 cursor-pointer"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 mr-1.5 text-[#BF4B24] ${
+                syncing ? "animate-spin" : ""
+              }`}
+            />
+            {syncing ? "Sincronizando..." : "Atualizar usos"}
+          </Button>
+        </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
           <div className="md:col-span-2 bg-slate-900 text-white p-6 sm:p-8 rounded-2xl flex flex-col justify-between">
@@ -1820,8 +2009,13 @@ export function AdminCouponsTab() {
                   {selectedRecord.max_uses
                     ? `/ ${selectedRecord.max_uses}`
                     : ""}{" "}
-                  utilizações registradas
+                  utilizações confirmadas
                 </Badge>
+                {Number(selectedRecord.synced_revenue_brl || 0) > 0 && (
+                  <Badge className="bg-emerald-500/20 text-emerald-300 border-0 font-semibold">
+                    R$ {formatBRL(selectedRecord.synced_revenue_brl)} faturado
+                  </Badge>
+                )}
               </div>
             </div>
 
@@ -1839,21 +2033,17 @@ export function AdminCouponsTab() {
 
           <div className="bg-white border border-slate-200 p-6 sm:p-8 rounded-2xl flex flex-col">
             <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-              Regras e Aplicação
+              Resumo Financeiro & Regras
             </p>
             <div className="flex-1 space-y-3">
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center gap-3">
                 <Percent className="w-5 h-5 text-[#BF4B24]" />
                 <div>
                   <p className="text-[10px] text-slate-500 font-bold uppercase">
-                    Desconto
+                    Desconto Aplicado Total
                   </p>
                   <p className="text-sm font-bold text-slate-900">
-                    {selectedRecord.type === "percentage"
-                      ? `${selectedRecord.discount_value}% OFF`
-                      : selectedRecord.type === "fixed"
-                        ? `R$ ${selectedRecord.discount_value} OFF`
-                        : "Compre 1 Leve 2"}
+                    R$ {formatBRL(selectedRecord.synced_discount_brl || 0)}
                   </p>
                 </div>
               </div>
@@ -1863,12 +2053,11 @@ export function AdminCouponsTab() {
                   <Flame className="w-5 h-5 text-emerald-600" />
                   <div>
                     <p className="text-[10px] text-emerald-700 font-bold uppercase">
-                      Calendário
+                      Profissionais Únicos
                     </p>
-                    <p className="text-xs font-bold text-emerald-900 leading-snug">
-                      {rules.show_on_calendar
-                        ? "Aplicado diretamente nos horários com desconto"
-                        : "Ativado ao digitar o código"}
+                    <p className="text-sm font-bold text-emerald-900 leading-snug">
+                      {selectedRecord.unique_specialists_count || 0}{" "}
+                      profissional(is)
                     </p>
                   </div>
                 </div>
@@ -1990,7 +2179,7 @@ export function AdminCouponsTab() {
         <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
           <div className="p-5 border-b border-slate-100">
             <h3 className="text-sm font-bold text-slate-900">
-              Profissionais que utilizaram ({recordUses.length})
+              Profissionais que utilizaram esta campanha ({recordUses.length})
             </h3>
           </div>
           {actionLoading ? (
@@ -1999,39 +2188,62 @@ export function AdminCouponsTab() {
             </div>
           ) : recordUses.length === 0 ? (
             <div className="p-12 text-center text-slate-400 text-xs font-medium">
-              Nenhuma utilização registrada até o momento.
+              Nenhuma utilização confirmada até o momento.
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs whitespace-nowrap tabular-nums">
                 <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-100">
                   <tr>
-                    <th className="px-6 py-3.5">Data e Hora</th>
+                    <th className="px-6 py-3.5">Quando Comprou</th>
                     <th className="px-6 py-3.5">Profissional</th>
-                    <th className="px-6 py-3.5 text-right">
-                      Desconto Concedido
-                    </th>
+                    <th className="px-6 py-3.5">Sala</th>
+                    <th className="px-6 py-3.5">Horário da Consulta</th>
+                    <th className="px-6 py-3.5">Status</th>
+                    <th className="px-6 py-3.5 text-right">Valor Pago</th>
+                    <th className="px-6 py-3.5 text-right">Desconto</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {recordUses.map((use) => (
                     <tr key={use.id} className="hover:bg-slate-50">
-                      <td className="px-6 py-3.5 text-slate-600">
-                        {format(parseISO(use.used_at), "dd/MM/yyyy 'às' HH:mm")}
+                      <td className="px-6 py-3.5 text-slate-600 font-medium">
+                        {formatSafeDateTime(use.used_at)}
                       </td>
                       <td className="px-6 py-3.5">
                         <p className="font-bold text-slate-900">
-                          {use.profiles?.full_name || "Profissional"}
+                          {use.specialist_name}
                         </p>
                         <p className="text-[11px] text-slate-400">
-                          {use.profiles?.email}
+                          {use.specialist_phone || use.specialist_email || "—"}
                         </p>
                       </td>
+                      <td className="px-6 py-3.5 font-semibold text-slate-800">
+                        {use.room_name}
+                      </td>
+                      <td className="px-6 py-3.5 text-slate-700">
+                        {use.start_time ? (
+                          <span>
+                            {formatSafeDateTime(use.start_time, "dd/MM/yyyy")} •{" "}
+                            <strong>
+                              {formatSafeDateTime(use.start_time, "HH:mm")}
+                            </strong>
+                            {use.end_time
+                              ? `–${formatSafeDateTime(use.end_time, "HH:mm")}`
+                              : ""}
+                          </span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-6 py-3.5">
+                        {getBookingStatusBadge(use.booking_status)}
+                      </td>
+                      <td className="px-6 py-3.5 text-right font-bold text-slate-900">
+                        R$ {formatBRL(use.paid_brl)}
+                      </td>
                       <td className="px-6 py-3.5 text-right font-bold text-emerald-700">
-                        R${" "}
-                        {Number(use.discount_applied || 0)
-                          .toFixed(2)
-                          .replace(".", ",")}
+                        - R$ {formatBRL(use.discount_applied)}
                       </td>
                     </tr>
                   ))}
@@ -2052,12 +2264,27 @@ export function AdminCouponsTab() {
             Cupons & Campanhas de Horário
           </h1>
           <p className="text-sm text-slate-500 mt-1">
-            Gerencie separadamente seus códigos de cupom/afiliados e suas
-            campanhas de desconto por horário no calendário.
+            Gerencie seus códigos de cupom/afiliados, campanhas de desconto no
+            calendário e acompanhe em tempo real quem reservou.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={syncing}
+            onClick={() => fetchRecords(true)}
+            className="h-10 rounded-xl font-semibold text-xs px-3.5 border-slate-200 text-slate-700 cursor-pointer"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 mr-1.5 text-[#BF4B24] ${
+                syncing ? "animate-spin" : ""
+              }`}
+            />
+            {syncing ? "Sincronizando..." : "Sincronizar Usos"}
+          </Button>
+
           {activeSection === "coupons" ? (
             <Button
               onClick={() => {
@@ -2158,10 +2385,19 @@ export function AdminCouponsTab() {
               </span>
             </p>
             <p className="text-xs text-slate-500">
-              Reservas geradas por campanhas:{" "}
+              Reservas geradas:{" "}
               <strong className="text-slate-900">
                 {summaryStats.campaignUsesTotal} usos
               </strong>
+              {summaryStats.campaignRevenueTotal > 0 && (
+                <>
+                  {" "}
+                  • Faturamento:{" "}
+                  <strong className="text-emerald-700">
+                    R$ {formatBRL(summaryStats.campaignRevenueTotal)}
+                  </strong>
+                </>
+              )}
             </p>
           </div>
           <div className="w-10 h-10 rounded-xl bg-orange-50 text-[#BF4B24] flex items-center justify-center shrink-0">
@@ -2239,6 +2475,11 @@ export function AdminCouponsTab() {
                       new Date(coupon.valid_until) < new Date();
                     const isEsgotado =
                       coupon.max_uses && coupon.current_uses >= coupon.max_uses;
+                    const roomNamesList: string[] = Array.isArray(
+                      coupon.room_names,
+                    )
+                      ? coupon.room_names
+                      : [];
                     return (
                       <tr
                         key={coupon.id}
@@ -2252,9 +2493,13 @@ export function AdminCouponsTab() {
                         <td className="px-6 py-4">
                           {getTypeDisplay(coupon.type, coupon.discount_value)}
                           <span className="block text-[11px] text-slate-500 mt-1">
-                            {coupon.valid_room_ids?.length > 0
-                              ? `${coupon.valid_room_ids.length} sala(s) específica(s)`
-                              : "Todas as salas"}
+                            {roomNamesList.length > 0
+                              ? roomNamesList.length <= 2
+                                ? roomNamesList.join(", ")
+                                : `${roomNamesList.slice(0, 2).join(", ")} +${roomNamesList.length - 2}`
+                              : coupon.valid_room_ids?.length > 0
+                                ? `${coupon.valid_room_ids.length} sala(s) específica(s)`
+                                : "Todas as salas"}
                           </span>
                         </td>
                         <td className="px-6 py-4 font-medium text-slate-700">
@@ -2272,7 +2517,10 @@ export function AdminCouponsTab() {
                         </td>
                         <td className="px-6 py-4 text-slate-500">
                           {coupon.valid_until
-                            ? format(parseISO(coupon.valid_until), "dd/MM/yyyy")
+                            ? formatSafeDateTime(
+                                coupon.valid_until,
+                                "dd/MM/yyyy",
+                              )
                             : "Vitalício"}
                         </td>
                         <td className="px-6 py-4">
@@ -2344,198 +2592,342 @@ export function AdminCouponsTab() {
           )}
         </div>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
-          {campaignsList.length === 0 ? (
-            <div className="text-center py-16 px-4">
-              <CalendarClock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <h3 className="text-sm font-bold text-slate-900">
-                Nenhuma campanha de horário cadastrada
-              </h3>
-              <p className="text-xs text-slate-500 mt-1 mb-4">
-                Crie uma campanha para destacar dias e horários com desconto
-                direto no calendário de reserva das salas.
-              </p>
-              <Button
-                onClick={() => {
-                  resetForm();
-                  setView("create_campaign");
-                }}
-                size="sm"
-                className="bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-semibold rounded-xl text-xs"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1.5" /> Criar Primeira Campanha
-              </Button>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs whitespace-nowrap tabular-nums">
-                <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
-                  <tr>
-                    <th className="px-6 py-3.5">Campanha</th>
-                    <th className="px-6 py-3.5">Oferta & Salas</th>
-                    <th className="px-6 py-3.5">Grade de Dias e Horários</th>
-                    <th className="px-6 py-3.5 text-center">
-                      Exibição no Calendário
-                    </th>
-                    <th className="px-6 py-3.5">Reservas Geradas</th>
-                    <th className="px-6 py-3.5">Status</th>
-                    <th className="px-6 py-3.5 text-right">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {campaignsList.map((camp) => {
-                    const rules = extractCouponRules(camp);
-                    const isExpired =
-                      camp.valid_until &&
-                      new Date(camp.valid_until) < new Date();
-                    const totalBlocks = Object.values(rules.day_hours).reduce(
-                      (acc, arr) => acc + arr.length,
-                      0,
-                    );
-                    return (
-                      <tr
-                        key={camp.id}
-                        className="hover:bg-slate-50/80 transition-colors"
-                      >
-                        <td className="px-6 py-4">
-                          <span className="font-bold text-slate-900 text-sm block">
-                            {rules.campaign_name || camp.code}
-                          </span>
-                          <div className="flex items-center gap-1.5 mt-0.5">
-                            <span className="text-[11px] font-mono text-slate-400">
-                              Ref: {camp.code}
+        <div className="space-y-6">
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            {campaignsList.length === 0 ? (
+              <div className="text-center py-16 px-4">
+                <CalendarClock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Nenhuma campanha de horário cadastrada
+                </h3>
+                <p className="text-xs text-slate-500 mt-1 mb-4">
+                  Crie uma campanha para destacar dias e horários com desconto
+                  direto no calendário de reserva das salas.
+                </p>
+                <Button
+                  onClick={() => {
+                    resetForm();
+                    setView("create_campaign");
+                  }}
+                  size="sm"
+                  className="bg-[#BF4B24] hover:bg-[#9A3C1D] text-white font-semibold rounded-xl text-xs"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1.5" /> Criar Primeira
+                  Campanha
+                </Button>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs whitespace-nowrap tabular-nums">
+                  <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
+                    <tr>
+                      <th className="px-6 py-3.5">Campanha</th>
+                      <th className="px-6 py-3.5">Oferta & Sala(s)</th>
+                      <th className="px-6 py-3.5">Grade de Dias e Horários</th>
+                      <th className="px-6 py-3.5 text-center">
+                        Exibição no Calendário
+                      </th>
+                      <th className="px-6 py-3.5">Reservas Geradas</th>
+                      <th className="px-6 py-3.5">Status</th>
+                      <th className="px-6 py-3.5 text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {campaignsList.map((camp) => {
+                      const rules = extractCouponRules(camp);
+                      const isExpired =
+                        camp.valid_until &&
+                        new Date(camp.valid_until) < new Date();
+                      const totalBlocks = Object.values(rules.day_hours).reduce(
+                        (acc, arr) => acc + arr.length,
+                        0,
+                      );
+                      const roomNamesList: string[] = Array.isArray(
+                        camp.room_names,
+                      )
+                        ? camp.room_names
+                        : [];
+
+                      return (
+                        <tr
+                          key={camp.id}
+                          className="hover:bg-slate-50/80 transition-colors"
+                        >
+                          <td className="px-6 py-4">
+                            <span className="font-bold text-slate-900 text-sm block">
+                              {rules.campaign_name || camp.code}
                             </span>
-                            {rules.rules_text && (
-                              <Badge className="bg-amber-50 text-amber-800 border border-amber-200 text-[9px] font-bold px-1.5 py-0">
-                                <FileText className="w-2.5 h-2.5 mr-1" />
-                                Regulamento ativo
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <span className="text-[11px] font-mono text-slate-400">
+                                Ref: {camp.code}
+                              </span>
+                              {rules.rules_text && (
+                                <Badge className="bg-amber-50 text-amber-800 border border-amber-200 text-[9px] font-bold px-1.5 py-0">
+                                  <FileText className="w-2.5 h-2.5 mr-1" />
+                                  Regulamento ativo
+                                </Badge>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            {getTypeDisplay(camp.type, camp.discount_value)}
+                            <span className="block text-[11px] font-bold text-slate-700 mt-1">
+                              {roomNamesList.length > 0
+                                ? roomNamesList.length <= 2
+                                  ? roomNamesList.join(", ")
+                                  : `${roomNamesList.slice(0, 2).join(", ")} +${roomNamesList.length - 2}`
+                                : camp.valid_room_ids?.length > 0
+                                  ? `${camp.valid_room_ids.length} sala(s) participante(s)`
+                                  : "Todas as salas"}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="font-semibold text-slate-800 block">
+                              {totalBlocks} horário(s) na semana
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              {WEEKDAYS_LIST.filter(
+                                (w) =>
+                                  (rules.day_hours[String(w.id)] || []).length >
+                                  0,
+                              )
+                                .map(
+                                  (w) =>
+                                    `${w.short} (${rules.day_hours[String(w.id)].length}h)`,
+                                )
+                                .join(" • ")}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleCalendarDisplay(camp)}
+                              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                                rules.show_on_calendar && camp.is_active
+                                  ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                                  : "bg-slate-100 text-slate-500 border-slate-200"
+                              }`}
+                            >
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  rules.show_on_calendar && camp.is_active
+                                    ? "bg-emerald-600"
+                                    : "bg-slate-400"
+                                }`}
+                              />
+                              {rules.show_on_calendar && camp.is_active
+                                ? "Visível no Calendário"
+                                : "Oculta"}
+                            </button>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div>
+                              <span className="font-bold text-slate-900 text-sm">
+                                {camp.current_uses || 0}
+                              </span>
+                              <span className="text-slate-400">
+                                {camp.max_uses
+                                  ? ` / ${camp.max_uses} reservas`
+                                  : " reservas"}
+                              </span>
+                            </div>
+                            {Number(camp.synced_revenue_brl || 0) > 0 && (
+                              <span className="block text-[11px] font-bold text-emerald-700 mt-0.5">
+                                R$ {formatBRL(camp.synced_revenue_brl)} faturado
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            {isExpired ? (
+                              <Badge className="bg-red-50 text-red-700 border-0 font-semibold">
+                                Expirada
+                              </Badge>
+                            ) : camp.is_active ? (
+                              <Badge className="bg-emerald-50 text-emerald-700 border-0 font-semibold">
+                                Ativa
+                              </Badge>
+                            ) : (
+                              <Badge className="bg-slate-100 text-slate-600 border-0 font-semibold">
+                                Pausada
                               </Badge>
                             )}
-                          </div>
+                          </td>
+                          <td className="px-6 py-4 flex items-center justify-end gap-1.5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() =>
+                                handleToggleStatus(camp.id, camp.is_active)
+                              }
+                              className="h-8 text-xs font-semibold border-slate-200 text-slate-700"
+                            >
+                              {camp.is_active ? "Pausar" : "Ativar"}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Editar Horários, Salas e Regulamento"
+                              onClick={() => handleOpenEdit(camp)}
+                              className="h-8 w-8 text-slate-600 hover:bg-slate-100"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Ver reservas e regulamento desta campanha"
+                              onClick={() => openDetails(camp)}
+                              className="h-8 w-8 text-slate-600 hover:bg-slate-100"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Excluir"
+                              onClick={() =>
+                                handleDelete(
+                                  camp.id,
+                                  `a campanha "${rules.campaign_name}"`,
+                                )
+                              }
+                              className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden">
+            <div className="p-5 border-b border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div>
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <CalendarDays className="w-4 h-4 text-[#BF4B24]" />
+                  Histórico Sincronizado de Quem Usou as Campanhas (
+                  {filteredAllCampaignUses.length})
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Lista completa e atualizada de profissionais que reservaram
+                  horários promocionais, quando compraram e qual horário foi
+                  agendado.
+                </p>
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                {campaignRoomsFilterOptions.length > 1 && (
+                  <select
+                    value={usesRoomFilter}
+                    onChange={(e) => setUsesRoomFilter(e.target.value)}
+                    className="h-9 bg-slate-50 border border-slate-200 rounded-xl px-3 text-xs font-semibold text-slate-700 outline-none"
+                  >
+                    <option value="all">Todas as salas</option>
+                    {campaignRoomsFilterOptions.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+                  <Input
+                    placeholder="Buscar profissional ou sala..."
+                    value={usesSearch}
+                    onChange={(e) => setUsesSearch(e.target.value)}
+                    className="h-9 pl-8 w-full sm:w-60 bg-slate-50 border-slate-200 rounded-xl text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {filteredAllCampaignUses.length === 0 ? (
+              <div className="p-12 text-center text-slate-400 text-xs font-medium">
+                {allCampaignUses.length === 0
+                  ? "Nenhuma reserva confirmada nas campanhas até o momento."
+                  : "Nenhuma reserva encontrada para o filtro digitado."}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs whitespace-nowrap tabular-nums">
+                  <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
+                    <tr>
+                      <th className="px-6 py-3.5">Quando Comprou</th>
+                      <th className="px-6 py-3.5">Profissional</th>
+                      <th className="px-6 py-3.5">Sala & Campanha</th>
+                      <th className="px-6 py-3.5">Horário da Consulta</th>
+                      <th className="px-6 py-3.5">Status</th>
+                      <th className="px-6 py-3.5 text-right">Valor Pago</th>
+                      <th className="px-6 py-3.5 text-right">Desconto</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredAllCampaignUses.map((use) => (
+                      <tr
+                        key={`${use.coupon_id}_${use.id}`}
+                        className="hover:bg-slate-50/80 transition-colors"
+                      >
+                        <td className="px-6 py-3.5 text-slate-700 font-medium">
+                          {formatSafeDateTime(use.used_at)}
                         </td>
-                        <td className="px-6 py-4">
-                          {getTypeDisplay(camp.type, camp.discount_value)}
-                          <span className="block text-[11px] text-slate-500 mt-1">
-                            {camp.valid_room_ids?.length > 0
-                              ? `${camp.valid_room_ids.length} sala(s) participante(s)`
-                              : "Todas as salas"}
+                        <td className="px-6 py-3.5">
+                          <p className="font-bold text-slate-900">
+                            {use.specialist_name}
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            {use.specialist_phone ||
+                              use.specialist_email ||
+                              "—"}
+                          </p>
+                        </td>
+                        <td className="px-6 py-3.5">
+                          <p className="font-bold text-slate-900">
+                            {use.room_name}
+                          </p>
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#BF4B24]">
+                            <Flame className="w-2.5 h-2.5" />
+                            {use.campaign_name}
                           </span>
                         </td>
-                        <td className="px-6 py-4">
-                          <span className="font-semibold text-slate-800 block">
-                            {totalBlocks} horário(s) na semana
-                          </span>
-                          <span className="text-[11px] text-slate-500">
-                            {WEEKDAYS_LIST.filter(
-                              (w) =>
-                                (rules.day_hours[String(w.id)] || []).length >
-                                0,
-                            )
-                              .map(
-                                (w) =>
-                                  `${w.short} (${rules.day_hours[String(w.id)].length}h)`,
-                              )
-                              .join(" • ")}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleCalendarDisplay(camp)}
-                            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
-                              rules.show_on_calendar && camp.is_active
-                                ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                                : "bg-slate-100 text-slate-500 border-slate-200"
-                            }`}
-                          >
-                            <span
-                              className={`w-2 h-2 rounded-full ${
-                                rules.show_on_calendar && camp.is_active
-                                  ? "bg-emerald-600"
-                                  : "bg-slate-400"
-                              }`}
-                            />
-                            {rules.show_on_calendar && camp.is_active
-                              ? "Visível no Calendário"
-                              : "Oculta"}
-                          </button>
-                        </td>
-                        <td className="px-6 py-4">
-                          <span className="font-bold text-slate-900">
-                            {camp.current_uses || 0}
-                          </span>
-                          <span className="text-slate-400">
-                            {camp.max_uses
-                              ? ` / ${camp.max_uses} reservas`
-                              : " reservas"}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4">
-                          {isExpired ? (
-                            <Badge className="bg-red-50 text-red-700 border-0 font-semibold">
-                              Expirada
-                            </Badge>
-                          ) : camp.is_active ? (
-                            <Badge className="bg-emerald-50 text-emerald-700 border-0 font-semibold">
-                              Ativa
-                            </Badge>
+                        <td className="px-6 py-3.5 text-slate-700">
+                          {use.start_time ? (
+                            <span>
+                              {formatSafeDateTime(use.start_time, "dd/MM/yyyy")}{" "}
+                              •{" "}
+                              <strong>
+                                {formatSafeDateTime(use.start_time, "HH:mm")}
+                              </strong>
+                              {use.end_time
+                                ? `–${formatSafeDateTime(use.end_time, "HH:mm")}`
+                                : ""}
+                            </span>
                           ) : (
-                            <Badge className="bg-slate-100 text-slate-600 border-0 font-semibold">
-                              Pausada
-                            </Badge>
+                            "—"
                           )}
                         </td>
-                        <td className="px-6 py-4 flex items-center justify-end gap-1.5">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() =>
-                              handleToggleStatus(camp.id, camp.is_active)
-                            }
-                            className="h-8 text-xs font-semibold border-slate-200 text-slate-700"
-                          >
-                            {camp.is_active ? "Pausar" : "Ativar"}
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Editar Horários, Salas e Regulamento"
-                            onClick={() => handleOpenEdit(camp)}
-                            className="h-8 w-8 text-slate-600 hover:bg-slate-100"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Ver reservas e regulamento desta campanha"
-                            onClick={() => openDetails(camp)}
-                            className="h-8 w-8 text-slate-600 hover:bg-slate-100"
-                          >
-                            <Eye className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            title="Excluir"
-                            onClick={() =>
-                              handleDelete(
-                                camp.id,
-                                `a campanha "${rules.campaign_name}"`,
-                              )
-                            }
-                            className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
+                        <td className="px-6 py-3.5">
+                          {getBookingStatusBadge(use.booking_status)}
+                        </td>
+                        <td className="px-6 py-3.5 text-right font-bold text-slate-900">
+                          R$ {formatBRL(use.paid_brl)}
+                        </td>
+                        <td className="px-6 py-3.5 text-right font-bold text-emerald-700">
+                          - R$ {formatBRL(use.discount_applied)}
                         </td>
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
