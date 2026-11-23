@@ -1,43 +1,43 @@
-// app/actions/send-email.ts
 "use server";
-
 import { Resend } from "resend";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createClient as createServerSupabase } from "@/utils/supabase/server";
+import {
+  dispatchWhatsAppBatch,
+  normalizeBrazilWhatsApp,
+  parseEnvAdminWhatsApps,
+  type WhatsAppMessagePayload,
+} from "@/utils/evolution-whatsapp";
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
 const APP_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
   process.env.NEXT_PUBLIC_APP_URL ||
   "https://fusionapp.com.br";
-
-// DOMÍNIO OFICIAL VERIFICADO NO RESEND: fusionapp.com.br
 const FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL ||
   "Fusion Clinic <nao-responda@fusionapp.com.br>";
-
 const FALLBACK_ADMIN_EMAIL =
   process.env.ADMIN_NOTIFICATION_EMAIL || "tecnologia@fusionapp.com.br";
 
 async function getDbClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
   if (serviceKey && serviceKey.trim().length > 20) {
     return createSupabaseClient(url, serviceKey.trim(), {
       auth: { persistSession: false },
     });
   }
-
   return await createServerSupabase();
 }
 
 async function dispatchEmailsSafely(emailPayloads: any[]) {
+  if (!process.env.RESEND_API_KEY) {
+    return { success: false, error: "RESEND_API_KEY ausente." };
+  }
   if (!emailPayloads || emailPayloads.length === 0) {
     return { success: false, error: "Nenhum destinatário encontrado." };
   }
-
   try {
     if (emailPayloads.length === 1) {
       const { data, error } = await resend.emails.send(emailPayloads[0]);
@@ -47,7 +47,6 @@ async function dispatchEmailsSafely(emailPayloads: any[]) {
       }
       return { success: true, data };
     }
-
     const { data, error } = await resend.batch.send(emailPayloads);
     if (error) {
       console.error("[Resend Error Batch]:", error);
@@ -64,7 +63,6 @@ async function dispatchEmailsSafely(emailPayloads: any[]) {
         error: errors.join(" | "),
       };
     }
-
     return { success: true, data };
   } catch (err: any) {
     console.error("[Resend Exception]:", err);
@@ -72,9 +70,14 @@ async function dispatchEmailsSafely(emailPayloads: any[]) {
   }
 }
 
-// ============================================================================
-// FORMATADORES COM TRAVA DE FUSO HORÁRIO (AMERICA/FORTALEZA - UTC-3)
-// ============================================================================
+function collectAdminPhones(adminProfiles: any[] | null | undefined): string[] {
+  const fromDb = (adminProfiles || [])
+    .map((a: any) => normalizeBrazilWhatsApp(a?.whatsapp || a?.phone))
+    .filter((n): n is string => Boolean(n));
+  const fromEnv = parseEnvAdminWhatsApps();
+  return Array.from(new Set([...fromDb, ...fromEnv]));
+}
+
 function formatBrazilDate(isoString: string): string {
   const date = new Date(isoString);
   return new Intl.DateTimeFormat("pt-BR", {
@@ -116,7 +119,6 @@ function formatBrazilUberTimestamp(isoString: string): string {
     minute: "2-digit",
     hour12: false,
   }).format(date);
-
   return `${day} de ${monthShort} de ${year} , ${time}`;
 }
 
@@ -150,9 +152,6 @@ function formatBRL(value: number): string {
   });
 }
 
-// ============================================================================
-// TEMPLATE PADRÃO FUSION (Para Avisos, Anfitrião, Admin, Cancelamento e Gift)
-// ============================================================================
 function buildFusionEmailLayout(
   title: string,
   badgeText: string,
@@ -190,15 +189,11 @@ function buildFusionEmailLayout(
   </html>`;
 }
 
-// ============================================================================
-// 1. E-MAIL DE BOAS-VINDAS
-// ============================================================================
 export async function sendWelcomeEmail(toEmail: string, userName: string) {
   try {
     if (!process.env.RESEND_API_KEY || !toEmail) {
       return { success: false, error: "Credenciais ou destinatário ausentes" };
     }
-
     const html = buildFusionEmailLayout(
       `Bem-vindo(a) à Fusion Clinic, ${userName}!`,
       "Conta Verificada",
@@ -218,7 +213,6 @@ export async function sendWelcomeEmail(toEmail: string, userName: string) {
       </div>
       `,
     );
-
     return await dispatchEmailsSafely([
       {
         from: FROM_EMAIL,
@@ -233,30 +227,22 @@ export async function sendWelcomeEmail(toEmail: string, userName: string) {
   }
 }
 
-// ============================================================================
-// 2. NOTIFICAÇÕES COMPLETAS DE RESERVA (MÉDICO + ANFITRIÃO + ADMIN)
-// ============================================================================
 export async function sendBookingNotificationEmails(bookingId: string) {
   try {
-    if (!process.env.RESEND_API_KEY || !bookingId) {
-      return { success: false, error: "RESEND_API_KEY ou bookingId ausente." };
+    if (!bookingId) {
+      return { success: false, error: "bookingId ausente." };
     }
-
     const supabase = await getDbClient();
-
     const { data: mainBooking, error: bErr } = await supabase
       .from("bookings")
       .select("*")
       .eq("id", bookingId)
       .maybeSingle();
-
     if (bErr || !mainBooking) {
       console.error("[Email] Reserva não localizada no banco:", bookingId, bErr);
       return { success: false, error: "Reserva não localizada no banco." };
     }
-
     let batchBookings: any[] = [mainBooking];
-
     if (mainBooking.asaas_payment_id) {
       const { data: samePaymentBookings } = await supabase
         .from("bookings")
@@ -264,7 +250,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .eq("asaas_payment_id", mainBooking.asaas_payment_id)
         .neq("status", "cancelled")
         .order("start_time", { ascending: true });
-
       if (samePaymentBookings && samePaymentBookings.length > 0) {
         batchBookings = samePaymentBookings;
       }
@@ -272,7 +257,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       const createdMs = new Date(mainBooking.created_at).getTime();
       const minWindow = new Date(createdMs - 20 * 1000).toISOString();
       const maxWindow = new Date(createdMs + 20 * 1000).toISOString();
-
       const { data: siblingBookings } = await supabase
         .from("bookings")
         .select("*")
@@ -282,21 +266,17 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .gte("created_at", minWindow)
         .lte("created_at", maxWindow)
         .order("start_time", { ascending: true });
-
       if (siblingBookings && siblingBookings.length > 0) {
         batchBookings = siblingBookings;
       }
     }
-
     batchBookings.sort(
       (a, b) =>
         new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),
     );
-
     const firstSlot = batchBookings[0];
     const lastSlot = batchBookings[batchBookings.length - 1];
     const totalSlotsCount = batchBookings.length;
-
     const [roomRes, specialistRes, adminsRes] = await Promise.all([
       supabase
         .from("rooms")
@@ -308,12 +288,13 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .select("*")
         .eq("id", mainBooking.user_id)
         .maybeSingle(),
-      supabase.from("profiles").select("email, full_name").eq("role", "admin"),
+      supabase
+        .from("profiles")
+        .select("email, full_name, phone, whatsapp")
+        .eq("role", "admin"),
     ]);
-
     const room = roomRes.data;
     const specialist = specialistRes.data;
-
     let hostProfile: any = null;
     if (room?.host_id) {
       const { data: hData } = await supabase
@@ -323,7 +304,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .maybeSingle();
       hostProfile = hData;
     }
-
     let specialistEmail = specialist?.email || null;
     if (!specialistEmail && mainBooking.user_id) {
       try {
@@ -333,7 +313,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         specialistEmail = authUser?.user?.email || null;
       } catch {}
     }
-
     let hostEmail = hostProfile?.email || null;
     if (!hostEmail && room?.host_id) {
       try {
@@ -343,20 +322,21 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         hostEmail = authHost?.user?.email || null;
       } catch {}
     }
-
     const adminEmails = Array.from(
       new Set([
         ...(adminsRes.data || []).map((a: any) => a.email).filter(Boolean),
         FALLBACK_ADMIN_EMAIL,
       ]),
     );
+    const adminPhones = collectAdminPhones(adminsRes.data);
+    const specialistPhone = specialist?.whatsapp || specialist?.phone || null;
+    const hostPhone = hostProfile?.whatsapp || hostProfile?.phone || null;
 
     const entryDateFormatted = formatBrazilDate(firstSlot.start_time);
     const entryTimeFormatted = formatBrazilTime(firstSlot.start_time);
     const exitDateFormatted = formatBrazilDate(lastSlot.end_time);
     const exitTimeFormatted = formatBrazilTime(lastSlot.end_time);
     const fullDateLong = formatBrazilDateLong(firstSlot.start_time);
-
     let address: any = room?.address_details || {};
     if (typeof address === "string") {
       try {
@@ -365,7 +345,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         address = {};
       }
     }
-
     const hourlyRateFallback = Number(address?.pricing?.hourly || 45);
     const totalBrlValue = batchBookings.reduce((acc, b) => {
       if (b.agreed_value_brl && Number(b.agreed_value_brl) > 0) {
@@ -374,11 +353,9 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       const c = Number(b.total_cost || 1);
       return acc + (c < 10 ? c * hourlyRateFallback : c);
     }, 0);
-
     const isPaidWithCredits = String(
       mainBooking.booking_origin || "",
     ).startsWith("wallet_");
-
     const streetLine = [
       address.street || "Endereço da Unidade",
       address.number ? `nº ${address.number}` : "",
@@ -386,21 +363,24 @@ export async function sendBookingNotificationEmails(bookingId: string) {
     ]
       .filter(Boolean)
       .join(", ");
-
     const neighborhoodLine = address.neighborhood || "Lagoa Nova";
     const cityStateLine = `${address.city || "Natal"} - ${address.state || "RN"}${address.cep ? `, CEP ${address.cep}` : ""}`;
-
     const roomPhotoUrl =
       room?.image_url && String(room.image_url).startsWith("http")
         ? room.image_url
         : `${APP_URL}${room?.image_url || "/images/room-consultorio.jpg"}`;
-
     const roomName = room?.name || "Consultório Fusion";
     const clinicName =
       address.clinic_name || hostProfile?.full_name || "Fusion Clinic";
     const specialistName = specialist?.full_name || "Doutor(a)";
+    const specialistFirstName =
+      specialistName.trim().split(" ")[0] || "Doutor(a)";
     const specialistSpecialty = specialist?.specialty || "Saúde";
     const codeShort = `#${String(mainBooking.id).slice(0, 8).toUpperCase()}`;
+    const shortRoomCode = String(mainBooking.room_id || "").slice(0, 6);
+    const checkinDoorLink = shortRoomCode
+      ? `${APP_URL}/dashboard?scan=${shortRoomCode}`
+      : `${APP_URL}/dashboard#bookings`;
 
     const individualSlotsHtml =
       totalSlotsCount > 1
@@ -413,7 +393,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         : null;
 
     const emailPayloads: any[] = [];
-
     if (specialistEmail) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -498,7 +477,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         style="max-width: 175px; height: auto;"
       />
     </div>
-
     <section class="section card">
       <div>
         <span style="display: inline-block; background-color: #ECFDF5; color: #047857; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">
@@ -511,7 +489,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           Olá, <strong>${specialistName}</strong>! Seu consultório está reservado e preparado para o seu atendimento.
         </p>
       </div>
-
       <div>
         <img
           class="room-image"
@@ -521,7 +498,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           height="242"
         />
       </div>
-
       <table class="info-table" role="presentation">
         <tr>
           <td width="34%">
@@ -547,7 +523,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           </td>
         </tr>
       </table>
-
       ${
         individualSlotsHtml
           ? `<div style="background-color: #FAF7F4; border: 1px solid #E5E7EB; border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; font-size: 12px; color: #464E5F;">
@@ -555,7 +530,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
              </div>`
           : ""
       }
-
       <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-radius: 16px; padding: 16px; margin-bottom: 18px;">
         <p style="font-size: 13px; font-weight: 800; color: #92400E; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;">
           ⏱ Importante: Por que a reserva tem 50 minutos por hora? (${entryTimeFormatted} às ${exitTimeFormatted})
@@ -564,30 +538,25 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           Na Fusion Clinic, cada hora reservada compreende <strong>50 minutos de consulta efetiva</strong>. Os <strong>10 minutos finais</strong> são reservados para a saída tranquila do paciente, organização do espaço e transição sem atrasos para o próximo profissional que atenderá no horário seguinte.
         </p>
       </div>
-
       <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; padding: 18px; margin-bottom: 22px;">
         <h3 style="font-size: 14px; font-weight: 800; color: #1E293B; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 12px;">
           📲 Check-in, Check-out e Cuidados ao Sair da Sala
         </h3>
-
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
           <strong>1. Check-in Obrigatório ao Chegar:</strong><br />
           Ao chegar ao consultório, encoste seu celular na <strong>Tag NFC da porta</strong> (ou leia o QR Code da placa) para registrar sua entrada.
         </p>
-
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
           <strong>2. Ao Finalizar seu Atendimento (Antes de Sair):</strong><br />
           ❄️ <strong>Desligue o ar-condicionado</strong>;<br />
           💡 <strong>Apague todas as luzes</strong> da sala;<br />
           ✨ Deixe o consultório organizado para o próximo profissional.
         </p>
-
         <p style="font-size: 13px; color: #334155; line-height: 1.55;">
           <strong>3. Check-out Obrigatório ao Sair (Até as ${exitTimeFormatted}):</strong><br />
           Ao sair da sala, <strong>encoste novamente o celular na Tag NFC / QR Code da porta</strong> (ou clique em <em>Registrar Saída</em> no app) para encerrar sua sessão no horário e evitar cobrança automática de hora extra.
         </p>
       </div>
-
       <div style="border-top: 1px solid #F1F1F4; padding-top: 18px; margin-bottom: 18px;">
         <h2 style="font-size: 15px; font-weight: 800; color: #464E5F; margin-bottom: 12px;">
           DETALHES DO AGENDAMENTO
@@ -605,7 +574,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           </p>
         </div>
       </div>
-
       <div style="border-top: 1px solid #F1F1F4; padding-top: 16px;">
         <h3 style="font-size: 12px; font-weight: 800; color: #B5B5C3; text-transform: uppercase;">VALOR TOTAL</h3>
         <h2 style="font-size: 26px; font-weight: 900; color: #464E5F; margin-top: 2px;">
@@ -615,7 +583,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           ${isPaidWithCredits ? `Pago com Créditos Fusion Pass+ (${totalSlotsCount}h) • Taxas inclusas` : "Taxas inclusas"}
         </p>
       </div>
-
       <div style="margin-top: 24px; text-align: center;">
         <a
           href="${APP_URL}/dashboard#bookings"
@@ -629,7 +596,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
 </html>`.trim(),
       });
     }
-
     if (hostEmail) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -653,7 +619,6 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         ),
       });
     }
-
     if (adminEmails.length > 0) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -678,20 +643,101 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       });
     }
 
-    const dispatchResult = await dispatchEmailsSafely(emailPayloads);
+    const whatsappPayloads: WhatsAppMessagePayload[] = [];
+    if (specialistPhone) {
+      const slotsDetailLine =
+        totalSlotsCount > 1 && individualSlotsHtml
+          ? `\n📌 *Horários (${totalSlotsCount}h):* ${individualSlotsHtml}`
+          : "";
+      whatsappPayloads.push({
+        phone: specialistPhone,
+        delayMs: 1000,
+        text: [
+          `✅ *Reserva Confirmada — Fusion Clinic*`,
+          ``,
+          `Olá, *${specialistFirstName}*! Seu consultório está garantido.`,
+          ``,
+          `🚪 *Sala:* ${roomName}`,
+          `🏥 *Unidade:* ${clinicName}`,
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)${slotsDetailLine}`,
+          `📍 *Endereço:* ${streetLine}, ${neighborhoodLine} — ${cityStateLine}`,
+          `🔑 *Código:* ${codeShort}`,
+          ``,
+          `📲 *Check-in e Check-out (libera 15 min antes):*`,
+          `${checkinDoorLink}`,
+          `_(Você também pode encostar o celular na Tag NFC ou ler o QR Code na porta da sala)_`,
+          ``,
+          `⚠️ *Regras importantes do atendimento:*`,
+          `• Cada hora compreende *50 min de consulta* + 10 min de transição.`,
+          `• Antes de sair, *desligue o ar-condicionado* e *apague as luzes*.`,
+          `• Faça o *Check-out obrigatório até às ${exitTimeFormatted}* (tolerância máxima de 15 min para evitar cobrança automática de hora extra).`,
+        ].join("\n"),
+      });
+    }
+
+    if (hostPhone) {
+      whatsappPayloads.push({
+        phone: hostPhone,
+        delayMs: 2400,
+        text: [
+          `📅 *Nova Reserva na sua Unidade — Fusion Clinic*`,
+          ``,
+          `Olá, *${clinicName}*! Um profissional reservou um horário no seu espaço:`,
+          ``,
+          `👨‍⚕️ *Profissional:* ${specialistName} (${specialistSpecialty})`,
+          `🚪 *Sala:* ${roomName}`,
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          `🔑 *Código:* ${codeShort}`,
+          ``,
+          `Deixe o consultório preparado para receber o especialista no horário agendado.`,
+        ].join("\n"),
+      });
+    }
+
+    adminPhones.forEach((adminPhone, idx) => {
+      whatsappPayloads.push({
+        phone: adminPhone,
+        delayMs: 3600 + idx * 1200,
+        text: [
+          `🔔 *[Admin] Nova Reserva Confirmada*`,
+          ``,
+          `👨‍⚕️ *Profissional:* ${specialistName} (${specialistSpecialty})`,
+          `🚪 *Sala:* ${roomName} • ${clinicName}`,
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          `💳 *Pagamento:* ${isPaidWithCredits ? `Créditos Fusion Pass+ (${totalSlotsCount}h)` : `R$ ${formatBRL(totalBrlValue)}`}`,
+          `🔑 *Reserva:* ${codeShort}`,
+        ].join("\n"),
+      });
+    });
+
+    const [emailResult, whatsappResult] = await Promise.allSettled([
+      dispatchEmailsSafely(emailPayloads),
+      dispatchWhatsAppBatch(whatsappPayloads),
+    ]);
+
+    const emailData =
+      emailResult.status === "fulfilled"
+        ? emailResult.value
+        : { success: false, error: "Falha no e-mail" };
+    const waData =
+      whatsappResult.status === "fulfilled"
+        ? whatsappResult.value
+        : { sentCount: 0, failedCount: whatsappPayloads.length };
+
     return {
-      ...dispatchResult,
+      ...emailData,
       sentCount: emailPayloads.length,
+      whatsappSentCount: waData.sentCount,
     };
   } catch (err: any) {
-    console.error("Erro ao disparar e-mails de reserva:", err);
+    console.error("Erro ao disparar notificações de reserva:", err);
     return { success: false, error: err.message };
   }
 }
 
-// ============================================================================
-// 3. NOTIFICAÇÕES DE PAGAMENTO CONFIRMADO (PROFISSIONAL + ADMIN + ANFITRIÃO)
-// ============================================================================
 export async function sendPaymentNotificationEmails(params: {
   userId: string;
   amountBrl: number;
@@ -704,7 +750,6 @@ export async function sendPaymentNotificationEmails(params: {
   try {
     if (!process.env.RESEND_API_KEY) return { success: false };
     const supabase = await getDbClient();
-
     const [userProfileRes, adminsRes] = await Promise.all([
       supabase
         .from("profiles")
@@ -713,7 +758,6 @@ export async function sendPaymentNotificationEmails(params: {
         .maybeSingle(),
       supabase.from("profiles").select("email, full_name").eq("role", "admin"),
     ]);
-
     const specialist = userProfileRes.data;
     let specialistEmail = specialist?.email;
     if (!specialistEmail && params.userId) {
@@ -724,14 +768,12 @@ export async function sendPaymentNotificationEmails(params: {
         specialistEmail = authUser?.user?.email;
       } catch {}
     }
-
     const adminEmails = Array.from(
       new Set([
         ...(adminsRes.data || []).map((a: any) => a.email).filter(Boolean),
         FALLBACK_ADMIN_EMAIL,
       ]),
     );
-
     const specialistName = specialist?.full_name || "Especialista";
     const tierUpper = String(params.tier || "START").toUpperCase();
     const nowIso = new Date().toISOString();
@@ -741,9 +783,7 @@ export async function sendPaymentNotificationEmails(params: {
       (params.creditsAdded
         ? `Pacote de ${params.creditsAdded} hora(s) (${tierUpper})`
         : "Pagamento confirmado na Fusion Clinic");
-
     const emailPayloads: any[] = [];
-
     if (specialistEmail) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -769,7 +809,6 @@ export async function sendPaymentNotificationEmails(params: {
         ),
       });
     }
-
     if (adminEmails.length > 0) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -791,7 +830,6 @@ export async function sendPaymentNotificationEmails(params: {
         ),
       });
     }
-
     if (params.hostId) {
       const { data: hostProf } = await supabase
         .from("profiles")
@@ -814,7 +852,6 @@ export async function sendPaymentNotificationEmails(params: {
         });
       }
     }
-
     return await dispatchEmailsSafely(emailPayloads);
   } catch (err: any) {
     console.error("Erro ao disparar e-mails de pagamento:", err);
@@ -822,9 +859,6 @@ export async function sendPaymentNotificationEmails(params: {
   }
 }
 
-// ============================================================================
-// 4. CANCELAMENTO DE RESERVA (PROFISSIONAL + ANFITRIÃO + ADMIN)
-// ============================================================================
 export async function sendBookingCancellationEmails(
   bookingIds: string | string[],
   options?: {
@@ -834,33 +868,26 @@ export async function sendBookingCancellationEmails(
   },
 ) {
   try {
-    if (!process.env.RESEND_API_KEY || !bookingIds) {
-      return { success: false, error: "Credenciais ou ID da reserva ausentes." };
+    if (!bookingIds) {
+      return { success: false, error: "ID da reserva ausente." };
     }
-
     const idsArray = Array.isArray(bookingIds)
       ? bookingIds.filter(Boolean)
       : [bookingIds].filter(Boolean);
-
     if (idsArray.length === 0) return { success: false };
-
     const supabase = await getDbClient();
-
     const { data: bookingsList, error: bErr } = await supabase
       .from("bookings")
       .select("*")
       .in("id", idsArray)
       .order("start_time", { ascending: true });
-
     if (bErr || !bookingsList || bookingsList.length === 0) {
       console.error("[Email Cancelamento] Reserva não localizada:", bErr);
       return { success: false, error: "Reserva não localizada." };
     }
-
     const firstBooking = bookingsList[0];
     const lastBooking = bookingsList[bookingsList.length - 1];
     const totalSlotsCount = bookingsList.length;
-
     const [roomRes, specialistRes, adminsRes] = await Promise.all([
       supabase
         .from("rooms")
@@ -872,18 +899,17 @@ export async function sendBookingCancellationEmails(
         .select("*")
         .eq("id", firstBooking.user_id)
         .maybeSingle(),
-      supabase.from("profiles").select("email, full_name").eq("role", "admin"),
+      supabase
+        .from("profiles")
+        .select("email, full_name, phone, whatsapp")
+        .eq("role", "admin"),
     ]);
-
     const room = roomRes.data;
     const specialist = specialistRes.data;
-
-    // Fuso Horário de Natal/Fortaleza (UTC-3)
     const entryDateFormatted = formatBrazilDate(firstBooking.start_time);
     const entryTimeFormatted = formatBrazilTime(firstBooking.start_time);
     const exitDateFormatted = formatBrazilDate(lastBooking.end_time);
     const exitTimeFormatted = formatBrazilTime(lastBooking.end_time);
-
     let specialistEmail = specialist?.email || null;
     if (!specialistEmail && firstBooking.user_id) {
       try {
@@ -893,36 +919,38 @@ export async function sendBookingCancellationEmails(
         specialistEmail = authUser?.user?.email || null;
       } catch {}
     }
-
     let hostEmail: string | null = null;
+    let hostPhone: string | null = null;
     let clinicName = "Fusion Clinic";
     if (room?.host_id) {
       const { data: hData } = await supabase
         .from("profiles")
-        .select("email, full_name")
+        .select("email, full_name, phone, whatsapp")
         .eq("id", room.host_id)
         .maybeSingle();
       hostEmail = hData?.email || null;
+      hostPhone = hData?.whatsapp || hData?.phone || null;
       clinicName = hData?.full_name || clinicName;
     }
-
     const adminEmails = Array.from(
       new Set([
         ...(adminsRes.data || []).map((a: any) => a.email).filter(Boolean),
         FALLBACK_ADMIN_EMAIL,
       ]),
     );
+    const adminPhones = collectAdminPhones(adminsRes.data);
+    const specialistPhone = specialist?.whatsapp || specialist?.phone || null;
 
     const roomName = room?.name || "Consultório Fusion";
     const specialistName = specialist?.full_name || "Doutor(a)";
+    const specialistFirstName =
+      specialistName.trim().split(" ")[0] || "Doutor(a)";
     const codeShort = `#${String(firstBooking.id).slice(0, 8).toUpperCase()}`;
-
     const roomPhotoUrl =
       room?.image_url && String(room.image_url).startsWith("http")
         ? room.image_url
         : `${APP_URL}${room?.image_url || "/images/room-consultorio.jpg"}`;
 
-    // Lógica visual do Cartão de Estorno (Refund)
     const refundNoteHtml =
       options?.wasRefunded === true
         ? `<div style="background-color: #ECFDF5; border: 1px solid #A7F3D0; border-radius: 16px; padding: 16px; margin-bottom: 18px;">
@@ -949,8 +977,6 @@ export async function sendBookingCancellationEmails(
              </div>`;
 
     const emailPayloads: any[] = [];
-
-    // 1. E-MAIL PARA O ESPECIALISTA (NOVO DESIGN COM FOTO PRETO E BRANCO)
     if (specialistEmail) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -990,7 +1016,7 @@ export async function sendBookingCancellationEmails(
         border-radius: 24px;
         margin: 14px 0 20px 0;
         display: block;
-        filter: grayscale(80%) opacity(0.85); /* Traz o efeito visual de cancelado */
+        filter: grayscale(80%) opacity(0.85);
       }
       .info-table {
         width: 100%;
@@ -1011,10 +1037,10 @@ export async function sendBookingCancellationEmails(
         margin-bottom: 4px;
       }
       .value-td {
-        color: #94A3B8; /* Cor mais apagada para horário cancelado */
+        color: #94A3B8;
         font-size: 15px;
         font-weight: 700;
-        text-decoration: line-through; /* Riscado */
+        text-decoration: line-through;
       }
       @media only screen and (max-width: 580px) {
         .info-table, .info-table tbody, .info-table tr, .info-table td {
@@ -1037,7 +1063,6 @@ export async function sendBookingCancellationEmails(
         style="max-width: 175px; height: auto;"
       />
     </div>
-
     <section class="section card">
       <div>
         <span style="display: inline-block; background-color: #FEF2F2; color: #991B1B; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;">
@@ -1050,7 +1075,6 @@ export async function sendBookingCancellationEmails(
           Olá, <strong>${specialistName}</strong>. O agendamento abaixo foi cancelado e a sala foi liberada.
         </p>
       </div>
-
       <div>
         <img
           class="room-image"
@@ -1060,7 +1084,6 @@ export async function sendBookingCancellationEmails(
           height="242"
         />
       </div>
-
       <table class="info-table" role="presentation">
         <tr>
           <td width="34%">
@@ -1082,9 +1105,7 @@ export async function sendBookingCancellationEmails(
           </td>
         </tr>
       </table>
-
       ${refundNoteHtml}
-
       <div style="margin-top: 24px; text-align: center;">
         <a
           href="${APP_URL}/dashboard#search"
@@ -1098,8 +1119,6 @@ export async function sendBookingCancellationEmails(
 </html>`.trim(),
       });
     }
-
-    // 2. E-MAIL PARA O ANFITRIÃO / CLÍNICA
     if (hostEmail) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -1122,8 +1141,6 @@ export async function sendBookingCancellationEmails(
         ),
       });
     }
-
-    // 3. E-MAIL PARA OS ADMINISTRADORES
     if (adminEmails.length > 0) {
       emailPayloads.push({
         from: FROM_EMAIL,
@@ -1146,16 +1163,83 @@ export async function sendBookingCancellationEmails(
       });
     }
 
-    return await dispatchEmailsSafely(emailPayloads);
+    const refundTextLine =
+      options?.wasRefunded === true
+        ? "💚 *Estorno:* Realizado integralmente na sua Carteira Digital (cancelamento com mais de 24h)."
+        : options?.wasRefunded === false
+          ? "⚠️ *Política:* Cancelamento com menos de 24h de antecedência não é elegível para estorno."
+          : "ℹ️ Os valores/créditos foram processados conforme a política de cancelamento da plataforma.";
+
+    const whatsappPayloads: WhatsAppMessagePayload[] = [];
+    if (specialistPhone) {
+      whatsappPayloads.push({
+        phone: specialistPhone,
+        delayMs: 1000,
+        text: [
+          `❌ *Reserva Cancelada — Fusion Clinic*`,
+          ``,
+          `Olá, *${specialistFirstName}*. Confirmamos o cancelamento do seu agendamento:`,
+          ``,
+          `🚪 *Sala:* ${roomName} (${clinicName})`,
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          `🔑 *Código:* ${codeShort}`,
+          ``,
+          refundTextLine,
+          ``,
+          `Agendar novo horário: ${APP_URL}/dashboard#search`,
+        ].join("\n"),
+      });
+    }
+
+    if (hostPhone) {
+      whatsappPayloads.push({
+        phone: hostPhone,
+        delayMs: 2400,
+        text: [
+          `❌ *Cancelamento de Reserva — ${roomName}*`,
+          ``,
+          `Olá, *${clinicName}*. O(a) profissional *${specialistName}* cancelou o horário abaixo:`,
+          ``,
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário liberado:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          `🔑 *Código:* ${codeShort}`,
+          ``,
+          `A agenda já foi liberada automaticamente para novas locações.`,
+        ].join("\n"),
+      });
+    }
+
+    adminPhones.forEach((adminPhone, idx) => {
+      whatsappPayloads.push({
+        phone: adminPhone,
+        delayMs: 3600 + idx * 1200,
+        text: [
+          `❌ *[Admin] Reserva Cancelada*`,
+          ``,
+          `👨‍⚕️ *Profissional:* ${specialistName}`,
+          `🚪 *Sala:* ${roomName} • ${clinicName}`,
+          `📅 *Data:* ${entryDateFormatted} (${entryTimeFormatted}–${exitTimeFormatted})`,
+          `💳 *Estorno:* ${options?.wasRefunded ? "SIM (>= 24h)" : "NÃO (< 24h / externo)"}`,
+          `🔑 *Código:* ${codeShort}`,
+        ].join("\n"),
+      });
+    });
+
+    const [emailResult] = await Promise.allSettled([
+      dispatchEmailsSafely(emailPayloads),
+      dispatchWhatsAppBatch(whatsappPayloads),
+    ]);
+
+    return emailResult.status === "fulfilled"
+      ? emailResult.value
+      : { success: false };
   } catch (err: any) {
-    console.error("Erro ao enviar e-mail de cancelamento:", err);
+    console.error("Erro ao enviar notificações de cancelamento:", err);
     return { success: false, error: err.message };
   }
 }
 
-// ============================================================================
-// 5. TRANSFERÊNCIA DE HORAS (FUSION GIFT)
-// ============================================================================
 export async function sendGiftNotificationEmail(
   receiverEmail: string,
   receiverName: string,
@@ -1189,9 +1273,6 @@ export async function sendGiftNotificationEmail(
   }
 }
 
-// ============================================================================
-// 6. CANCELAMENTO DE ASSINATURA
-// ============================================================================
 export async function sendSubscriptionCancellationEmail(
   userEmail: string,
   userName: string,
@@ -1222,41 +1303,30 @@ export async function sendSubscriptionCancellationEmail(
   }
 }
 
-// ============================================================================
-// 7. RECIBO PÓS-CHECK-OUT ESTILO UBER (COM IDENTIDADE FUSION CLINIC)
-// Disparado automaticamente quando o profissional faz Check-out na sala
-// ============================================================================
 export async function sendCheckoutReceiptEmail(
   bookingIds: string | string[],
 ) {
   try {
-    if (!process.env.RESEND_API_KEY || !bookingIds) {
+    if (!bookingIds) {
       return { success: false, error: "Dados de reserva ausentes." };
     }
-
     const idsArray = Array.isArray(bookingIds)
       ? bookingIds.filter(Boolean)
       : [bookingIds].filter(Boolean);
-
     if (idsArray.length === 0) return { success: false };
-
     const supabase = await getDbClient();
-
     const { data: bookingsList, error: bErr } = await supabase
       .from("bookings")
       .select("*")
       .in("id", idsArray)
       .order("start_time", { ascending: true });
-
     if (bErr || !bookingsList || bookingsList.length === 0) {
       console.error("[Email Checkout Receipt] Reserva não encontrada:", bErr);
       return { success: false, error: "Reserva não localizada." };
     }
-
     const firstBooking = bookingsList[0];
     const lastBooking = bookingsList[bookingsList.length - 1];
     const totalHoursCount = bookingsList.length;
-
     const [roomRes, specialistRes] = await Promise.all([
       supabase
         .from("rooms")
@@ -1269,10 +1339,8 @@ export async function sendCheckoutReceiptEmail(
         .eq("id", firstBooking.user_id)
         .maybeSingle(),
     ]);
-
     const room = roomRes.data;
     const specialist = specialistRes.data;
-
     let specialistEmail = specialist?.email || null;
     if (!specialistEmail && firstBooking.user_id) {
       try {
@@ -1282,10 +1350,7 @@ export async function sendCheckoutReceiptEmail(
         specialistEmail = authUser?.user?.email || null;
       } catch {}
     }
-
-    if (!specialistEmail) {
-      return { success: false, error: "Profissional sem e-mail cadastrado." };
-    }
+    const specialistPhone = specialist?.whatsapp || specialist?.phone || null;
 
     const fullName = specialist?.full_name || "Doutor(a)";
     const firstName = fullName.trim().split(" ")[0] || "Doutor(a)";
@@ -1297,7 +1362,6 @@ export async function sendCheckoutReceiptEmail(
         : roomTier === "VIP"
           ? "VIP"
           : "Basic";
-
     let address: any = room?.address_details || {};
     if (typeof address === "string") {
       try {
@@ -1306,7 +1370,6 @@ export async function sendCheckoutReceiptEmail(
         address = {};
       }
     }
-
     const streetAddress = [
       address.street || "Unidade Fusion Clinic",
       address.number ? `nº ${address.number}` : "",
@@ -1315,19 +1378,15 @@ export async function sendCheckoutReceiptEmail(
     ]
       .filter(Boolean)
       .join(" ");
-
     const hourlyRateFallback = Number(address?.pricing?.hourly || 45);
-
     const isCreditPayment =
       !firstBooking.asaas_payment_id &&
       (String(firstBooking.booking_origin || "").startsWith("wallet_") ||
         Number(firstBooking.total_cost || 0) < 10);
-
     const totalCreditsUsed = bookingsList.reduce(
       (acc, b) => acc + Math.max(1, Number(b.total_cost || 1)),
       0,
     );
-
     const totalBrlAmount = bookingsList.reduce((acc, b) => {
       if (b.agreed_value_brl && Number(b.agreed_value_brl) > 0) {
         return acc + Number(b.agreed_value_brl);
@@ -1335,40 +1394,33 @@ export async function sendCheckoutReceiptEmail(
       const c = Number(b.total_cost || 1);
       return acc + (c < 10 ? c * hourlyRateFallback : c);
     }, 0);
-
     const penaltyAmountBrl = bookingsList.reduce(
       (acc, b) => acc + Number(b.penalty_amount || 0),
       0,
     );
-
     const displayTotalPrimary = isCreditPayment
       ? `${totalCreditsUsed} CR`
       : `R$ ${formatBRL(totalBrlAmount + penaltyAmountBrl)}`;
-
     const paymentMethodBadge = isCreditPayment
       ? `Créditos Fusion Pass+ (${roomTierLabel})`
       : "PIX / Cartão (Asaas)";
-
     const paymentMethodIconText = isCreditPayment ? "PASS+" : "PIX";
-
     const checkoutIso =
       lastBooking.checkout_time || new Date().toISOString();
     const checkinIso =
       firstBooking.checkin_time || firstBooking.start_time;
-
     const headerTimestamp = formatBrazilUberTimestamp(checkoutIso);
     const periodGreeting = getBrazilPeriodGreeting(checkoutIso);
-
     const scheduledStartFormatted = formatBrazilTime(firstBooking.start_time);
     const scheduledEndFormatted = formatBrazilTime(lastBooking.end_time);
     const scheduledDateFormatted = formatBrazilDate(firstBooking.start_time);
-
     const effectiveCheckinFormatted = formatBrazilTime(checkinIso);
     const effectiveCheckoutFormatted = formatBrazilTime(checkoutIso);
-
     const receiptCode = `#${String(firstBooking.id).slice(0, 8).toUpperCase()}`;
 
-    const html = `
+    const emailPayloads: any[] = [];
+    if (specialistEmail) {
+      const html = `
 <!DOCTYPE html>
 <html lang="pt-BR">
   <head>
@@ -1380,15 +1432,10 @@ export async function sendCheckoutReceiptEmail(
     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #F3F2EF; padding: 20px 10px;">
       <tr>
         <td align="center">
-          <!-- CONTAINER PRINCIPAL ESTILO UBER COM IDENTIDADE FUSION -->
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 560px; background-color: #FFFFFF; border-radius: 24px; overflow: hidden; box-shadow: 0 10px 35px rgba(20, 18, 16, 0.06); border: 1px solid #E7E5E4;">
-            
-            <!-- BARRA DE DESTAQUE LARANJA FUSION -->
             <tr>
               <td style="height: 6px; background: linear-gradient(90deg, #B83B10 0%, #DE5D2E 100%); font-size: 0; line-height: 0;"> </td>
             </tr>
-
-            <!-- 1. HERO HEADER (ESTILO UBER: LOGO + DATA + FRASE GRANDE) -->
             <tr>
               <td style="background-color: #FAF7F4; padding: 36px 32px 32px 32px; border-bottom: 1px solid #EFECE6;">
                 <div style="margin-bottom: 26px;">
@@ -1399,22 +1446,17 @@ export async function sendCheckoutReceiptEmail(
                     style="display: block; max-width: 150px; height: auto;"
                   />
                 </div>
-
                 <p style="margin: 0 0 12px 0; font-size: 13px; font-weight: 600; color: #78716C;">
                   ${headerTimestamp}
                 </p>
-
                 <h1 style="margin: 0 0 16px 0; font-size: 32px; line-height: 1.15; font-weight: 900; color: #141210; letter-spacing: -0.03em;">
                   ${firstName}, este é o <span style="background-color: #FDE68A; padding: 0 6px; border-radius: 6px;">recibo</span> do seu atendimento
                 </h1>
-
                 <p style="margin: 0; font-size: 15px; line-height: 1.5; color: #57534E; font-weight: 500;">
                   Esperamos que você e seu paciente tenham tido uma excelente experiência ${periodGreeting}.
                 </p>
               </td>
             </tr>
-
-            <!-- 2. BLOCO TOTAL + BREAKDOWN -->
             <tr>
               <td style="padding: 32px 32px 20px 32px;">
                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="padding-bottom: 18px; border-bottom: 2px solid #F5F5F4;">
@@ -1427,8 +1469,6 @@ export async function sendCheckoutReceiptEmail(
                     </td>
                   </tr>
                 </table>
-
-                <!-- LINHAS DO RESUMO FINANCEIRO -->
                 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top: 16px;">
                   <tr>
                     <td align="left" style="padding: 8px 0; font-size: 14px; color: #57534E; font-weight: 500;">
@@ -1438,7 +1478,6 @@ export async function sendCheckoutReceiptEmail(
                       ${displayTotalPrimary}
                     </td>
                   </tr>
-
                   ${
                     isCreditPayment
                       ? `
@@ -1453,7 +1492,6 @@ export async function sendCheckoutReceiptEmail(
                   `
                       : ""
                   }
-
                   ${
                     penaltyAmountBrl > 0
                       ? `
@@ -1468,7 +1506,6 @@ export async function sendCheckoutReceiptEmail(
                   `
                       : ""
                   }
-
                   <tr>
                     <td align="left" style="padding: 8px 0; font-size: 14px; color: #57534E; font-weight: 500;">
                       Taxa de serviço e recepção Fusion
@@ -1480,15 +1517,12 @@ export async function sendCheckoutReceiptEmail(
                 </table>
               </td>
             </tr>
-
-            <!-- 3. SEÇÃO PAGAMENTOS -->
             <tr>
               <td style="padding: 12px 32px 24px 32px;">
                 <div style="border-top: 1px solid #F5F5F4; padding-top: 22px;">
                   <h2 style="margin: 0 0 16px 0; font-size: 20px; font-weight: 900; color: #141210; letter-spacing: -0.02em;">
                     Pagamentos
                   </h2>
-
                   <table width="100%" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td width="46" valign="middle">
@@ -1510,15 +1544,12 @@ export async function sendCheckoutReceiptEmail(
                 </div>
               </td>
             </tr>
-
-            <!-- 4. LINHA DO TEMPO DO ATENDIMENTO (CHECK-IN E CHECK-OUT NA PORTA) -->
             <tr>
               <td style="padding: 0 32px 28px 32px;">
                 <div style="background-color: #FAF7F4; border: 1px solid #EFECE6; border-radius: 18px; padding: 20px;">
                   <p style="margin: 0 0 14px 0; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: #BF4B24;">
                     Resumo de Uso da Sala (${scheduledStartFormatted} às ${scheduledEndFormatted})
                   </p>
-
                   <table width="100%" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td width="24" valign="top" style="padding-top: 3px;">
@@ -1535,7 +1566,6 @@ export async function sendCheckoutReceiptEmail(
                             ${roomName} • Sala liberada via NFC/QR Code
                           </p>
                         </div>
-
                         <div>
                           <p style="margin: 0; font-size: 14px; font-weight: 800; color: #047857;">
                             Check-out finalizado às ${effectiveCheckoutFormatted}
@@ -1550,8 +1580,6 @@ export async function sendCheckoutReceiptEmail(
                 </div>
               </td>
             </tr>
-
-            <!-- 5. CARD DE AVALIAÇÃO (ESTILO UBER) -->
             <tr>
               <td style="padding: 0 24px 16px 24px;">
                 <div style="border: 1px solid #E7E5E4; border-radius: 20px; padding: 20px; text-align: center;">
@@ -1567,8 +1595,6 @@ export async function sendCheckoutReceiptEmail(
                 </div>
               </td>
             </tr>
-
-            <!-- 6. CARD "PRECISA DE AJUDA?" (IDÊNTICO AO CONCEITO DO UBER) -->
             <tr>
               <td style="padding: 0 24px 28px 24px;">
                 <div style="border: 1px solid #E7E5E4; border-radius: 20px; padding: 24px;">
@@ -1587,8 +1613,6 @@ export async function sendCheckoutReceiptEmail(
                 </div>
               </td>
             </tr>
-
-            <!-- 7. RODAPÉ ESCURO INSTITUCIONAL FUSION (ESTILO UBER BLACK) -->
             <tr>
               <td style="background-color: #0C0A09; padding: 32px; color: #FFFFFF;">
                 <table width="100%" cellpadding="0" cellspacing="0" border="0">
@@ -1614,19 +1638,16 @@ export async function sendCheckoutReceiptEmail(
                     </td>
                   </tr>
                 </table>
-
                 <div style="margin-top: 26px; font-size: 12px; line-height: 1.6; color: #A8A29E;">
                   <strong style="color: #F5F5F4;">Fusion Clinic Soluções em Saúde Ltda</strong><br />
                   Natal, Rio Grande do Norte - Brasil<br />
                   CNPJ: 49.351.127/0001-44
                 </div>
-
                 <div style="margin-top: 22px; font-size: 24px; font-weight: 900; letter-spacing: -0.03em; color: #FFFFFF;">
                   Fusion<span style="color: #BF4B24;">.</span>
                 </div>
               </td>
             </tr>
-
           </table>
         </td>
       </tr>
@@ -1634,14 +1655,46 @@ export async function sendCheckoutReceiptEmail(
   </body>
 </html>`.trim();
 
-    return await dispatchEmailsSafely([
-      {
+      emailPayloads.push({
         from: FROM_EMAIL,
         to: [specialistEmail],
         subject: `Recibo do seu atendimento na ${roomName} — Fusion Clinic`,
         html,
-      },
+      });
+    }
+
+    const whatsappPayloads: WhatsAppMessagePayload[] = [];
+    if (specialistPhone) {
+      whatsappPayloads.push({
+        phone: specialistPhone,
+        delayMs: 1000,
+        text: [
+          `🧾 *Check-out Finalizado — Fusion Clinic*`,
+          ``,
+          `Obrigado pelo atendimento ${periodGreeting}, *${firstName}*!`,
+          ``,
+          `🚪 *Sala:* ${roomName}`,
+          `🟢 *Check-in:* ${effectiveCheckinFormatted}`,
+          `🏁 *Check-out:* ${effectiveCheckoutFormatted}`,
+          `💳 *Total:* ${displayTotalPrimary} (${paymentMethodBadge})`,
+          penaltyAmountBrl > 0
+            ? `⚠️ *Hora extra/tolerância:* R$ ${formatBRL(penaltyAmountBrl)}`
+            : `✅ *Sem cobranças extras*`,
+          `🔑 *Comprovante:* ${receiptCode}`,
+          ``,
+          `⭐ Avalie o consultório no app: ${APP_URL}/dashboard#bookings`,
+        ].join("\n"),
+      });
+    }
+
+    const [emailResult] = await Promise.allSettled([
+      dispatchEmailsSafely(emailPayloads),
+      dispatchWhatsAppBatch(whatsappPayloads),
     ]);
+
+    return emailResult.status === "fulfilled"
+      ? emailResult.value
+      : { success: false };
   } catch (err: any) {
     console.error("[Email Checkout Receipt] Erro:", err);
     return { success: false, error: err.message };
