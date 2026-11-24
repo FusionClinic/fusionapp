@@ -20,6 +20,17 @@ const FROM_EMAIL =
 const FALLBACK_ADMIN_EMAIL =
   process.env.ADMIN_NOTIFICATION_EMAIL || "tecnologia@fusionapp.com.br";
 
+interface BookingSessionGroup {
+  bookings: any[];
+  startTime: string;
+  endTime: string;
+  hoursCount: number;
+  dateFormatted: string;
+  exitDateFormatted: string;
+  startFormatted: string;
+  endFormatted: string;
+}
+
 async function getDbClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -152,6 +163,50 @@ function formatBRL(value: number): string {
   });
 }
 
+function groupBookingsIntoSessions(bookings: any[]): BookingSessionGroup[] {
+  const sorted = [...bookings].sort(
+    (a, b) =>
+      new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),
+  );
+
+  const rawGroups: any[][] = [];
+  const MAX_CONTIGUOUS_GAP_MS = 15 * 60 * 1000;
+
+  for (const booking of sorted) {
+    if (rawGroups.length === 0) {
+      rawGroups.push([booking]);
+      continue;
+    }
+
+    const currentGroup = rawGroups[rawGroups.length - 1];
+    const prevBooking = currentGroup[currentGroup.length - 1];
+    const prevEndMs = new Date(prevBooking.end_time).getTime();
+    const currStartMs = new Date(booking.start_time).getTime();
+    const gapMs = currStartMs - prevEndMs;
+
+    if (gapMs <= MAX_CONTIGUOUS_GAP_MS && gapMs >= -5 * 60 * 1000) {
+      currentGroup.push(booking);
+    } else {
+      rawGroups.push([booking]);
+    }
+  }
+
+  return rawGroups.map((group) => {
+    const first = group[0];
+    const last = group[group.length - 1];
+    return {
+      bookings: group,
+      startTime: first.start_time,
+      endTime: last.end_time,
+      hoursCount: group.length,
+      dateFormatted: formatBrazilDate(first.start_time),
+      exitDateFormatted: formatBrazilDate(last.end_time),
+      startFormatted: formatBrazilTime(first.start_time),
+      endFormatted: formatBrazilTime(last.end_time),
+    };
+  });
+}
+
 function buildFusionEmailLayout(
   title: string,
   badgeText: string,
@@ -270,13 +325,12 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         batchBookings = siblingBookings;
       }
     }
-    batchBookings.sort(
-      (a, b) =>
-        new Date(a.start_time).getTime() - new Date(b.start_time).getTime(),
-    );
-    const firstSlot = batchBookings[0];
-    const lastSlot = batchBookings[batchBookings.length - 1];
+
+    const sessions = groupBookingsIntoSessions(batchBookings);
+    const hasMultipleSessions = sessions.length > 1;
+    const firstSession = sessions[0];
     const totalSlotsCount = batchBookings.length;
+
     const [roomRes, specialistRes, adminsRes] = await Promise.all([
       supabase
         .from("rooms")
@@ -332,11 +386,12 @@ export async function sendBookingNotificationEmails(bookingId: string) {
     const specialistPhone = specialist?.whatsapp || specialist?.phone || null;
     const hostPhone = hostProfile?.whatsapp || hostProfile?.phone || null;
 
-    const entryDateFormatted = formatBrazilDate(firstSlot.start_time);
-    const entryTimeFormatted = formatBrazilTime(firstSlot.start_time);
-    const exitDateFormatted = formatBrazilDate(lastSlot.end_time);
-    const exitTimeFormatted = formatBrazilTime(lastSlot.end_time);
-    const fullDateLong = formatBrazilDateLong(firstSlot.start_time);
+    const entryDateFormatted = firstSession.dateFormatted;
+    const entryTimeFormatted = firstSession.startFormatted;
+    const exitDateFormatted = firstSession.exitDateFormatted;
+    const exitTimeFormatted = firstSession.endFormatted;
+    const fullDateLong = formatBrazilDateLong(firstSession.startTime);
+
     let address: any = room?.address_details || {};
     if (typeof address === "string") {
       try {
@@ -382,22 +437,72 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       ? `${APP_URL}/dashboard?scan=${shortRoomCode}`
       : `${APP_URL}/dashboard#bookings`;
 
-    const individualSlotsHtml =
-      totalSlotsCount > 1
-        ? batchBookings
-            .map(
-              (b) =>
-                `${formatBrazilDate(b.start_time)} das ${formatBrazilTime(b.start_time)} às ${formatBrazilTime(b.end_time)}`,
-            )
-            .join(" • ")
-        : null;
+    const subjectScheduleSummary = hasMultipleSessions
+      ? `${sessions.length} sessões (${totalSlotsCount}h)`
+      : `${entryDateFormatted} às ${entryTimeFormatted}`;
+
+    const sessionsBulletTextWhatsApp = sessions
+      .map(
+        (s, idx) =>
+          `• *Sessão ${idx + 1}:* ${s.dateFormatted} das ${s.startFormatted} às ${s.endFormatted} (${s.hoursCount}h)`,
+      )
+      .join("\n");
+
+    const sessionsListHtml = sessions
+      .map(
+        (s, idx) =>
+          `<div style="padding: 8px 12px; background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px; margin-top: 6px; font-size: 13px; color: #181C32;">
+            <strong style="color: #BF4B24;">Sessão ${idx + 1}:</strong> ${s.dateFormatted} • <strong>${s.startFormatted} às ${s.endFormatted}</strong> (${s.hoursCount}h)
+          </div>`,
+      )
+      .join("");
 
     const emailPayloads: any[] = [];
     if (specialistEmail) {
+      const specialistScheduleBlockHtml = hasMultipleSessions
+        ? `
+          <div style="background-color: #FAF7F4; border: 1px solid #E5E7EB; border-radius: 14px; padding: 14px 16px; margin-bottom: 18px;">
+            <p style="font-size: 12px; font-weight: 800; color: #464E5F; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">
+              ${roomName} • ${sessions.length} Sessões Reservadas (${totalSlotsCount}h no total)
+            </p>
+            <p style="font-size: 12px; color: #7E8299; margin-bottom: 8px;">
+              Cada sessão abaixo exige seu próprio Check-in ao chegar e Check-out ao finalizar:
+            </p>
+            ${sessionsListHtml}
+          </div>
+        `
+        : `
+          <table class="info-table" role="presentation">
+            <tr>
+              <td width="34%">
+                <p class="label-th">SALA</p>
+                <p class="value-td">${roomName}</p>
+                ${
+                  room?.specialty
+                    ? `<p style="font-size: 12px; color: #7E8299; margin-top: 2px;">${room.specialty}</p>`
+                    : ""
+                }
+              </td>
+              <td width="33%">
+                <p class="label-th">DATA DE ENTRADA</p>
+                <p class="value-td" style="color: #181C32;">
+                  ${entryDateFormatted} às ${entryTimeFormatted}
+                </p>
+              </td>
+              <td width="33%">
+                <p class="label-th">DATA DE SAÍDA</p>
+                <p class="value-td" style="color: #BF4B24;">
+                  ${exitDateFormatted} às ${exitTimeFormatted}
+                </p>
+              </td>
+            </tr>
+          </table>
+        `;
+
       emailPayloads.push({
         from: FROM_EMAIL,
         to: [specialistEmail],
-        subject: `✅ Reserva Confirmada: ${roomName} (${entryDateFormatted} às ${entryTimeFormatted})`,
+        subject: `✅ Reserva Confirmada: ${roomName} (${subjectScheduleSummary})`,
         html: `
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -498,41 +603,10 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           height="242"
         />
       </div>
-      <table class="info-table" role="presentation">
-        <tr>
-          <td width="34%">
-            <p class="label-th">SALA</p>
-            <p class="value-td">${roomName}</p>
-            ${
-              room?.specialty
-                ? `<p style="font-size: 12px; color: #7E8299; margin-top: 2px;">${room.specialty}</p>`
-                : ""
-            }
-          </td>
-          <td width="33%">
-            <p class="label-th">DATA DE ENTRADA</p>
-            <p class="value-td" style="color: #181C32;">
-              ${entryDateFormatted} às ${entryTimeFormatted}
-            </p>
-          </td>
-          <td width="33%">
-            <p class="label-th">DATA DE SAÍDA</p>
-            <p class="value-td" style="color: #BF4B24;">
-              ${exitDateFormatted} às ${exitTimeFormatted}
-            </p>
-          </td>
-        </tr>
-      </table>
-      ${
-        individualSlotsHtml
-          ? `<div style="background-color: #FAF7F4; border: 1px solid #E5E7EB; border-radius: 12px; padding: 10px 14px; margin-bottom: 18px; font-size: 12px; color: #464E5F;">
-               <strong>Horários reservados (${totalSlotsCount}h):</strong> ${individualSlotsHtml}
-             </div>`
-          : ""
-      }
+      ${specialistScheduleBlockHtml}
       <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-radius: 16px; padding: 16px; margin-bottom: 18px;">
         <p style="font-size: 13px; font-weight: 800; color: #92400E; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;">
-          ⏱ Importante: Por que a reserva tem 50 minutos por hora? (${entryTimeFormatted} às ${exitTimeFormatted})
+          ⏱ Importante: Por que a reserva tem 50 minutos por hora?
         </p>
         <p style="font-size: 13px; color: #78350F; line-height: 1.55;">
           Na Fusion Clinic, cada hora reservada compreende <strong>50 minutos de consulta efetiva</strong>. Os <strong>10 minutos finais</strong> são reservados para a saída tranquila do paciente, organização do espaço e transição sem atrasos para o próximo profissional que atenderá no horário seguinte.
@@ -544,7 +618,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         </h3>
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
           <strong>1. Check-in Obrigatório ao Chegar:</strong><br />
-          Ao chegar ao consultório, encoste seu celular na <strong>Tag NFC da porta</strong> (ou leia o QR Code da placa) para registrar sua entrada.
+          Ao chegar ao consultório, encoste seu celular na <strong>Tag NFC da porta</strong> (ou leia o QR Code da placa) para registrar sua entrada${hasMultipleSessions ? " em cada sessão" : ""}.
         </p>
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
           <strong>2. Ao Finalizar seu Atendimento (Antes de Sair):</strong><br />
@@ -553,7 +627,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           ✨ Deixe o consultório organizado para o próximo profissional.
         </p>
         <p style="font-size: 13px; color: #334155; line-height: 1.55;">
-          <strong>3. Check-out Obrigatório ao Sair (Até as ${exitTimeFormatted}):</strong><br />
+          <strong>3. Check-out Obrigatório ao Sair${hasMultipleSessions ? " de Cada Sessão" : ` (Até as ${exitTimeFormatted})`}:</strong><br />
           Ao sair da sala, <strong>encoste novamente o celular na Tag NFC / QR Code da porta</strong> (ou clique em <em>Registrar Saída</em> no app) para encerrar sua sessão no horário e evitar cobrança automática de hora extra.
         </p>
       </div>
@@ -597,10 +671,16 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       });
     }
     if (hostEmail) {
+      const hostScheduleHtml = hasMultipleSessions
+        ? `<p style="margin:6px 0 4px 0;"><strong>📅 Sessões (${sessions.length} entradas • ${totalSlotsCount}h):</strong></p>${sessionsListHtml}`
+        : `
+          <p style="margin:4px 0;"><strong>📅 Entrada:</strong> ${entryDateFormatted} às ${entryTimeFormatted}</p>
+          <p style="margin:4px 0;"><strong>⏰ Saída:</strong> ${exitDateFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
+        `;
       emailPayloads.push({
         from: FROM_EMAIL,
         to: [hostEmail],
-        subject: `📅 Nova Reserva na ${roomName} — ${specialistName} (${entryDateFormatted} ${entryTimeFormatted})`,
+        subject: `📅 Nova Reserva na ${roomName} — ${specialistName} (${subjectScheduleSummary})`,
         html: buildFusionEmailLayout(
           `Nova Reserva na ${roomName}`,
           "Notificação do Anfitrião",
@@ -610,9 +690,8 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           <div style="background:#FAF7F5;border:1px solid #FED7AA;border-radius:14px;padding:18px;margin:20px 0;">
             <p style="margin:4px 0;"><strong>👨‍⚕️ Profissional:</strong> ${specialistName} (${specialistSpecialty})</p>
             <p style="margin:4px 0;"><strong>🚪 Sala:</strong> ${roomName}</p>
-            <p style="margin:4px 0;"><strong>📅 Entrada:</strong> ${entryDateFormatted} às ${entryTimeFormatted}</p>
-            <p style="margin:4px 0;"><strong>⏰ Saída:</strong> ${exitDateFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
-            <p style="margin:4px 0;"><strong>🔑 Reserva:</strong> ${codeShort}</p>
+            ${hostScheduleHtml}
+            <p style="margin:8px 0 4px 0;"><strong>🔑 Reserva:</strong> ${codeShort}</p>
           </div>
           <p style="font-size:13px;color:#475569;">Certifique-se de que a sala esteja preparada para receber o especialista no horário agendado.</p>
           `,
@@ -620,10 +699,16 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       });
     }
     if (adminEmails.length > 0) {
+      const adminScheduleHtml = hasMultipleSessions
+        ? `<p style="margin:6px 0 4px 0;"><strong>Sessões (${sessions.length} entradas • ${totalSlotsCount}h):</strong></p>${sessionsListHtml}`
+        : `
+          <p style="margin:4px 0;"><strong>Data:</strong> ${fullDateLong}</p>
+          <p style="margin:4px 0;"><strong>Horário (UTC-3):</strong> ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
+        `;
       emailPayloads.push({
         from: FROM_EMAIL,
         to: adminEmails,
-        subject: `🔔 [Admin Reserva] ${specialistName} reservou ${roomName} (${entryDateFormatted} ${entryTimeFormatted})`,
+        subject: `🔔 [Admin Reserva] ${specialistName} reservou ${roomName} (${subjectScheduleSummary})`,
         html: buildFusionEmailLayout(
           "Nova Reserva Registrada na Plataforma",
           "Torre de Controle Admin",
@@ -633,9 +718,8 @@ export async function sendBookingNotificationEmails(bookingId: string) {
             <p style="margin:4px 0;"><strong>Profissional:</strong> ${specialistName} (${specialistSpecialty})</p>
             <p style="margin:4px 0;"><strong>E-mail do Profissional:</strong> ${specialistEmail || "Não informado"}</p>
             <p style="margin:4px 0;"><strong>Sala / Clínica:</strong> ${roomName} • ${clinicName}</p>
-            <p style="margin:4px 0;"><strong>Data:</strong> ${fullDateLong}</p>
-            <p style="margin:4px 0;"><strong>Horário (UTC-3):</strong> ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
-            <p style="margin:4px 0;"><strong>Valor Total:</strong> R$ ${formatBRL(totalBrlValue)}</p>
+            ${adminScheduleHtml}
+            <p style="margin:8px 0 4px 0;"><strong>Valor Total:</strong> R$ ${formatBRL(totalBrlValue)}</p>
             <p style="margin:4px 0;"><strong>ID Reserva:</strong> ${codeShort}</p>
           </div>
           `,
@@ -645,10 +729,16 @@ export async function sendBookingNotificationEmails(bookingId: string) {
 
     const whatsappPayloads: WhatsAppMessagePayload[] = [];
     if (specialistPhone) {
-      const slotsDetailLine =
-        totalSlotsCount > 1 && individualSlotsHtml
-          ? `\n📌 *Horários (${totalSlotsCount}h):* ${individualSlotsHtml}`
-          : "";
+      const scheduleLines = hasMultipleSessions
+        ? [
+            `📅 *Horários (${sessions.length} sessões • ${totalSlotsCount}h no total):*`,
+            sessionsBulletTextWhatsApp,
+          ]
+        : [
+            `📅 *Data:* ${entryDateFormatted}`,
+            `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ];
+
       whatsappPayloads.push({
         phone: specialistPhone,
         delayMs: 1000,
@@ -659,24 +749,38 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           ``,
           `🚪 *Sala:* ${roomName}`,
           `🏥 *Unidade:* ${clinicName}`,
-          `📅 *Data:* ${entryDateFormatted}`,
-          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)${slotsDetailLine}`,
+          ...scheduleLines,
           `📍 *Endereço:* ${streetLine}, ${neighborhoodLine} — ${cityStateLine}`,
           `🔑 *Código:* ${codeShort}`,
           ``,
-          `📲 *Check-in e Check-out (libera 15 min antes):*`,
+          `📲 *Check-in e Check-out (libera 15 min antes${hasMultipleSessions ? " de cada sessão" : ""}):*`,
           `${checkinDoorLink}`,
           `_(Você também pode encostar o celular na Tag NFC ou ler o QR Code na porta da sala)_`,
           ``,
           `⚠️ *Regras importantes do atendimento:*`,
+          ...(hasMultipleSessions
+            ? [
+                `• Como são *${sessions.length} sessões separadas*, faça o *Check-in e Check-out individuais* em cada uma delas.`,
+              ]
+            : []),
           `• Cada hora compreende *50 min de consulta* + 10 min de transição.`,
           `• Antes de sair, *desligue o ar-condicionado* e *apague as luzes*.`,
-          `• Faça o *Check-out obrigatório até às ${exitTimeFormatted}* (tolerância máxima de 15 min para evitar cobrança automática de hora extra).`,
+          `• Faça o *Check-out obrigatório ${hasMultipleSessions ? "ao final de cada sessão" : `até às ${exitTimeFormatted}`}* (tolerância máxima de 15 min para evitar cobrança automática de hora extra).`,
         ].join("\n"),
       });
     }
 
     if (hostPhone) {
+      const hostScheduleLines = hasMultipleSessions
+        ? [
+            `📅 *Sessões (${sessions.length} entradas • ${totalSlotsCount}h):*`,
+            sessionsBulletTextWhatsApp,
+          ]
+        : [
+            `📅 *Data:* ${entryDateFormatted}`,
+            `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ];
+
       whatsappPayloads.push({
         phone: hostPhone,
         delayMs: 2400,
@@ -687,8 +791,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           ``,
           `👨‍⚕️ *Profissional:* ${specialistName} (${specialistSpecialty})`,
           `🚪 *Sala:* ${roomName}`,
-          `📅 *Data:* ${entryDateFormatted}`,
-          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ...hostScheduleLines,
           `🔑 *Código:* ${codeShort}`,
           ``,
           `Deixe o consultório preparado para receber o especialista no horário agendado.`,
@@ -697,6 +800,16 @@ export async function sendBookingNotificationEmails(bookingId: string) {
     }
 
     adminPhones.forEach((adminPhone, idx) => {
+      const adminScheduleLines = hasMultipleSessions
+        ? [
+            `📅 *Sessões (${sessions.length} entradas • ${totalSlotsCount}h):*`,
+            sessionsBulletTextWhatsApp,
+          ]
+        : [
+            `📅 *Data:* ${entryDateFormatted}`,
+            `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ];
+
       whatsappPayloads.push({
         phone: adminPhone,
         delayMs: 3600 + idx * 1200,
@@ -705,8 +818,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           ``,
           `👨‍⚕️ *Profissional:* ${specialistName} (${specialistSpecialty})`,
           `🚪 *Sala:* ${roomName} • ${clinicName}`,
-          `📅 *Data:* ${entryDateFormatted}`,
-          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ...adminScheduleLines,
           `💳 *Pagamento:* ${isPaidWithCredits ? `Créditos Fusion Pass+ (${totalSlotsCount}h)` : `R$ ${formatBRL(totalBrlValue)}`}`,
           `🔑 *Reserva:* ${codeShort}`,
         ].join("\n"),
@@ -885,9 +997,13 @@ export async function sendBookingCancellationEmails(
       console.error("[Email Cancelamento] Reserva não localizada:", bErr);
       return { success: false, error: "Reserva não localizada." };
     }
-    const firstBooking = bookingsList[0];
-    const lastBooking = bookingsList[bookingsList.length - 1];
+
+    const sessions = groupBookingsIntoSessions(bookingsList);
+    const hasMultipleSessions = sessions.length > 1;
+    const firstSession = sessions[0];
+    const firstBooking = firstSession.bookings[0];
     const totalSlotsCount = bookingsList.length;
+
     const [roomRes, specialistRes, adminsRes] = await Promise.all([
       supabase
         .from("rooms")
@@ -906,10 +1022,11 @@ export async function sendBookingCancellationEmails(
     ]);
     const room = roomRes.data;
     const specialist = specialistRes.data;
-    const entryDateFormatted = formatBrazilDate(firstBooking.start_time);
-    const entryTimeFormatted = formatBrazilTime(firstBooking.start_time);
-    const exitDateFormatted = formatBrazilDate(lastBooking.end_time);
-    const exitTimeFormatted = formatBrazilTime(lastBooking.end_time);
+    const entryDateFormatted = firstSession.dateFormatted;
+    const entryTimeFormatted = firstSession.startFormatted;
+    const exitDateFormatted = firstSession.exitDateFormatted;
+    const exitTimeFormatted = firstSession.endFormatted;
+
     let specialistEmail = specialist?.email || null;
     if (!specialistEmail && firstBooking.user_id) {
       try {
@@ -951,6 +1068,26 @@ export async function sendBookingCancellationEmails(
         ? room.image_url
         : `${APP_URL}${room?.image_url || "/images/room-consultorio.jpg"}`;
 
+    const cancelSubjectSummary = hasMultipleSessions
+      ? `${sessions.length} sessões (${totalSlotsCount}h)`
+      : `${entryDateFormatted} às ${entryTimeFormatted}`;
+
+    const cancelSessionsWhatsApp = sessions
+      .map(
+        (s, idx) =>
+          `• *Sessão ${idx + 1}:* ${s.dateFormatted} das ${s.startFormatted} às ${s.endFormatted} (${s.hoursCount}h)`,
+      )
+      .join("\n");
+
+    const cancelSessionsHtml = sessions
+      .map(
+        (s, idx) =>
+          `<div style="padding: 8px 12px; background-color: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px; margin-top: 6px; font-size: 13px; color: #64748B; text-decoration: line-through;">
+            <strong>Sessão ${idx + 1}:</strong> ${s.dateFormatted} • ${s.startFormatted} às ${s.endFormatted} (${s.hoursCount}h)
+          </div>`,
+      )
+      .join("");
+
     const refundNoteHtml =
       options?.wasRefunded === true
         ? `<div style="background-color: #ECFDF5; border: 1px solid #A7F3D0; border-radius: 16px; padding: 16px; margin-bottom: 18px;">
@@ -978,10 +1115,43 @@ export async function sendBookingCancellationEmails(
 
     const emailPayloads: any[] = [];
     if (specialistEmail) {
+      const cancelScheduleBlockHtml = hasMultipleSessions
+        ? `
+          <div style="background-color: #FAF7F4; border: 1px solid #E5E7EB; border-radius: 14px; padding: 14px 16px; margin-bottom: 18px;">
+            <p style="font-size: 12px; font-weight: 800; color: #464E5F; text-transform: uppercase; margin-bottom: 6px;">
+              ${roomName} (${clinicName}) • ${sessions.length} Sessões Canceladas
+            </p>
+            ${cancelSessionsHtml}
+          </div>
+        `
+        : `
+          <table class="info-table" role="presentation">
+            <tr>
+              <td width="34%">
+                <p class="label-th">SALA</p>
+                <p class="value-td" style="text-decoration: none; color: #464E5F;">${roomName}</p>
+                <p style="font-size: 12px; color: #7E8299; margin-top: 2px;">${clinicName}</p>
+              </td>
+              <td width="33%">
+                <p class="label-th">DATA DE ENTRADA</p>
+                <p class="value-td">
+                  ${entryDateFormatted} às ${entryTimeFormatted}
+                </p>
+              </td>
+              <td width="33%">
+                <p class="label-th">DATA DE SAÍDA</p>
+                <p class="value-td">
+                  ${exitDateFormatted} às ${exitTimeFormatted}
+                </p>
+              </td>
+            </tr>
+          </table>
+        `;
+
       emailPayloads.push({
         from: FROM_EMAIL,
         to: [specialistEmail],
-        subject: `❌ Reserva Cancelada: ${roomName} (${entryDateFormatted} às ${entryTimeFormatted})`,
+        subject: `❌ Reserva Cancelada: ${roomName} (${cancelSubjectSummary})`,
         html: `
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -1084,27 +1254,7 @@ export async function sendBookingCancellationEmails(
           height="242"
         />
       </div>
-      <table class="info-table" role="presentation">
-        <tr>
-          <td width="34%">
-            <p class="label-th">SALA</p>
-            <p class="value-td" style="text-decoration: none; color: #464E5F;">${roomName}</p>
-            <p style="font-size: 12px; color: #7E8299; margin-top: 2px;">${clinicName}</p>
-          </td>
-          <td width="33%">
-            <p class="label-th">DATA DE ENTRADA</p>
-            <p class="value-td">
-              ${entryDateFormatted} às ${entryTimeFormatted}
-            </p>
-          </td>
-          <td width="33%">
-            <p class="label-th">DATA DE SAÍDA</p>
-            <p class="value-td">
-              ${exitDateFormatted} às ${exitTimeFormatted}
-            </p>
-          </td>
-        </tr>
-      </table>
+      ${cancelScheduleBlockHtml}
       ${refundNoteHtml}
       <div style="margin-top: 24px; text-align: center;">
         <a
@@ -1123,7 +1273,7 @@ export async function sendBookingCancellationEmails(
       emailPayloads.push({
         from: FROM_EMAIL,
         to: [hostEmail],
-        subject: `❌ Reserva Cancelada na ${roomName} — ${specialistName} (${entryDateFormatted})`,
+        subject: `❌ Reserva Cancelada na ${roomName} — ${specialistName} (${cancelSubjectSummary})`,
         html: buildFusionEmailLayout(
           "Aviso de Cancelamento de Reserva",
           "Agenda Liberada",
@@ -1133,8 +1283,12 @@ export async function sendBookingCancellationEmails(
           <div style="background:#FAF7F5;border:1px solid #FED7AA;border-radius:14px;padding:16px;margin:18px 0;">
             <p style="margin:4px 0;"><strong>👨‍⚕️ Profissional:</strong> ${specialistName}</p>
             <p style="margin:4px 0;"><strong>🚪 Sala:</strong> ${roomName}</p>
-            <p style="margin:4px 0;"><strong>📅 Data:</strong> ${entryDateFormatted}</p>
-            <p style="margin:4px 0;"><strong>⏰ Horário Liberado:</strong> ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
+            ${
+              hasMultipleSessions
+                ? `<p style="margin:6px 0 4px 0;"><strong>📅 Sessões Liberadas:</strong></p>${cancelSessionsHtml}`
+                : `<p style="margin:4px 0;"><strong>📅 Data:</strong> ${entryDateFormatted}</p>
+                   <p style="margin:4px 0;"><strong>⏰ Horário Liberado:</strong> ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>`
+            }
           </div>
           <p style="font-size:13px;color:#475569;">Este horário já foi liberado automaticamente na agenda para novas locações.</p>
           `,
@@ -1145,7 +1299,7 @@ export async function sendBookingCancellationEmails(
       emailPayloads.push({
         from: FROM_EMAIL,
         to: adminEmails,
-        subject: `❌ [Admin Cancelamento] ${specialistName} cancelou ${roomName} (${entryDateFormatted} ${entryTimeFormatted})`,
+        subject: `❌ [Admin Cancelamento] ${specialistName} cancelou ${roomName} (${cancelSubjectSummary})`,
         html: buildFusionEmailLayout(
           "Reserva Cancelada pelo Usuário",
           "Torre de Controle Admin",
@@ -1154,8 +1308,12 @@ export async function sendBookingCancellationEmails(
           <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:14px;padding:16px;margin:18px 0;">
             <p style="margin:4px 0;"><strong>Profissional:</strong> ${specialistName} (${specialistEmail || "Sem e-mail"})</p>
             <p style="margin:4px 0;"><strong>Sala / Clínica:</strong> ${roomName} • ${clinicName}</p>
-            <p style="margin:4px 0;"><strong>Data e Horário:</strong> ${entryDateFormatted}, das ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>
-            <p style="margin:4px 0;"><strong>Estorno de Créditos:</strong> ${options?.wasRefunded ? "SIM (Cancelado >= 24h antes)" : "NÃO (< 24h ou pagamento externo)"}</p>
+            ${
+              hasMultipleSessions
+                ? `<p style="margin:6px 0 4px 0;"><strong>Sessões Canceladas:</strong></p>${cancelSessionsHtml}`
+                : `<p style="margin:4px 0;"><strong>Data e Horário:</strong> ${entryDateFormatted}, das ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)</p>`
+            }
+            <p style="margin:8px 0 4px 0;"><strong>Estorno de Créditos:</strong> ${options?.wasRefunded ? "SIM (Cancelado >= 24h antes)" : "NÃO (< 24h ou pagamento externo)"}</p>
             <p style="margin:4px 0;"><strong>Código:</strong> ${codeShort}</p>
           </div>
           `,
@@ -1170,6 +1328,13 @@ export async function sendBookingCancellationEmails(
           ? "⚠️ *Política:* Cancelamento com menos de 24h de antecedência não é elegível para estorno."
           : "ℹ️ Os valores/créditos foram processados conforme a política de cancelamento da plataforma.";
 
+    const cancelScheduleLinesWA = hasMultipleSessions
+      ? [`📅 *Sessões canceladas (${totalSlotsCount}h):*`, cancelSessionsWhatsApp]
+      : [
+          `📅 *Data:* ${entryDateFormatted}`,
+          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+        ];
+
     const whatsappPayloads: WhatsAppMessagePayload[] = [];
     if (specialistPhone) {
       whatsappPayloads.push({
@@ -1181,8 +1346,7 @@ export async function sendBookingCancellationEmails(
           `Olá, *${specialistFirstName}*. Confirmamos o cancelamento do seu agendamento:`,
           ``,
           `🚪 *Sala:* ${roomName} (${clinicName})`,
-          `📅 *Data:* ${entryDateFormatted}`,
-          `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ...cancelScheduleLinesWA,
           `🔑 *Código:* ${codeShort}`,
           ``,
           refundTextLine,
@@ -1201,8 +1365,7 @@ export async function sendBookingCancellationEmails(
           ``,
           `Olá, *${clinicName}*. O(a) profissional *${specialistName}* cancelou o horário abaixo:`,
           ``,
-          `📅 *Data:* ${entryDateFormatted}`,
-          `⏰ *Horário liberado:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
+          ...cancelScheduleLinesWA,
           `🔑 *Código:* ${codeShort}`,
           ``,
           `A agenda já foi liberada automaticamente para novas locações.`,
@@ -1219,7 +1382,7 @@ export async function sendBookingCancellationEmails(
           ``,
           `👨‍⚕️ *Profissional:* ${specialistName}`,
           `🚪 *Sala:* ${roomName} • ${clinicName}`,
-          `📅 *Data:* ${entryDateFormatted} (${entryTimeFormatted}–${exitTimeFormatted})`,
+          ...cancelScheduleLinesWA,
           `💳 *Estorno:* ${options?.wasRefunded ? "SIM (>= 24h)" : "NÃO (< 24h / externo)"}`,
           `🔑 *Código:* ${codeShort}`,
         ].join("\n"),
