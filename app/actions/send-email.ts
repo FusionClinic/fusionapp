@@ -13,7 +13,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 const APP_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
   process.env.NEXT_PUBLIC_APP_URL ||
-  "https://fusionapp.com.br";
+  "https://www.fusionapp.com.br";
 const FROM_EMAIL =
   process.env.RESEND_FROM_EMAIL ||
   "Fusion Clinic <nao-responda@fusionapp.com.br>";
@@ -29,6 +29,7 @@ interface BookingSessionGroup {
   exitDateFormatted: string;
   startFormatted: string;
   endFormatted: string;
+  fineStartFormatted: string;
 }
 
 async function getDbClient() {
@@ -143,6 +144,12 @@ function formatBrazilTime(isoString: string): string {
   }).format(date);
 }
 
+function addMinutesIso(isoString: string, minutes: number): string {
+  return new Date(
+    new Date(isoString).getTime() + minutes * 60 * 1000,
+  ).toISOString();
+}
+
 function getBrazilPeriodGreeting(isoString: string): string {
   const date = new Date(isoString);
   const hourStr = new Intl.DateTimeFormat("pt-BR", {
@@ -203,6 +210,7 @@ function groupBookingsIntoSessions(bookings: any[]): BookingSessionGroup[] {
       exitDateFormatted: formatBrazilDate(last.end_time),
       startFormatted: formatBrazilTime(first.start_time),
       endFormatted: formatBrazilTime(last.end_time),
+      fineStartFormatted: formatBrazilTime(addMinutesIso(last.end_time, 1)),
     };
   });
 }
@@ -297,6 +305,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       console.error("[Email] Reserva não localizada no banco:", bookingId, bErr);
       return { success: false, error: "Reserva não localizada no banco." };
     }
+
     let batchBookings: any[] = [mainBooking];
     if (mainBooking.asaas_payment_id) {
       const { data: samePaymentBookings } = await supabase
@@ -347,6 +356,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .select("email, full_name, phone, whatsapp")
         .eq("role", "admin"),
     ]);
+
     const room = roomRes.data;
     const specialist = specialistRes.data;
     let hostProfile: any = null;
@@ -358,6 +368,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         .maybeSingle();
       hostProfile = hData;
     }
+
     let specialistEmail = specialist?.email || null;
     if (!specialistEmail && mainBooking.user_id) {
       try {
@@ -367,6 +378,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         specialistEmail = authUser?.user?.email || null;
       } catch {}
     }
+
     let hostEmail = hostProfile?.email || null;
     if (!hostEmail && room?.host_id) {
       try {
@@ -376,6 +388,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         hostEmail = authHost?.user?.email || null;
       } catch {}
     }
+
     const adminEmails = Array.from(
       new Set([
         ...(adminsRes.data || []).map((a: any) => a.email).filter(Boolean),
@@ -390,6 +403,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
     const entryTimeFormatted = firstSession.startFormatted;
     const exitDateFormatted = firstSession.exitDateFormatted;
     const exitTimeFormatted = firstSession.endFormatted;
+    const fineStartFormatted = firstSession.fineStartFormatted;
     const fullDateLong = formatBrazilDateLong(firstSession.startTime);
 
     let address: any = room?.address_details || {};
@@ -400,6 +414,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         address = {};
       }
     }
+
     const hourlyRateFallback = Number(address?.pricing?.hourly || 45);
     const totalBrlValue = batchBookings.reduce((acc, b) => {
       if (b.agreed_value_brl && Number(b.agreed_value_brl) > 0) {
@@ -408,9 +423,11 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       const c = Number(b.total_cost || 1);
       return acc + (c < 10 ? c * hourlyRateFallback : c);
     }, 0);
+
     const isPaidWithCredits = String(
       mainBooking.booking_origin || "",
     ).startsWith("wallet_");
+
     const streetLine = [
       address.street || "Endereço da Unidade",
       address.number ? `nº ${address.number}` : "",
@@ -432,10 +449,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       specialistName.trim().split(" ")[0] || "Doutor(a)";
     const specialistSpecialty = specialist?.specialty || "Saúde";
     const codeShort = `#${String(mainBooking.id).slice(0, 8).toUpperCase()}`;
-    const shortRoomCode = String(mainBooking.room_id || "").slice(0, 6);
-    const checkinDoorLink = shortRoomCode
-      ? `${APP_URL}/dashboard?scan=${shortRoomCode}`
-      : `${APP_URL}/dashboard#bookings`;
+    const bookingsDashboardLink = `${APP_URL}/dashboard#bookings`;
 
     const subjectScheduleSummary = hasMultipleSessions
       ? `${sessions.length} sessões (${totalSlotsCount}h)`
@@ -606,19 +620,19 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       ${specialistScheduleBlockHtml}
       <div style="background-color: #FFFBEB; border: 1px solid #FDE68A; border-radius: 16px; padding: 16px; margin-bottom: 18px;">
         <p style="font-size: 13px; font-weight: 800; color: #92400E; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;">
-          ⏱ Importante: Por que a reserva tem 50 minutos por hora?
+          ⏱ Importante: Como funciona a sua hora na Fusion Clinic?
         </p>
         <p style="font-size: 13px; color: #78350F; line-height: 1.55;">
-          Na Fusion Clinic, cada hora reservada compreende <strong>50 minutos de consulta efetiva</strong>. Os <strong>10 minutos finais</strong> são reservados para a saída tranquila do paciente, organização do espaço e transição sem atrasos para o próximo profissional que atenderá no horário seguinte.
+          Cada hora reservada compreende <strong>50 minutos de consulta efetiva</strong> e <strong>10 minutos finais</strong> dedicados à saída tranquila do paciente, organização do consultório e transição pontual para o próximo profissional.
         </p>
       </div>
-      <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; padding: 18px; margin-bottom: 22px;">
+      <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 16px; padding: 18px; margin-bottom: 18px;">
         <h3 style="font-size: 14px; font-weight: 800; color: #1E293B; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 12px;">
-          📲 Check-in, Check-out e Cuidados ao Sair da Sala
+          📲 Check-in, Check-out e Regras de Permanência
         </h3>
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
-          <strong>1. Check-in Obrigatório ao Chegar:</strong><br />
-          Ao chegar ao consultório, encoste seu celular na <strong>Tag NFC da porta</strong> (ou leia o QR Code da placa) para registrar sua entrada${hasMultipleSessions ? " em cada sessão" : ""}.
+          <strong>1. Liberação do Check-in:</strong><br />
+          Você receberá o link de check-in no seu WhatsApp próximo ao horário. Se a sala estiver livre, o check-in libera com <strong>15 minutos de antecedência</strong>. Caso haja outro profissional atendendo no horário anterior, o check-in será liberado <strong>automaticamente assim que ele finalizar o check-out</strong> (e avisaremos você na hora pelo WhatsApp).
         </p>
         <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
           <strong>2. Ao Finalizar seu Atendimento (Antes de Sair):</strong><br />
@@ -626,9 +640,17 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           💡 <strong>Apague todas as luzes</strong> da sala;<br />
           ✨ Deixe o consultório organizado para o próximo profissional.
         </p>
+        <p style="font-size: 13px; color: #334155; line-height: 1.55; margin-bottom: 10px;">
+          <strong>3. Check-out Obrigatório e Multa por Atraso:</strong><br />
+          ${
+            hasMultipleSessions
+              ? `Realize o <strong>Check-out obrigatório ao final de cada sessão</strong> pelo link recebido no WhatsApp ou na Tag NFC / QR Code da porta. A tolerância máxima é até o horário final de cada sessão — <strong>a partir de 1 minuto após o término</strong>, sem check-out registrado, será cobrada multa por atraso.`
+              : `A tolerância máxima para saída e registro do check-out é <strong>até às ${exitTimeFormatted}</strong> (pelo link no WhatsApp ou Tag NFC / QR Code da porta). <strong>A partir das ${fineStartFormatted}</strong>, caso o check-out não tenha sido realizado, será cobrada multa por atraso.`
+          }
+        </p>
         <p style="font-size: 13px; color: #334155; line-height: 1.55;">
-          <strong>3. Check-out Obrigatório ao Sair${hasMultipleSessions ? " de Cada Sessão" : ` (Até as ${exitTimeFormatted})`}:</strong><br />
-          Ao sair da sala, <strong>encoste novamente o celular na Tag NFC / QR Code da porta</strong> (ou clique em <em>Registrar Saída</em> no app) para encerrar sua sessão no horário e evitar cobrança automática de hora extra.
+          <strong>4. Política de Cancelamento:</strong><br />
+          Precisa remarcar? Você pode cancelar gratuitamente com estorno integral com <strong>até 24 horas de antecedência</strong> diretamente na sua área de agendamentos no botão abaixo.
         </p>
       </div>
       <div style="border-top: 1px solid #F1F1F4; padding-top: 18px; margin-bottom: 18px;">
@@ -659,10 +681,10 @@ export async function sendBookingNotificationEmails(bookingId: string) {
       </div>
       <div style="margin-top: 24px; text-align: center;">
         <a
-          href="${APP_URL}/dashboard#bookings"
+          href="${bookingsDashboardLink}"
           style="display: inline-block; background-color: #BF4B24; color: #FFFFFF; font-weight: 800; font-size: 14px; text-decoration: none; padding: 14px 28px; border-radius: 14px;"
         >
-          Ver Minha Reserva no Aplicativo
+          Ver ou Gerenciar Minha Reserva
         </a>
       </div>
     </section>
@@ -670,6 +692,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
 </html>`.trim(),
       });
     }
+
     if (hostEmail) {
       const hostScheduleHtml = hasMultipleSessions
         ? `<p style="margin:6px 0 4px 0;"><strong>📅 Sessões (${sessions.length} entradas • ${totalSlotsCount}h):</strong></p>${sessionsListHtml}`
@@ -698,6 +721,7 @@ export async function sendBookingNotificationEmails(bookingId: string) {
         ),
       });
     }
+
     if (adminEmails.length > 0) {
       const adminScheduleHtml = hasMultipleSessions
         ? `<p style="margin:6px 0 4px 0;"><strong>Sessões (${sessions.length} entradas • ${totalSlotsCount}h):</strong></p>${sessionsListHtml}`
@@ -739,13 +763,23 @@ export async function sendBookingNotificationEmails(bookingId: string) {
             `⏰ *Horário:* ${entryTimeFormatted} às ${exitTimeFormatted} (${totalSlotsCount}h)`,
           ];
 
+      const checkoutAndFineLines = hasMultipleSessions
+        ? [
+            `• *Saída e Check-out obrigatório:* como são *${sessions.length} sessões separadas*, faça o check-in e o check-out individuais em cada sessão, desligando o ar-condicionado e apagando as luzes antes de sair.`,
+            `• *Multa por atraso:* a tolerância máxima é até o horário final de cada sessão — a partir de *1 minuto após o término*, sem check-out registrado, será aplicada cobrança de multa.`,
+          ]
+        : [
+            `• *Saída e Check-out obrigatório:* antes de sair, desligue o ar-condicionado, apague as luzes e registre seu check-out *até às ${exitTimeFormatted}*.`,
+            `• *Multa por atraso:* a tolerância máxima é até *${exitTimeFormatted}*. A partir das *${fineStartFormatted}*, sem check-out registrado, será aplicada cobrança de multa.`,
+          ];
+
       whatsappPayloads.push({
         phone: specialistPhone,
         delayMs: 1000,
         text: [
           `✅ *Reserva Confirmada — Fusion Clinic*`,
           ``,
-          `Olá, *${specialistFirstName}*! Seu consultório está garantido.`,
+          `Olá, *${specialistFirstName}*! Seu consultório está reservado e preparado para o seu atendimento.`,
           ``,
           `🚪 *Sala:* ${roomName}`,
           `🏥 *Unidade:* ${clinicName}`,
@@ -753,19 +787,14 @@ export async function sendBookingNotificationEmails(bookingId: string) {
           `📍 *Endereço:* ${streetLine}, ${neighborhoodLine} — ${cityStateLine}`,
           `🔑 *Código:* ${codeShort}`,
           ``,
-          `📲 *Check-in e Check-out (libera 15 min antes${hasMultipleSessions ? " de cada sessão" : ""}):*`,
-          `${checkinDoorLink}`,
-          `_(Você também pode encostar o celular na Tag NFC ou ler o QR Code na porta da sala)_`,
+          `📋 *Gerenciar ou cancelar reserva:*`,
+          `${bookingsDashboardLink}`,
+          `_(Cancelamento gratuito com estorno integral até *24 horas* antes do início pelo link acima.)_`,
           ``,
-          `⚠️ *Regras importantes do atendimento:*`,
-          ...(hasMultipleSessions
-            ? [
-                `• Como são *${sessions.length} sessões separadas*, faça o *Check-in e Check-out individuais* em cada uma delas.`,
-              ]
-            : []),
-          `• Cada hora compreende *50 min de consulta* + 10 min de transição.`,
-          `• Antes de sair, *desligue o ar-condicionado* e *apague as luzes*.`,
-          `• Faça o *Check-out obrigatório ${hasMultipleSessions ? "ao final de cada sessão" : `até às ${exitTimeFormatted}`}* (tolerância máxima de 15 min para evitar cobrança automática de hora extra).`,
+          `✨ *Como funciona sua experiência:*`,
+          `• *Check-in:* enviaremos seu link de check-in aqui no WhatsApp perto do horário. Se a sala estiver livre, libera com *15 min de antecedência*; se houver outro profissional atendendo antes, libera *automaticamente assim que ele fizer o check-out* (avisaremos você na hora!).`,
+          `• *Tempo de uso:* cada hora inclui *50 min de consulta* + *10 min de organização e saída*.`,
+          ...checkoutAndFineLines,
         ].join("\n"),
       });
     }

@@ -1,4 +1,3 @@
-// app/dashboard/page.tsx
 "use client";
 
 import {
@@ -543,7 +542,7 @@ function DashboardContent() {
 
         const { data: profile } = await supabase
           .from("profiles")
-          .select("role, full_name, avatar_url, specialty")
+          .select("role, full_name, avatar_url, specialty, ui_state")
           .eq("id", user.id)
           .maybeSingle();
 
@@ -675,11 +674,19 @@ function DashboardContent() {
             existingReviews.map((r: any) => r.booking_id).filter(Boolean),
           );
 
-          const skippedSet = new Set<string>(
-            Array.isArray(user.user_metadata?.skipped_review_ids)
+          const profileUiState =
+            profile.ui_state && typeof profile.ui_state === "object"
+              ? (profile.ui_state as Record<string, any>)
+              : {};
+
+          const skippedSet = new Set<string>([
+            ...(Array.isArray(profileUiState.skipped_review_ids)
+              ? profileUiState.skipped_review_ids
+              : []),
+            ...(Array.isArray(user.user_metadata?.skipped_review_ids)
               ? user.user_metadata.skipped_review_ids
-              : [],
-          );
+              : []),
+          ]);
 
           try {
             const rawLocalList = localStorage.getItem(SKIPPED_REVIEWS_LIST_KEY);
@@ -1099,7 +1106,6 @@ function DashboardContent() {
         </>
       )}
 
-      {/* 1. TOP BAR DINÂMICA */}
       {!selectedRoom && !isDoorScanSession && (
         <div className="bg-[#0C0A09] text-white px-3.5 lg:px-10 py-2 lg:py-2.5 z-50 border-b border-white/10">
           <div className="max-w-[1360px] mx-auto flex items-center justify-between gap-2.5 lg:gap-4">
@@ -1193,7 +1199,6 @@ function DashboardContent() {
         </div>
       )}
 
-      {/* 2. HEADER DESKTOP */}
       {!selectedRoom && (
         <header
           className={`hidden lg:block sticky top-0 z-40 border-b transition-colors duration-300 ${
@@ -1383,7 +1388,6 @@ function DashboardContent() {
         </header>
       )}
 
-      {/* 3. HERO BANNER DESKTOP */}
       {!selectedRoom && activeTab === "search" && !showOnlyCampaignRooms && (
         <section
           className={`hidden lg:block relative w-full min-h-[430px] xl:min-h-[460px] overflow-hidden transition-colors duration-500 ${
@@ -1547,7 +1551,6 @@ function DashboardContent() {
         </section>
       )}
 
-      {/* 4. CONTEÚDO PRINCIPAL */}
       <main
         className={`relative flex-1 min-w-0 w-full ${
           !selectedRoom ? "pb-20 lg:pb-12" : ""
@@ -1570,7 +1573,6 @@ function DashboardContent() {
         </div>
       </main>
 
-      {/* 5. BARRA INFERIOR MOBILE */}
       {!selectedRoom && (
         <nav
           className={`fixed inset-x-0 bottom-0 z-50 flex lg:hidden items-stretch justify-around border-t backdrop-blur-md pb-[env(safe-area-inset-bottom)] transition-colors duration-300 ${

@@ -1,4 +1,3 @@
-// components/review-modal.tsx
 "use client";
 
 import { useState, useEffect } from "react";
@@ -15,7 +14,7 @@ interface ReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   bookingId: string;
-  siblingBookingIds?: string[]; // Todos os IDs de horários da mesma sessão/reserva
+  siblingBookingIds?: string[];
   roomId: string;
   roomName?: string;
   bookingDate?: string;
@@ -70,7 +69,6 @@ export function ReviewModal({
   const [comment, setComment] = useState("");
   const [loading, setLoading] = useState(false);
 
-  // Sinaliza no DOM quando o modal de avaliação está aberto para bloquear qualquer banner promocional por cima
   useEffect(() => {
     if (typeof document === "undefined") return;
     if (isOpen) {
@@ -90,36 +88,56 @@ export function ReviewModal({
     const sessionKey =
       roomId && bookingDate ? `${roomId}_${bookingDate.slice(0, 10)}` : null;
 
-    // 1. Salva imediatamente no armazenamento local do dispositivo
     markBookingsReviewHandledLocal(allIds, roomId, bookingDate);
 
-    // 2. Salva também nos metadados do usuário no Supabase (para nunca voltar mesmo limpando cache ou trocando de aparelho)
     try {
       const {
         data: { user },
       } = await supabase.auth.getUser();
-      if (user) {
-        const existingSkipped: string[] = Array.isArray(
-          user.user_metadata?.skipped_review_ids,
-        )
-          ? user.user_metadata.skipped_review_ids
-          : [];
-        const merged = Array.from(
-          new Set([
-            ...existingSkipped,
-            ...allIds,
-            ...(sessionKey ? [sessionKey] : []),
-          ]),
-        ).slice(-200);
+      if (!user) return;
 
-        await supabase.auth.updateUser({
-          data: { skipped_review_ids: merged },
-        });
-      }
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("ui_state")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const currentUiState =
+        profile?.ui_state && typeof profile.ui_state === "object"
+          ? (profile.ui_state as Record<string, any>)
+          : {};
+
+      const existingSkipped: string[] = Array.from(
+        new Set([
+          ...(Array.isArray(currentUiState.skipped_review_ids)
+            ? currentUiState.skipped_review_ids
+            : []),
+          ...(Array.isArray(user.user_metadata?.skipped_review_ids)
+            ? user.user_metadata.skipped_review_ids
+            : []),
+        ]),
+      );
+
+      const merged = Array.from(
+        new Set([
+          ...existingSkipped,
+          ...allIds,
+          ...(sessionKey ? [sessionKey] : []),
+        ]),
+      ).slice(-200);
+
+      await supabase
+        .from("profiles")
+        .update({
+          ui_state: {
+            ...currentUiState,
+            skipped_review_ids: merged,
+          },
+        })
+        .eq("id", user.id);
     } catch {}
   };
 
-  // Quando o profissional clica em "Pular avaliação", dispensa definitivamente todas as horas daquela reserva
   const handleSkip = () => {
     persistHandledIdsEverywhere();
     onClose();
@@ -152,7 +170,6 @@ export function ReviewModal({
 
       if (error) throw error;
 
-      // Marca todas as horas irmãs da mesma sessão como já avaliadas para não perguntar novamente
       await persistHandledIdsEverywhere();
 
       toast({

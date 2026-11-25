@@ -1,4 +1,3 @@
-// app/api/admin/notifications/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
@@ -20,32 +19,45 @@ async function verifyAdminUser() {
 
   const { data: profile } = await supabaseAdmin
     .from("profiles")
-    .select("role")
+    .select("role, ui_state")
     .eq("id", user.id)
     .maybeSingle();
 
   if (profile?.role !== "admin") return null;
-  return user;
+
+  const uiState =
+    profile.ui_state && typeof profile.ui_state === "object"
+      ? (profile.ui_state as Record<string, any>)
+      : {};
+
+  return { user, uiState };
 }
 
 export async function GET() {
   try {
-    const adminUser = await verifyAdminUser();
-    if (!adminUser) {
+    const adminContext = await verifyAdminUser();
+    if (!adminContext) {
       return NextResponse.json({ error: "Acesso negado." }, { status: 403 });
     }
 
-    // Listas persistentes de IDs lidos e limpos salvos nos metadados do Admin
-    const readIdsSet = new Set<string>(
-      Array.isArray(adminUser.user_metadata?.admin_read_notif_ids)
+    const { user: adminUser, uiState } = adminContext;
+
+    const readIdsSet = new Set<string>([
+      ...(Array.isArray(uiState.admin_read_notif_ids)
+        ? uiState.admin_read_notif_ids
+        : []),
+      ...(Array.isArray(adminUser.user_metadata?.admin_read_notif_ids)
         ? adminUser.user_metadata.admin_read_notif_ids
-        : [],
-    );
-    const clearedIdsSet = new Set<string>(
-      Array.isArray(adminUser.user_metadata?.admin_cleared_notif_ids)
+        : []),
+    ]);
+    const clearedIdsSet = new Set<string>([
+      ...(Array.isArray(uiState.admin_cleared_notif_ids)
+        ? uiState.admin_cleared_notif_ids
+        : []),
+      ...(Array.isArray(adminUser.user_metadata?.admin_cleared_notif_ids)
         ? adminUser.user_metadata.admin_cleared_notif_ids
-        : [],
-    );
+        : []),
+    ]);
 
     const [adminNotifsRes, bookingsRes, profilesRes, roomsRes] =
       await Promise.all([
@@ -86,7 +98,6 @@ export async function GET() {
     const roomsMap = new Map<string, any>();
     rooms.forEach((r: any) => roomsMap.set(r.id, r));
 
-    // Caso alguma reserva referencie um perfil ou sala fora do lote inicial, busca complementar
     const missingUserIds = Array.from(
       new Set(
         bookings
@@ -123,7 +134,6 @@ export async function GET() {
     const coveredUserEvents = new Set<string>();
     const coveredRoomEvents = new Set<string>();
 
-    // 1. Adiciona registros da tabela admin_notifications
     dbNotifications.forEach((n: any) => {
       const id = String(n.id);
       if (clearedIdsSet.has(id)) return;
@@ -164,7 +174,6 @@ export async function GET() {
       });
     });
 
-    // 2. Sintetiza eventos de Reservas e Cancelamentos (caso não estejam duplicados na tabela)
     bookings.forEach((b: any) => {
       if (
         b.booking_origin &&
@@ -229,7 +238,6 @@ export async function GET() {
       });
     });
 
-    // 3. Sintetiza eventos de Cadastros de Especialistas e Anfitriões
     profiles.forEach((p: any) => {
       if (p.role === "admin") return;
       if (coveredUserEvents.has(String(p.id))) return;
@@ -267,7 +275,6 @@ export async function GET() {
       });
     });
 
-    // 4. Sintetiza eventos de Novas Salas
     rooms.forEach((r: any) => {
       if (coveredRoomEvents.has(String(r.id))) return;
 
@@ -313,10 +320,12 @@ export async function GET() {
 
 export async function PATCH(request: Request) {
   try {
-    const adminUser = await verifyAdminUser();
-    if (!adminUser) {
+    const adminContext = await verifyAdminUser();
+    if (!adminContext) {
       return NextResponse.json({ error: "Acesso negado." }, { status: 403 });
     }
+
+    const { user: adminUser, uiState } = adminContext;
 
     const body = await request.json();
     const { action, ids = [] } = body;
@@ -325,16 +334,27 @@ export async function PATCH(request: Request) {
       ? ids.map(String).filter(Boolean)
       : [];
 
-    const existingReadIds: string[] = Array.isArray(
-      adminUser.user_metadata?.admin_read_notif_ids,
-    )
-      ? adminUser.user_metadata.admin_read_notif_ids
-      : [];
-    const existingClearedIds: string[] = Array.isArray(
-      adminUser.user_metadata?.admin_cleared_notif_ids,
-    )
-      ? adminUser.user_metadata.admin_cleared_notif_ids
-      : [];
+    const existingReadIds: string[] = Array.from(
+      new Set([
+        ...(Array.isArray(uiState.admin_read_notif_ids)
+          ? uiState.admin_read_notif_ids
+          : []),
+        ...(Array.isArray(adminUser.user_metadata?.admin_read_notif_ids)
+          ? adminUser.user_metadata.admin_read_notif_ids
+          : []),
+      ]),
+    );
+
+    const existingClearedIds: string[] = Array.from(
+      new Set([
+        ...(Array.isArray(uiState.admin_cleared_notif_ids)
+          ? uiState.admin_cleared_notif_ids
+          : []),
+        ...(Array.isArray(adminUser.user_metadata?.admin_cleared_notif_ids)
+          ? adminUser.user_metadata.admin_cleared_notif_ids
+          : []),
+      ]),
+    );
 
     const realDbUuidIds = targetIds.filter((id) => !id.startsWith("synth_"));
     const nowIso = new Date().toISOString();
@@ -356,17 +376,26 @@ export async function PATCH(request: Request) {
         new Set([...existingReadIds, ...targetIds]),
       ).slice(-500);
 
-      await supabaseAdmin.auth.admin.updateUserById(adminUser.id, {
-        user_metadata: {
-          ...adminUser.user_metadata,
-          admin_read_notif_ids: nextRead,
-        },
-      });
+      const { error: updateErr } = await supabaseAdmin
+        .from("profiles")
+        .update({
+          ui_state: {
+            ...uiState,
+            admin_read_notif_ids: nextRead,
+          },
+        })
+        .eq("id", adminUser.id);
+
+      if (updateErr) throw updateErr;
 
       return NextResponse.json({ success: true });
     }
 
-    if (action === "clear_read" || action === "clear_all" || action === "delete_one") {
+    if (
+      action === "clear_read" ||
+      action === "clear_all" ||
+      action === "delete_one"
+    ) {
       if (realDbUuidIds.length > 0) {
         await supabaseAdmin
           .from("admin_notifications")
@@ -388,12 +417,17 @@ export async function PATCH(request: Request) {
         new Set([...existingClearedIds, ...targetIds]),
       ).slice(-600);
 
-      await supabaseAdmin.auth.admin.updateUserById(adminUser.id, {
-        user_metadata: {
-          ...adminUser.user_metadata,
-          admin_cleared_notif_ids: nextCleared,
-        },
-      });
+      const { error: updateErr } = await supabaseAdmin
+        .from("profiles")
+        .update({
+          ui_state: {
+            ...uiState,
+            admin_cleared_notif_ids: nextCleared,
+          },
+        })
+        .eq("id", adminUser.id);
+
+      if (updateErr) throw updateErr;
 
       return NextResponse.json({ success: true });
     }

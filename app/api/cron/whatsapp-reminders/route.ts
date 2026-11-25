@@ -4,13 +4,14 @@ import {
   normalizeBrazilWhatsApp,
   sendEvolutionWhatsAppMessage,
 } from "@/utils/evolution-whatsapp";
+import { checkRoomCheckinAvailability } from "@/utils/room-checkin-guard";
 
 export const dynamic = "force-dynamic";
 
 const APP_URL =
   process.env.NEXT_PUBLIC_SITE_URL ||
   process.env.NEXT_PUBLIC_APP_URL ||
-  "https://fusionapp.com.br";
+  "https://www.fusionapp.com.br";
 
 const supabaseAdmin = createAdminClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -27,13 +28,14 @@ interface SessionBucket {
   hoursCount: number;
 }
 
-function formatBrazilTime(isoString: string): string {
+function formatBrazilTime(isoOrDate: string | Date): string {
+  const date = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
   return new Intl.DateTimeFormat("pt-BR", {
     timeZone: "America/Fortaleza",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).format(new Date(isoString));
+  }).format(date);
 }
 
 function groupUserRoomBookingsIntoSessions(bookings: any[]): SessionBucket[] {
@@ -170,7 +172,13 @@ async function runReminders(request: Request) {
       return NextResponse.json({
         success: true,
         sessionsChecked: 0,
-        sent: { checkin15m: 0, checkout10m: 0, overtime5m: 0 },
+        sent: {
+          checkinReady: 0,
+          checkinWaiting: 0,
+          checkout10m: 0,
+          checkout5m: 0,
+          checkoutOverdue: 0,
+        },
       });
     }
 
@@ -197,7 +205,13 @@ async function runReminders(request: Request) {
       (roomsRes.data || []).map((r: any) => [r.id, r]),
     );
 
-    const counters = { checkin15m: 0, checkout10m: 0, overtime5m: 0 };
+    const counters = {
+      checkinReady: 0,
+      checkinWaiting: 0,
+      checkout10m: 0,
+      checkout5m: 0,
+      checkoutOverdue: 0,
+    };
     let messageIndex = 0;
 
     for (const session of sessions) {
@@ -238,55 +252,121 @@ async function runReminders(request: Request) {
 
       const startFmt = formatBrazilTime(session.startTime);
       const endFmt = formatBrazilTime(session.endTime);
+      const fineStartFmt = formatBrazilTime(new Date(endMs + 60 * 1000));
 
+      // -----------------------------------------------------------------------
+      // 1) AVISO PRÉ-ATENDIMENTO (15 min antes até 10 min após início sem check-in)
+      // -----------------------------------------------------------------------
       if (
         !hasCheckin &&
         !hasCheckout &&
         firstBooking.status === "confirmed" &&
         minsUntilStart <= 16 &&
-        minsUntilStart >= -5 &&
-        minsSinceCreated >= 3
+        minsUntilStart >= -10 &&
+        minsSinceCreated >= 1
       ) {
-        const locked = await claimNotificationLock(
-          firstBooking.id,
-          "reminder_15m_checkin",
-          phone,
-        );
-        if (locked) {
-          const text = [
-            `⏰ *Seu atendimento começa em breve — Fusion Clinic*`,
-            ``,
-            `Olá, *${firstName}*! Seu horário na *${roomName}* começa às *${startFmt}* (término às ${endFmt}).`,
-            ``,
-            `📲 *Check-in já liberado:*`,
-            `${doorLink}`,
-            ``,
-            `Ao chegar na clínica, toque no link acima ou encoste seu celular na *Tag NFC / QR Code* da porta para iniciar sua sessão.`,
-          ].join("\n");
+        const availability = await checkRoomCheckinAvailability(supabaseAdmin, {
+          roomId: session.roomId,
+          currentBookingId: firstBooking.id,
+          currentUserId: session.userId,
+          sessionStartIso: session.startTime,
+          nowMs,
+        });
 
-          const result = await sendEvolutionWhatsAppMessage({
+        if (availability.canCheckIn) {
+          // Sala livre: libera check-in (antecipado se ainda antes do horário)
+          const locked = await claimNotificationLock(
+            firstBooking.id,
+            "reminder_15m_checkin_ready",
             phone,
-            text,
-            delayMs: 1200 + messageIndex * 1200,
-          });
-          messageIndex += 1;
+          );
 
-          if (result.success) {
-            counters.checkin15m += 1;
-          } else {
-            await releaseNotificationLock(
-              firstBooking.id,
-              "reminder_15m_checkin",
-            );
+          if (locked) {
+            const isEarly = minsUntilStart > 1;
+            const headline = isEarly
+              ? `✅ *Sala livre! Check-in antecipado liberado — Fusion Clinic*`
+              : `✅ *Seu horário começou! Check-in liberado — Fusion Clinic*`;
+
+            const intro = isEarly
+              ? `Olá, *${firstName}*! A *${roomName}* está livre antes do seu horário (*${startFmt} às ${endFmt}*), então seu check-in já está liberado.`
+              : `Olá, *${firstName}*! A *${roomName}* já está liberada para o seu atendimento (*${startFmt} às ${endFmt}*).`;
+
+            const text = [
+              headline,
+              ``,
+              intro,
+              ``,
+              `📲 *Faça seu Check-in agora:*`,
+              `${doorLink}`,
+              ``,
+              `Ao chegar, toque no link acima ou encoste o celular na *Tag NFC / QR Code* da porta.`,
+              `⏱️ *Lembrete:* o encerramento e check-out devem ser feitos até *${endFmt}* (multa por atraso a partir das *${fineStartFmt}*).`,
+            ].join("\n");
+
+            const result = await sendEvolutionWhatsAppMessage({
+              phone,
+              text,
+              delayMs: 1200 + messageIndex * 1200,
+            });
+            messageIndex += 1;
+
+            if (result.success) {
+              counters.checkinReady += 1;
+            } else {
+              await releaseNotificationLock(
+                firstBooking.id,
+                "reminder_15m_checkin_ready",
+              );
+            }
+          }
+        } else {
+          // Sala ocupada ou reservada no horário anterior: avisa transparência sem link liberado
+          const locked = await claimNotificationLock(
+            firstBooking.id,
+            "reminder_15m_waiting_checkout",
+            phone,
+          );
+
+          if (locked) {
+            const prevEndFmt = formatBrazilTime(availability.blockingEndTime);
+            const text = [
+              `⏰ *Seu atendimento começa às ${startFmt} — ${roomName}*`,
+              ``,
+              `Olá, *${firstName}*! Há outro profissional com horário agendado antes do seu (término previsto às *${prevEndFmt}*).`,
+              ``,
+              `🔒 *Como funciona a liberação:*`,
+              `Para respeitar o atendimento anterior, seu check-in será liberado *automaticamente assim que o profissional anterior registrar o check-out*.`,
+              ``,
+              `Fique tranquilo(a): *assim que a sala for liberada, enviaremos o link de check-in aqui no seu WhatsApp na hora!*`,
+            ].join("\n");
+
+            const result = await sendEvolutionWhatsAppMessage({
+              phone,
+              text,
+              delayMs: 1200 + messageIndex * 1200,
+            });
+            messageIndex += 1;
+
+            if (result.success) {
+              counters.checkinWaiting += 1;
+            } else {
+              await releaseNotificationLock(
+                firstBooking.id,
+                "reminder_15m_waiting_checkout",
+              );
+            }
           }
         }
       }
 
+      // -----------------------------------------------------------------------
+      // 2) AVISO DE 10 MINUTOS ANTES DO ENCERRAMENTO (ex: 08:50)
+      // -----------------------------------------------------------------------
       if (
         hasCheckin &&
         !hasCheckout &&
-        minsUntilEnd <= 12 &&
-        minsUntilEnd >= 1
+        minsUntilEnd <= 11.5 &&
+        minsUntilEnd > 6.5
       ) {
         const locked = await claimNotificationLock(
           lastBooking.id,
@@ -299,7 +379,7 @@ async function runReminders(request: Request) {
             ``,
             `Olá, *${firstName}*! Seu horário encerra às *${endFmt}*.`,
             ``,
-            `Antes de sair da sala, lembre-se:`,
+            `Ao finalizar o atendimento, lembre-se:`,
             `❄️ *Desligue o ar-condicionado*`,
             `💡 *Apague as luzes*`,
             `📲 *Registre seu Check-out obrigatório:*`,
@@ -326,27 +406,30 @@ async function runReminders(request: Request) {
         }
       }
 
+      // -----------------------------------------------------------------------
+      // 3) AVISO DE 5 MINUTOS ANTES DO ENCERRAMENTO (ex: 08:55)
+      // -----------------------------------------------------------------------
       if (
         hasCheckin &&
         !hasCheckout &&
-        minsPastEnd >= 4 &&
-        minsPastEnd <= 25
+        minsUntilEnd <= 6.5 &&
+        minsUntilEnd > 0
       ) {
         const locked = await claimNotificationLock(
           lastBooking.id,
-          "alert_5m_overtime",
+          "reminder_5m_checkout",
           phone,
         );
         if (locked) {
           const text = [
-            `⚠️ *Atenção: Check-out Pendente — ${roomName}*`,
+            `🔔 *Últimos 5 minutos — Prepare seu Check-out (${roomName})*`,
             ``,
-            `Olá, *${firstName}*! Seu horário encerrou às *${endFmt}* e ainda não identificamos o registro da sua saída.`,
+            `Olá, *${firstName}*! A tolerância máxima para saída e registro de check-out é às *${endFmt}*.`,
             ``,
-            `📲 *Finalize seu Check-out agora:*`,
+            `⚠️ A partir das *${fineStartFmt}*, a permanência sem check-out registrado está sujeita à *cobrança de multa por atraso*.`,
+            ``,
+            `📲 *Faça seu Check-out agora:*`,
             `${doorLink}`,
-            ``,
-            `A tolerância máxima é de *15 minutos*. Registre a saída pelo link acima (ou na Tag NFC da porta) para evitar a cobrança automática de hora extra.`,
           ].join("\n");
 
           const result = await sendEvolutionWhatsAppMessage({
@@ -357,9 +440,56 @@ async function runReminders(request: Request) {
           messageIndex += 1;
 
           if (result.success) {
-            counters.overtime5m += 1;
+            counters.checkout5m += 1;
           } else {
-            await releaseNotificationLock(lastBooking.id, "alert_5m_overtime");
+            await releaseNotificationLock(
+              lastBooking.id,
+              "reminder_5m_checkout",
+            );
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // 4) HORÁRIO ENCERRADO SEM CHECK-OUT (ex: 09:00+)
+      // -----------------------------------------------------------------------
+      if (
+        hasCheckin &&
+        !hasCheckout &&
+        minsPastEnd >= 0 &&
+        minsPastEnd <= 25
+      ) {
+        const locked = await claimNotificationLock(
+          lastBooking.id,
+          "alert_checkout_overdue",
+          phone,
+        );
+        if (locked) {
+          const text = [
+            `⚠️ *Horário encerrado — Check-out pendente (${roomName})*`,
+            ``,
+            `Olá, *${firstName}*! Seu horário encerrou às *${endFmt}* e ainda não identificamos o registro da sua saída.`,
+            ``,
+            `Lembramos que a tolerância máxima é até *${endFmt}*, com *cobrança de multa a partir das ${fineStartFmt}* caso o check-out não seja realizado.`,
+            ``,
+            `📲 *Finalize seu Check-out imediatamente:*`,
+            `${doorLink}`,
+          ].join("\n");
+
+          const result = await sendEvolutionWhatsAppMessage({
+            phone,
+            text,
+            delayMs: 1200 + messageIndex * 1200,
+          });
+          messageIndex += 1;
+
+          if (result.success) {
+            counters.checkoutOverdue += 1;
+          } else {
+            await releaseNotificationLock(
+              lastBooking.id,
+              "alert_checkout_overdue",
+            );
           }
         }
       }
