@@ -1,8 +1,7 @@
-// components/active-session.tsx
 "use client";
 
 import { useState, useEffect } from "react";
-import { format, differenceInSeconds, parseISO } from "date-fns";
+import { format, differenceInSeconds, parseISO, addMinutes } from "date-fns";
 import {
   QrCode,
   AlertTriangle,
@@ -16,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { createClient } from "@/utils/supabase/client";
 import { RoomQRScanner } from "@/components/qr-scanner";
-import { sendCheckoutReceiptEmail } from "@/app/actions/send-email";
+import { performRoomCheckoutAction } from "@/app/actions/room-session";
 
 interface ActiveSessionProps {
   booking: any;
@@ -24,7 +23,7 @@ interface ActiveSessionProps {
 }
 
 export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
   const { toast } = useToast();
 
   const [loading, setLoading] = useState(false);
@@ -41,7 +40,7 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
   useEffect(() => {
     if (!booking || showScanner) return;
 
-    const interval = setInterval(() => {
+    const updateTimer = () => {
       const now = new Date();
       const startTime = parseISO(booking.start_time);
       const endTime = parseISO(booking.end_time);
@@ -56,8 +55,10 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
         setSessionPhase("overtime");
         setSecondsElapsed(differenceInSeconds(now, startTime));
       }
-    }, 1000);
+    };
 
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
     return () => clearInterval(interval);
   }, [booking, showScanner]);
 
@@ -71,6 +72,7 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
           .from("bookings")
           .select("id")
           .eq("room_id", booking.room_id)
+          .neq("id", booking.id)
           .gte("start_time", eTime.toISOString())
           .lt("start_time", limit.toISOString())
           .in("status", ["confirmed", "pending_payment", "in_progress"]);
@@ -79,13 +81,14 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
       };
       checkAvailability();
     }
-  }, [sessionPhase, booking.end_time, booking.room_id, supabase]);
+  }, [sessionPhase, booking.end_time, booking.room_id, booking.id, supabase]);
 
-  const totalSessionMinutes =
-    differenceInSeconds(
-      parseISO(booking.end_time),
-      parseISO(booking.start_time),
-    ) / 60;
+  const startObj = parseISO(booking.start_time);
+  const endObj = parseISO(booking.end_time);
+  const endFormatted = format(endObj, "HH:mm");
+  const fineStartFormatted = format(addMinutes(endObj, 1), "HH:mm");
+
+  const totalSessionMinutes = differenceInSeconds(endObj, startObj) / 60;
   const warningThreshold = totalSessionMinutes - 10;
 
   const minutesElapsed = Math.floor(secondsElapsed / 60);
@@ -104,15 +107,15 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
   } else if (sessionPhase === "running" && minutesElapsed >= warningThreshold) {
     statusColor = "bg-amber-500";
     bgGlow = "bg-amber-50";
-    statusText = "Tolerância de Limpeza. Faça o Check-out.";
+    statusText = `Últimos minutos • Check-out até ${endFormatted}`;
     statusIcon = <AlertTriangle className="w-5 h-5 text-amber-500" />;
   } else if (sessionPhase === "overtime") {
     statusColor = "bg-red-500";
     bgGlow = "bg-red-50";
     statusText =
       overstayInfo === "occupied"
-        ? "Tempo esgotado! Próximo médico aguardando."
-        : "Tempo esgotado! Sujeito a multa.";
+        ? `Tempo esgotado! Próximo profissional aguardando (multa às ${fineStartFormatted}).`
+        : `Horário encerrado! Multa por atraso a partir das ${fineStartFormatted}.`;
     statusIcon = <AlertOctagon className="w-5 h-5 text-red-500" />;
   }
 
@@ -175,56 +178,33 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
     setShowScanner(false);
 
     try {
-      let penalty = "none";
-      let amount = 0;
+      const idsToUpdate = booking.original_ids || [booking.id];
+      const result = await performRoomCheckoutAction({
+        bookingIds: idsToUpdate,
+        roomId: booking.room_id,
+      });
 
-      if (sessionPhase === "running" && minutesElapsed >= warningThreshold) {
-        penalty = "warning";
-      } else if (sessionPhase === "overtime") {
-        penalty = "fined";
-        const idsToUpdate = booking.original_ids || [booking.id];
-        amount =
-          booking.total_cost > 0 ? booking.total_cost / idsToUpdate.length : 45;
+      if (!result.success) {
+        throw new Error(result.message);
       }
 
-      const checkoutTime = new Date().toISOString();
-      const idsToUpdate = booking.original_ids || [booking.id];
-
-      const { error } = await supabase
-        .from("bookings")
-        .update({
-          checkout_time: checkoutTime,
-          status: "completed",
-          penalty_status: penalty,
-          penalty_amount: amount,
-        })
-        .in("id", idsToUpdate);
-
-      if (error) throw error;
-
-      // DISPARA O RECIBO ESTILO UBER POR E-MAIL AUTOMATICAMENTE
-      sendCheckoutReceiptEmail(idsToUpdate).catch((e) =>
-        console.error("Erro ao enviar recibo de check-out:", e),
-      );
-
-      if (penalty === "fined") {
+      if (result.penaltyStatus === "fined") {
         toast({
           variant: "destructive",
           title: "Check-out com Multa",
-          description:
-            "Você ultrapassou o horário da sua reserva. O recibo foi enviado para seu e-mail.",
+          description: `Você finalizou após as ${fineStartFormatted}. O recibo foi enviado no WhatsApp e e-mail.`,
         });
-      } else if (penalty === "warning") {
+      } else if (result.penaltyStatus === "warning") {
         toast({
-          title: "Atenção ao horário",
+          title: "Check-out concluído no limite",
           description:
-            "Você saiu no limite da tolerância. Enviamos o recibo para seu e-mail.",
+            "Saída registrada antes do horário de multa. Recibo enviado no WhatsApp e e-mail.",
         });
       } else {
         toast({
           title: "Check-out concluído! 👏",
           description:
-            "Obrigado por deixar a sala organizada. Enviamos o recibo para seu e-mail!",
+            "Obrigado por deixar a sala organizada. Recibo enviado no WhatsApp e e-mail!",
         });
       }
 
@@ -268,12 +248,11 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
 
             {sessionPhase === "early" ? (
               <p className="text-blue-600 font-bold uppercase tracking-widest text-xs animate-pulse">
-                O cronômetro iniciará às{" "}
-                {format(parseISO(booking.start_time), "HH:mm")}
+                O cronômetro iniciará às {format(startObj, "HH:mm")}
               </p>
             ) : (
               <p className="text-slate-500 font-medium uppercase tracking-widest text-xs">
-                Tempo de uso
+                Tempo de uso • Saída até {endFormatted}
               </p>
             )}
           </div>
@@ -301,7 +280,7 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
                   variant="outline"
                   className="w-full h-14 rounded-2xl font-bold text-red-600 border-red-200 hover:bg-red-50"
                 >
-                  Fazer Check-out Atrasado (Pagar Multa)
+                  Fazer Check-out Atrasado (Multa após {fineStartFormatted})
                 </Button>
               </div>
             ) : (
@@ -313,16 +292,19 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
                     </h4>
                     <ul className="text-sm text-slate-600 font-medium space-y-2">
                       <li className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-500"></span>{" "}
-                        Saia até os últimos 10 min: Limpeza ideal.
+                        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+                        50 min de consulta + 10 min finais de organização e
+                        saída.
                       </li>
                       <li className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-amber-500"></span>{" "}
-                        Últimos 10 min: Tolerância (Advertência).
+                        <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0"></span>
+                        Desligue ar-condicionado, luzes e faça check-out até{" "}
+                        <strong>{endFormatted}</strong>.
                       </li>
                       <li className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-red-500"></span>{" "}
-                        Estouro do relógio: Multa no sistema.
+                        <span className="w-2 h-2 rounded-full bg-red-500 shrink-0"></span>
+                        A partir das <strong>{fineStartFormatted}</strong> sem
+                        check-out: cobrança de multa por atraso.
                       </li>
                     </ul>
                   </div>
@@ -338,7 +320,7 @@ export function ActiveSession({ booking, onSessionEnd }: ActiveSessionProps) {
                   ) : sessionPhase === "early" ? (
                     "Aguarde o início da sessão..."
                   ) : sessionPhase === "overtime" ? (
-                    "Ler QR Code e Pagar Multa"
+                    "Ler QR Code e Finalizar Saída"
                   ) : (
                     "Ler QR Code de Saída"
                   )}

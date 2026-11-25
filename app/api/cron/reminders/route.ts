@@ -1,112 +1,179 @@
-import { NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { checkRoomCheckinAvailability } from "@/utils/room-checkin-guard";
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const supabase = createClient(supabaseUrl, supabaseKey);
+export const dynamic = "force-dynamic";
+
+const APP_URL =
+  process.env.NEXT_PUBLIC_SITE_URL ||
+  process.env.NEXT_PUBLIC_APP_URL ||
+  "https://www.fusionapp.com.br";
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } },
+);
+
+function formatBrazilTime(isoOrDate: string | Date): string {
+  const date = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Fortaleza",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function isAuthorized(request: Request): boolean {
+  const secret = (process.env.CRON_SECRET || "").trim();
+  if (!secret) return true;
+
+  const authHeader = request.headers.get("authorization") || "";
+  if (authHeader === `Bearer ${secret}`) return true;
+
+  const { searchParams } = new URL(request.url);
+  if (searchParams.get("secret") === secret) return true;
+
+  return false;
+}
 
 export async function GET(request: Request) {
+  if (!isAuthorized(request)) {
+    return NextResponse.json({ error: "Não autorizado." }, { status: 401 });
+  }
+
   try {
-    const now = new Date();
-    
-    // ===================================================================
-    // 1. AVISO DE CHECK-IN (Faltam 15 minutos ou menos para a consulta)
-    // ===================================================================
-    const fifteenMinsFromNow = new Date(now.getTime() + 15 * 60000).toISOString();
-    
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const sixteenMinsFromNow = new Date(nowMs + 16 * 60000).toISOString();
+
     const { data: checkinBookings } = await supabase
-      .from('bookings')
-      .select('id, user_id, start_time, rooms(name)')
-      .eq('status', 'confirmed')
-      .eq('notified_checkin', false)
-      .lte('start_time', fifteenMinsFromNow)
-      .gte('start_time', now.toISOString()); // Garante que não passou da hora
+      .from("bookings")
+      .select("id, user_id, room_id, start_time, end_time, rooms(name)")
+      .eq("status", "confirmed")
+      .is("contract_id", null)
+      .eq("notified_checkin", false)
+      .lte("start_time", sixteenMinsFromNow)
+      .gte("end_time", nowIso);
 
     if (checkinBookings && checkinBookings.length > 0) {
       for (const booking of checkinBookings) {
-        
-        const roomData = booking.rooms as any;
-        const roomName = Array.isArray(roomData) ? roomData[0]?.name : roomData?.name;
+        const availability = await checkRoomCheckinAvailability(supabase, {
+          roomId: booking.room_id,
+          currentBookingId: booking.id,
+          currentUserId: booking.user_id,
+          sessionStartIso: booking.start_time,
+          nowMs,
+        });
 
-        // Envia o Push
-        await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://fusionapp-chi.vercel.app'}/api/push`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        if (!availability.canCheckIn) continue;
+
+        const roomData = booking.rooms as any;
+        const roomName = Array.isArray(roomData)
+          ? roomData[0]?.name
+          : roomData?.name;
+
+        await fetch(`${APP_URL}/api/push`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             userId: booking.user_id,
-            title: "Sua sala está liberada! 🔓",
-            body: `Faltam menos de 15 minutos para sua sessão na ${roomName}. Faça seu check-in!`,
-            url: "/dashboard"
-          })
-        }).catch(err => console.error(err));
+            title: "Sala livre! Check-in liberado 🔓",
+            body: `A ${roomName} já está pronta para seu atendimento. Faça seu check-in agora!`,
+            url: "/dashboard#bookings",
+          }),
+        }).catch((err) => console.error(err));
 
-        // Atualiza a flag
-        await supabase.from('bookings').update({ notified_checkin: true }).eq('id', booking.id);
+        await supabase
+          .from("bookings")
+          .update({ notified_checkin: true })
+          .eq("id", booking.id);
       }
     }
 
-    // ===================================================================
-    // 2. AVISOS DE CHECK-OUT (Durante a sessão ativa)
-    // ===================================================================
-    // Puxa as reservas ativas que ainda precisam receber UM dos dois avisos
     const { data: activeBookings } = await supabase
-      .from('bookings')
-      .select('id, user_id, checkin_time, start_time, rooms(name), notified_checkout_45min, notified_checkout_warning')
-      .eq('status', 'in_progress')
-      .or('notified_checkout_45min.eq.false,notified_checkout_warning.eq.false');
+      .from("bookings")
+      .select(
+        "id, user_id, room_id, start_time, end_time, rooms(name), notified_checkout_45min, notified_checkout_warning",
+      )
+      .eq("status", "in_progress")
+      .is("contract_id", null)
+      .order("start_time", { ascending: true });
 
     if (activeBookings && activeBookings.length > 0) {
-      for (const booking of activeBookings) {
-        
-        const roomData = booking.rooms as any;
-        const roomName = Array.isArray(roomData) ? roomData[0]?.name : roomData?.name;
+      const byUserRoom = new Map<string, any[]>();
+      for (const b of activeBookings) {
+        const key = `${b.user_id}_${b.room_id}`;
+        const list = byUserRoom.get(key) || [];
+        list.push(b);
+        byUserRoom.set(key, list);
+      }
 
-        // ===================================================================
-        // LÓGICA SÊNIOR: REGRA DO MAIOR VALOR (GRACE PERIOD)
-        // Se chegou antes, o relógio oficial começa no horário agendado (start_time).
-        // Se chegou atrasado, o relógio começa no horário do check-in real.
-        // ===================================================================
-        const checkInTimeMs = booking.checkin_time ? new Date(booking.checkin_time).getTime() : 0;
-        const startTimeMs = new Date(booking.start_time).getTime();
-        const referenceTime = Math.max(checkInTimeMs, startTimeMs);
-        
-        const diffMinutes = (now.getTime() - referenceTime) / 60000;
+      for (const [, list] of byUserRoom.entries()) {
+        const lastBooking = list[list.length - 1];
+        const endMs = new Date(lastBooking.end_time).getTime();
+        const minsUntilEnd = (endMs - nowMs) / 60000;
+        const endFmt = formatBrazilTime(lastBooking.end_time);
+        const fineStartFmt = formatBrazilTime(new Date(endMs + 60 * 1000));
 
-        // AVISO 1: Aos 45 minutos (Faltam 5 min para a saída ideal)
-        if (diffMinutes >= 45 && !booking.notified_checkout_45min) {
-          await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://fusionapp-chi.vercel.app'}/api/push`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        const roomData = lastBooking.rooms as any;
+        const roomName = Array.isArray(roomData)
+          ? roomData[0]?.name
+          : roomData?.name;
+
+        if (
+          minsUntilEnd <= 11.5 &&
+          minsUntilEnd > 5.5 &&
+          !lastBooking.notified_checkout_45min
+        ) {
+          await fetch(`${APP_URL}/api/push`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              userId: booking.user_id,
-              title: "Prepare-se para o Check-out ⏳",
-              body: `Faltam 5 minutos para concluir sua sessão na ${roomName}. Comece a se organizar!`,
-              url: "/dashboard"
-            })
-          }).catch(err => console.error(err));
+              userId: lastBooking.user_id,
+              title: "Faltam 10 minutos para encerrar ⏳",
+              body: `Seu horário na ${roomName} termina às ${endFmt}. Prepare-se para finalizar e fazer o check-out.`,
+              url: "/dashboard#bookings",
+            }),
+          }).catch((err) => console.error(err));
 
-          await supabase.from('bookings').update({ notified_checkout_45min: true }).eq('id', booking.id);
+          await supabase
+            .from("bookings")
+            .update({ notified_checkout_45min: true })
+            .in(
+              "id",
+              list.map((b: any) => b.id),
+            );
         }
 
-        // AVISO 2: Aos 50 minutos (Tolerância / Risco de Multa)
-        if (diffMinutes >= 50 && !booking.notified_checkout_warning) {
-          await fetch(`${process.env.NEXT_PUBLIC_SITE_URL || 'https://fusionapp-chi.vercel.app'}/api/push`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        if (minsUntilEnd <= 5.5 && !lastBooking.notified_checkout_warning) {
+          await fetch(`${APP_URL}/api/push`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              userId: booking.user_id,
-              title: "Atenção: Tempo Esgotado! ⚠️",
-              body: `Você entrou nos 5 minutos de tolerância na ${roomName}. Faça o check-out agora para evitar multas.`,
-              url: "/dashboard"
-            })
-          }).catch(err => console.error(err));
+              userId: lastBooking.user_id,
+              title: "Últimos minutos — Faça seu Check-out ⚠️",
+              body: `Tolerância máxima na ${roomName} até ${endFmt}. A partir das ${fineStartFmt} sem check-out há cobrança de multa.`,
+              url: "/dashboard#bookings",
+            }),
+          }).catch((err) => console.error(err));
 
-          await supabase.from('bookings').update({ notified_checkout_warning: true }).eq('id', booking.id);
+          await supabase
+            .from("bookings")
+            .update({ notified_checkout_warning: true })
+            .in(
+              "id",
+              list.map((b: any) => b.id),
+            );
         }
       }
     }
 
-    return NextResponse.json({ success: true, message: "Varredura do Cron finalizada" });
+    return NextResponse.json({
+      success: true,
+      message: "Varredura do Cron finalizada",
+    });
   } catch (error: any) {
     console.error("Erro no Cron Job:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
