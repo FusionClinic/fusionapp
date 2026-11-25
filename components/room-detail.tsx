@@ -15,6 +15,12 @@ import {
   normalizeCreditTier,
 } from "@/utils/wallet-ledger";
 import {
+  extractDateKeyFromException,
+  getBrazilNationalHolidayName,
+  isBookingSlotBlockedByHoliday,
+  isRoomHolidayClosedOnDate,
+} from "@/utils/brazil-holidays";
+import {
   CampaignRulesModal,
   extractCampaignRulesText,
 } from "@/components/campaign-rules-modal";
@@ -651,6 +657,16 @@ export function RoomDetail(props: RoomDetailProps) {
     [currentTime],
   );
 
+  const selectedDateHolidayName = useMemo(
+    () => getBrazilNationalHolidayName(selectedDate),
+    [selectedDate],
+  );
+
+  const isSelectedDateClosedHoliday = useMemo(
+    () => isRoomHolidayClosedOnDate(roomData?.availability, selectedDate),
+    [roomData?.availability, selectedDate],
+  );
+
   const availableSlots = useMemo<string[]>(() => {
     if (!roomData || activeTab !== "hora") return [];
     const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
@@ -684,7 +700,7 @@ export function RoomDetail(props: RoomDetailProps) {
 
       if (exceptions.length > 0) {
         const exception = exceptions.find(
-          (e: any) => e?.date && isSameDay(new Date(e.date), selectedDate),
+          (e: any) => extractDateKeyFromException(e?.date) === selectedDateStr,
         );
         if (exception) {
           if (exception.type === "block" && exception.isFullDay) return [];
@@ -704,6 +720,10 @@ export function RoomDetail(props: RoomDetailProps) {
             return extraHours;
           }
         }
+      }
+
+      if (getBrazilNationalHolidayName(selectedDate)) {
+        return [];
       }
 
       const configForDay = weekConfig.find((c: any) => c?.day === dayOfWeek);
@@ -743,6 +763,8 @@ export function RoomDetail(props: RoomDetailProps) {
             );
         }
       }
+    } else if (getBrazilNationalHolidayName(selectedDate)) {
+      return [];
     }
 
     if (partialBlockedSlots.length > 0) {
@@ -1240,6 +1262,22 @@ export function RoomDetail(props: RoomDetailProps) {
             setSelectedSlots([]);
             throw new Error(
               "Um dos horários selecionados faz parte de um contrato fixo ou acabou de ser reservado. Escolha outro horário.",
+            );
+          }
+
+          const [slotDateStr, slotTimeStr] = slotKey.split("|");
+          const slotStartTime = parseSlotDateHelper(
+            slotDateStr,
+            slotTimeStr.split(" - ")[0],
+          );
+          const holidayCheck = isBookingSlotBlockedByHoliday(
+            roomData.availability,
+            slotStartTime.toISOString(),
+          );
+          if (holidayCheck.blocked) {
+            setSelectedSlots([]);
+            throw new Error(
+              `Consultório fechado no feriado nacional (${holidayCheck.holidayName}). Escolha outra data.`,
             );
           }
         }
@@ -1836,7 +1874,9 @@ export function RoomDetail(props: RoomDetailProps) {
         ? "VIP"
         : "Basic";
 
-  const selectedDayCampaign = getCampaignForDateAndHour(selectedDate);
+  const selectedDayCampaign = isSelectedDateClosedHoliday
+    ? null
+    : getCampaignForDateAndHour(selectedDate);
 
   return (
     <div className="fixed inset-0 z-[100] bg-white flex flex-col animate-in slide-in-from-bottom-4 duration-300">
@@ -1967,7 +2007,9 @@ export function RoomDetail(props: RoomDetailProps) {
                   <p className="text-[11px] text-slate-500 font-medium">
                     {freeSlotsForSelectedDate.length > 0
                       ? `${freeSlotsForSelectedDate.length} horário(s) livre(s) nesta data`
-                      : "Toque para escolher outra data no calendário"}
+                      : isSelectedDateClosedHoliday && selectedDateHolidayName
+                        ? `Feriado Nacional (${selectedDateHolidayName}) — Fechado`
+                        : "Toque para escolher outra data no calendário"}
                   </p>
                 </div>
               </div>
@@ -2589,13 +2631,28 @@ export function RoomDetail(props: RoomDetailProps) {
                         const hasSelection = selectedSlots.some(
                           (slotKey: string) => slotKey.startsWith(dateStr),
                         );
-                        const dayCampaign =
+                        const dayHolidayName =
                           !isPast && isCurrentMonth
+                            ? getBrazilNationalHolidayName(day)
+                            : null;
+                        const isClosedHoliday =
+                          Boolean(dayHolidayName) &&
+                          isRoomHolidayClosedOnDate(
+                            roomData?.availability,
+                            day,
+                          );
+                        const dayCampaign =
+                          !isPast && isCurrentMonth && !isClosedHoliday
                             ? getCampaignForDateAndHour(day)
                             : null;
                         return (
                           <button
                             key={day.toISOString()}
+                            title={
+                              isClosedHoliday && dayHolidayName
+                                ? `Feriado Nacional: ${dayHolidayName} (Fechado)`
+                                : undefined
+                            }
                             onClick={() => {
                               if (!isPast) setSelectedDate(day);
                             }}
@@ -2607,11 +2664,14 @@ export function RoomDetail(props: RoomDetailProps) {
                             } ${
                               isSelected
                                 ? "bg-[#BF4B24] text-white font-bold shadow-md"
-                                : dayCampaign
-                                  ? "bg-slate-900 text-white border border-slate-950 hover:bg-slate-800 shadow-sm"
-                                  : ""
+                                : isClosedHoliday
+                                  ? "bg-stone-200/70 text-stone-400 line-through hover:bg-stone-200"
+                                  : dayCampaign
+                                    ? "bg-slate-900 text-white border border-slate-950 hover:bg-slate-800 shadow-sm"
+                                    : ""
                             } ${
                               !isSelected &&
+                              !isClosedHoliday &&
                               !dayCampaign &&
                               !isPast &&
                               isCurrentMonth
@@ -2622,6 +2682,11 @@ export function RoomDetail(props: RoomDetailProps) {
                             <span className="relative z-10 leading-none">
                               {format(day, "d")}
                             </span>
+                            {isClosedHoliday && !isSelected && (
+                              <span className="text-[7px] font-bold uppercase tracking-tight leading-none mt-0.5 text-stone-500 no-underline">
+                                Feriado
+                              </span>
+                            )}
                             {dayCampaign && !hasSelection && (
                               <span
                                 className={`text-[8px] font-black leading-none mt-0.5 ${
@@ -2664,13 +2729,17 @@ export function RoomDetail(props: RoomDetailProps) {
                   </div>
 
                   {availableSlots.length === 0 ? (
-                    <div className="text-center py-6 bg-stone-50 rounded-xl border border-stone-200/70">
+                    <div className="text-center py-6 px-4 bg-stone-50 rounded-xl border border-stone-200/70">
                       <Clock className="w-5 h-5 text-slate-400 mx-auto mb-1.5" />
-                      <p className="text-slate-600 font-semibold text-xs">
-                        Nenhum horário disponível nesta data.
+                      <p className="text-slate-700 font-semibold text-xs">
+                        {isSelectedDateClosedHoliday && selectedDateHolidayName
+                          ? `Feriado Nacional — ${selectedDateHolidayName}`
+                          : "Nenhum horário disponível nesta data."}
                       </p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        Experimente selecionar outro dia no calendário acima.
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {isSelectedDateClosedHoliday
+                          ? "O consultório está fechado automaticamente neste feriado. Escolha outra data no calendário."
+                          : "Experimente selecionar outro dia no calendário acima."}
                       </p>
                     </div>
                   ) : (

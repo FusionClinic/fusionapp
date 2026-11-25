@@ -4,9 +4,12 @@ import { useState, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import {
+  getBrazilNationalHolidayName,
+  isBrazilNationalHoliday,
+} from "@/utils/brazil-holidays";
+import {
   ChevronLeft,
   Calendar as CalendarIcon,
-  Clock,
   Check,
   X,
   Copy,
@@ -16,7 +19,7 @@ import {
   Loader2,
   AlertTriangle,
 } from "lucide-react";
-import { ptBR } from "date-fns/locale"; // IMPORTAÇÃO DA TRADUÇÃO
+import { ptBR } from "date-fns/locale";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Calendar } from "@/components/ui/calendar";
@@ -73,22 +76,6 @@ const SHIFTS = [
   { id: "afternoon", label: "Vespertino", time: "13h - 18h", icon: "☀️" },
   { id: "night", label: "Noturno", time: "18h - 22h", icon: "🌙" },
 ];
-
-const checkIsHoliday = (date: Date) => {
-  const d = date.getDate();
-  const m = date.getMonth() + 1;
-  const holidays = [
-    "1/1", // Ano Novo
-    "21/4", // Tiradentes
-    "1/5", // Dia do Trabalho
-    "7/9", // Independência
-    "12/10", // Nossa Senhora
-    "2/11", // Finados
-    "15/11", // Proclamação
-    "25/12", // Natal
-  ];
-  return holidays.includes(`${d}/${m}`);
-};
 
 export function AvailabilityConfig({
   spaceId,
@@ -186,7 +173,7 @@ export function AvailabilityConfig({
       if (error) throw error;
 
       toast({
-        title: "Disponibilidade Atualizada! 🎉",
+        title: "Disponibilidade Atualizada!",
         description: "Os horários e exceções foram sincronizados com sucesso.",
       });
 
@@ -293,7 +280,7 @@ export function AvailabilityConfig({
   };
 
   const getBaseAvailableHoursForDate = (date: Date) => {
-    if (checkIsHoliday(date)) return [];
+    if (isBrazilNationalHoliday(date)) return [];
 
     const dayOfWeek = date.getDay();
     const config = weekConfig.find((c) => c.day === dayOfWeek);
@@ -301,7 +288,7 @@ export function AvailabilityConfig({
 
     if (config.rentalType === "hourly") return config.availableHours;
 
-    let shiftHours: string[] = [];
+    const shiftHours: string[] = [];
     if (config.selectedShifts.includes("morning"))
       shiftHours.push("08h-09h", "09h-10h", "10h-11h", "11h-12h");
     if (config.selectedShifts.includes("afternoon"))
@@ -323,7 +310,7 @@ export function AvailabilityConfig({
       setExceptionTab(existing.type);
       setBlockScope(existing.isFullDay ? "full" : "partial");
     } else {
-      if (checkIsHoliday(date)) {
+      if (isBrazilNationalHoliday(date)) {
         setEditingException({
           date,
           type: "extra",
@@ -407,9 +394,10 @@ export function AvailabilityConfig({
   const baseClosedHours = editingException
     ? ALL_TIME_SLOTS.filter((h) => !baseAvailableHours.includes(h))
     : [];
-  const isSelectedDateHoliday = editingException
-    ? checkIsHoliday(editingException.date)
-    : false;
+  const selectedHolidayName = editingException
+    ? getBrazilNationalHolidayName(editingException.date)
+    : null;
+  const isSelectedDateHoliday = Boolean(selectedHolidayName);
 
   return (
     <div className="flex flex-col h-full bg-slate-50 pb-32 relative">
@@ -594,7 +582,6 @@ export function AvailabilityConfig({
           </div>
         </section>
 
-        {/* SEÇÃO DE EXCEÇÕES */}
         <section className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
           <div className="mb-6">
             <h2 className="text-xl font-black text-slate-900">
@@ -612,14 +599,13 @@ export function AvailabilityConfig({
                 1. Selecione a Data no Calendário
               </Label>
               <div className="border border-slate-200 rounded-xl p-2 bg-slate-50 shadow-inner">
-                {/* CALENDÁRIO COM TRADUÇÃO E DESTAQUE DE FERIADO */}
                 <Calendar
                   mode="single"
                   selected={selectedDate}
                   onSelect={handleSelectDateForException}
                   locale={ptBR}
                   modifiers={{
-                    holiday: (date) => checkIsHoliday(date),
+                    holiday: (date) => isBrazilNationalHoliday(date),
                   }}
                   modifiersClassNames={{
                     holiday:
@@ -646,7 +632,7 @@ export function AvailabilityConfig({
                       <PlusCircle className="w-5 h-5" />
                     )}
                     {isSelectedDateHoliday
-                      ? "Feriado Nacional"
+                      ? `Feriado — ${selectedHolidayName}`
                       : "Configurar Exceção"}
                   </h3>
                   <button
@@ -673,7 +659,7 @@ export function AvailabilityConfig({
                 {isSelectedDateHoliday && (
                   <p className="text-xs font-bold text-amber-700 bg-amber-100 p-2 rounded-md mb-4 border border-amber-200">
                     Este dia está automaticamente fechado por ser feriado. Use a
-                    aba "Liberar Extra" para abrir um plantão.
+                    aba “Liberar / Extra” para abrir um plantão.
                   </p>
                 )}
 

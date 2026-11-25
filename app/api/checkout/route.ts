@@ -1,4 +1,3 @@
-// app/api/checkout/route.ts
 import { NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
@@ -6,6 +5,10 @@ import {
   sendBookingNotificationEmails,
   sendPaymentNotificationEmails,
 } from "@/app/actions/send-email";
+import {
+  getBrazilDatePartsFromIso,
+  isBookingSlotBlockedByHoliday,
+} from "@/utils/brazil-holidays";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -56,10 +59,6 @@ function getAsaasConfig() {
   return { apiKey, apiUrl };
 }
 
-/**
- * Grava em `coupon_uses` e atualiza `coupons.current_uses` via Service Role (imune a RLS)
- * somente para reservas efetivamente confirmadas vinculadas a uma campanha ou cupom.
- */
 async function syncCouponUsesForConfirmedBookings(bookingIds: string[]) {
   try {
     if (!bookingIds || bookingIds.length === 0) return;
@@ -718,7 +717,6 @@ export async function POST(request: Request) {
       });
     }
 
-    // ROTA 2: RESERVA AVULSA DE SALA
     const targetIds: string[] =
       Array.isArray(bookingIds) && bookingIds.length > 0
         ? bookingIds
@@ -745,6 +743,48 @@ export async function POST(request: Request) {
     }
 
     const booking = targetBookings[0];
+
+    const { data: room } = await supabaseAdmin
+      .from("rooms")
+      .select("name, host_id, availability, blocked_dates")
+      .eq("id", booking.room_id)
+      .single();
+
+    for (const tb of targetBookings) {
+      const brParts = getBrazilDatePartsFromIso(tb.start_time);
+      if (
+        brParts &&
+        Array.isArray(room?.blocked_dates) &&
+        room.blocked_dates.includes(brParts.dateKey)
+      ) {
+        await supabaseAdmin
+          .from("bookings")
+          .update({ status: "cancelled" })
+          .in("id", targetIds);
+        return NextResponse.json(
+          { error: "Esta data está bloqueada pela clínica." },
+          { status: 409 },
+        );
+      }
+
+      const holidayCheck = isBookingSlotBlockedByHoliday(
+        room?.availability,
+        tb.start_time,
+      );
+      if (holidayCheck.blocked) {
+        await supabaseAdmin
+          .from("bookings")
+          .update({ status: "cancelled" })
+          .in("id", targetIds);
+        return NextResponse.json(
+          {
+            error: `Consultório fechado no feriado nacional (${holidayCheck.holidayName}) sem plantão liberado.`,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     const nowMs = Date.now();
     for (const tb of targetBookings) {
       const { data: conflicts } = await supabaseAdmin
@@ -783,12 +823,6 @@ export async function POST(request: Request) {
         );
       }
     }
-
-    const { data: room } = await supabaseAdmin
-      .from("rooms")
-      .select("name, host_id")
-      .eq("id", booking.room_id)
-      .single();
 
     const bookingDateStr = new Date(booking.start_time)
       .toISOString()
@@ -913,10 +947,11 @@ export async function POST(request: Request) {
       })
       .in("id", targetIds);
 
-    // Se veio um cupom manual aplicado no checkout e o slot ainda não tem tag de campanha, marca com coupon_<id>
     if (couponId) {
       const idsWithoutCampaignTag = targetBookings
-        .filter((tb: any) => !String(tb.booking_origin || "").startsWith("campaign_"))
+        .filter(
+          (tb: any) => !String(tb.booking_origin || "").startsWith("campaign_"),
+        )
         .map((tb: any) => tb.id);
       if (idsWithoutCampaignTag.length > 0) {
         await supabaseAdmin
