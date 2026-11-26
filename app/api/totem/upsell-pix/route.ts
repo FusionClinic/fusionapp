@@ -17,9 +17,11 @@ const supabaseAdmin = createAdminClient(
 );
 
 const MONTHLY_UPSELL_LIMIT = 2;
+const OPENING_HOUR_BRT = 8;
 const CLOSING_HOUR_BRT = 18;
 const DISCOUNT_RATE = 0.3;
 const PIX_EXPIRATION_MINUTES = 5;
+const UPSELL_OPEN_BEFORE_MINUTES = 60;
 
 function validateTotemSecret(request: Request): boolean {
   const configured = (process.env.TOTEM_API_SECRET || "").trim();
@@ -282,6 +284,19 @@ export async function POST(request: Request) {
       );
     }
 
+    const baseStartMs = new Date(baseBooking.start_time).getTime();
+    const upsellOpensAtMs =
+      baseStartMs - UPSELL_OPEN_BEFORE_MINUTES * 60 * 1000;
+
+    if (Date.now() < upsellOpensAtMs) {
+      return NextResponse.json(
+        {
+          error: `A oferta de 30% OFF libera a partir das ${formatBrtHHMM(upsellOpensAtMs)} (1 hora antes do seu turno).`,
+        },
+        { status: 409 },
+      );
+    }
+
     const referenceEndMs = Math.max(
       new Date(baseBooking.end_time).getTime(),
       currentEndIso ? new Date(currentEndIso).getTime() : 0,
@@ -305,11 +320,14 @@ export async function POST(request: Request) {
     const nextStartBrt = new Date(nextStartMs - 3 * 60 * 60 * 1000);
     const nextBlockEndHourBrt = nextStartBrt.getUTCHours() + 1;
 
-    if (nextBlockEndHourBrt > CLOSING_HOUR_BRT) {
+    if (
+      nextStartBrt.getUTCHours() < OPENING_HOUR_BRT ||
+      nextBlockEndHourBrt > CLOSING_HOUR_BRT
+    ) {
       return NextResponse.json(
         {
           error:
-            "A oferta de última hora está disponível apenas para horários com encerramento até as 18:00.",
+            "A oferta de última hora está disponível apenas para horários dentro do expediente até as 18:00.",
         },
         { status: 409 },
       );
