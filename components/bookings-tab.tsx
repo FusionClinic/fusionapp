@@ -95,8 +95,14 @@ interface Booking {
   start_time: string;
   end_time: string;
   status:
-    "pending_payment" | "confirmed" | "cancelled" | "completed" | "in_progress";
+    | "pending_payment"
+    | "confirmed"
+    | "cancelled"
+    | "completed"
+    | "in_progress";
   total_cost: number;
+  agreed_value_brl?: number | null;
+  booking_origin?: string | null;
   checkin_time?: string;
   checkout_time?: string;
   penalty_status?: string;
@@ -281,7 +287,7 @@ export function BookingsTab({
         .from("bookings")
         .select(
           `
-          id, room_id, start_time, end_time, status, total_cost, checkin_time, checkout_time, penalty_status, asaas_payment_id,
+          id, room_id, start_time, end_time, status, total_cost, agreed_value_brl, booking_origin, checkin_time, checkout_time, penalty_status, asaas_payment_id,
           rooms ( id, name, tier, image_url, address_details, host_id, profiles (full_name, phone) ),
           reviews ( id, rating )
         `,
@@ -304,6 +310,9 @@ export function BookingsTab({
           last &&
           last.room_id === b.room_id &&
           last.status === b.status &&
+          (last.booking_origin || "marketplace") ===
+            (b.booking_origin || "marketplace") &&
+          Boolean(last.asaas_payment_id) === Boolean(b.asaas_payment_id) &&
           ["confirmed", "in_progress"].includes(b.status)
         ) {
           const lastEnd = new Date(last.end_time).getTime();
@@ -313,6 +322,11 @@ export function BookingsTab({
           if (gapMs >= 0 && gapMs <= 15 * 60 * 1000) {
             last.end_time = b.end_time;
             last.total_cost += b.total_cost;
+            if (last.agreed_value_brl != null || b.agreed_value_brl != null) {
+              last.agreed_value_brl =
+                Number(last.agreed_value_brl || 0) +
+                Number(b.agreed_value_brl || 0);
+            }
             if (!last.original_ids) last.original_ids = [last.id];
             last.original_ids.push(b.id);
             return;
@@ -1036,15 +1050,19 @@ CNPJ: 49.351.127/0001-44
 
   const getPaymentDisplay = (booking: Booking) => {
     const taxaHora = 45;
+    const isTotemUpsell = booking.booking_origin === "totem_30off";
 
-    if (booking.asaas_payment_id) {
+    if (booking.asaas_payment_id || isTotemUpsell) {
+      const agreed = Number(booking.agreed_value_brl || 0);
       const amount =
-        booking.total_cost < 10
-          ? booking.total_cost * taxaHora
-          : booking.total_cost;
+        agreed > 0
+          ? agreed
+          : booking.total_cost < 10
+            ? booking.total_cost * taxaHora
+            : booking.total_cost;
       return {
         value: `R$ ${amount.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`,
-        method: "Cartão / PIX",
+        method: isTotemUpsell ? "PIX no Totem (30% OFF)" : "Cartão / PIX",
         isCredit: false,
         equivalentBrl: null,
       };
@@ -1129,6 +1147,7 @@ CNPJ: 49.351.127/0001-44
 
     const isInProgress = booking.status === "in_progress";
     const isMerged = booking.original_ids && booking.original_ids.length > 1;
+    const isTotemUpsell = booking.booking_origin === "totem_30off";
     const minsRemaining = differenceInMinutes(endObj, now);
 
     return (
@@ -1178,6 +1197,11 @@ CNPJ: 49.351.127/0001-44
               {isWaitingPreviousCheckout && !isInProgress && (
                 <Badge className="bg-amber-100 text-amber-900 border-0 mb-2 font-bold px-2 py-0.5 mr-2">
                   Aguardando check-out anterior
+                </Badge>
+              )}
+              {isTotemUpsell && (
+                <Badge className="bg-orange-100 text-[#BF4B24] border border-orange-200 mb-2 font-bold px-2 py-0.5 mr-2">
+                  Hora extra • Totem 30% OFF
                 </Badge>
               )}
               {isMerged && (
@@ -1366,6 +1390,7 @@ CNPJ: 49.351.127/0001-44
     const statusData = getStatusDisplay(booking.status);
     const paymentData = getPaymentDisplay(booking);
     const isMerged = booking.original_ids && booking.original_ids.length > 1;
+    const isTotemUpsell = booking.booking_origin === "totem_30off";
 
     return (
       <div
@@ -1393,12 +1418,17 @@ CNPJ: 49.351.127/0001-44
               {format(startObj, "dd 'de' MMM", { locale: ptBR })} •{" "}
               {format(startObj, "HH:mm")}
             </p>
-            <div className="flex items-center gap-2 mt-1">
+            <div className="flex flex-wrap items-center gap-2 mt-1">
               <Badge
                 className={`${statusData.color} border-0 shadow-none font-bold text-[9px] px-1.5 py-0 uppercase tracking-widest`}
               >
                 {statusData.label}
               </Badge>
+              {isTotemUpsell && (
+                <Badge className="bg-orange-100 text-[#BF4B24] border border-orange-200 shadow-none font-bold text-[9px] px-1.5 py-0 uppercase tracking-wider">
+                  Totem 30% OFF
+                </Badge>
+              )}
               {isMerged && (
                 <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 rounded-sm">
                   {booking.original_ids?.length}h
@@ -1996,6 +2026,8 @@ CNPJ: 49.351.127/0001-44
               const endObj = parseISO(selectedBooking.end_time);
               const statusData = getStatusDisplay(selectedBooking.status);
               const paymentData = getPaymentDisplay(selectedBooking);
+              const isTotemUpsell =
+                selectedBooking.booking_origin === "totem_30off";
 
               let address: any = {};
               try {
@@ -2039,11 +2071,18 @@ CNPJ: 49.351.127/0001-44
 
                   <div className="flex justify-between items-start">
                     <div>
-                      <Badge
-                        className={`${statusData.color} mb-3 shadow-none border-0 uppercase tracking-widest font-black text-[10px]`}
-                      >
-                        {statusData.label}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-2 mb-3">
+                        <Badge
+                          className={`${statusData.color} shadow-none border-0 uppercase tracking-widest font-black text-[10px]`}
+                        >
+                          {statusData.label}
+                        </Badge>
+                        {isTotemUpsell && (
+                          <Badge className="bg-orange-100 text-[#BF4B24] border border-orange-200 shadow-none uppercase tracking-wider font-black text-[10px]">
+                            Hora extra • Totem 30% OFF
+                          </Badge>
+                        )}
+                      </div>
                       <h2 className="text-2xl sm:text-3xl font-black text-slate-900 leading-tight">
                         {selectedBooking.rooms?.name}
                       </h2>
@@ -2739,3 +2778,4 @@ CNPJ: 49.351.127/0001-44
     </>
   );
 }
+```[cite: 7]
